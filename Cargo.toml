@@ -1,0 +1,43 @@
+# Rust documentation MCP — task [002]: Cargo package bootstrap.
+#
+# Package metadata and the reproducible toolchain/dependency baseline from
+# docs/COMPATIBILITY.md (task [001]). The internal module tree mirrors the
+# layout in plan.md section 8 and is filled in by later milestones.
+
+[package]
+name = "rust-docs-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Local stdio MCP server exposing official Rust documentation to coding agents"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ThiagoEvoa/rust-mcp"
+readme = "README.md"
+
+[[bin]]
+name = "rust-docs-mcp"
+path = "src/main.rs"
+
+[lib]
+name = "rust_docs_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+# Core, always-needed closure only. docs/COMPATIBILITY.md (task [001]) pins
+# rmcp 3.8.0 as the official MCP SDK; the server-side stdio closure is
+# `server` (transport-async-rw + schemars) + `macros` (tool/resource derive) +
+# `client` (in-process SDK test client, tasks [003]/[005]). The heavy
+# transport-streamable-http-* / auth features stay off: they are not needed for a
+# local stdio MVP.
+rmcp = { version = "3.8.0", features = ["server", "macros", "client"] }
+
+# Corpus/tool payloads (task [007]); schemars builds the MCP JSON schemas
+# (task [048]). `serde/derive` mirrors what rmcp's server closure already needs.
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+schemars = "1"
+
+# NOTE: tracing/tracing-subscriber ([004]), clap ([003]), and the ingestion
+# clients reqwest/scraper/html2md ([010]/[013]/[014]) are deferred to their
+# owning tasks per docs/COMPATIBILITY.md section 3 ("not pinned until their task
+# runs"). Do not add them here.
