@@ -291,7 +291,7 @@ Complete these in dependency order. Each milestone should leave a demonstrable r
 
 ### M1 — Bootstrap and confirm compatibility
 
-- [ ] Select released SDK/dependency versions, Rust toolchain, edition, MSRV, and supported protocol versions.
+- [x] Select released SDK/dependency versions, Rust toolchain, edition, MSRV, and supported protocol versions. Recorded in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md): rmcp 3.8.0 / rmcp-macros 3.8.0, edition 2024, MSRV 1.88, stable toolchain; protocol `KNOWN_VERSIONS` (latest 2026-07-28, no `initialize`); first client is the in-process SDK test client, with real-world clients still to test.
 - [ ] Create the Cargo package, CLI skeleton, typed errors, and stderr tracing.
 - [ ] Establish a stdio lifecycle/discovery smoke test using the official SDK client.
 - [ ] Inspect upstream content licenses and define the bundled snapshot attribution policy.

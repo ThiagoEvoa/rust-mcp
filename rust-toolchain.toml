@@ -1,0 +1,13 @@
+# Rust / SDK / protocol compatibility baseline — task [001] M1, issue #1.
+#
+# This pins the *channel* only, matching plan.md §4 ("Use stable Rust").
+# The exact patch version is deliberately NOT hardcoded; it follows whatever
+# stable rustup selects. The full version/matrix record lives in
+# docs/COMPATIBILITY.md, which task [002] consumes when it creates Cargo.toml.
+#
+# Edition 2024 and MSRV 1.88 are recorded in docs/COMPATIBILITY.md and will be
+# enforced via the package's `edition`/`rust-version` fields in task [002]
+# (cargo's MSRV resolver + `rust-version = "1.88"`), not by this file.
+
+[toolchain]
+channel = "stable"
