@@ -1,23 +1,20 @@
 //! `rust-docs-mcp` command-line entry point.
 //!
-//! This is the [002] bootstrap stub. The `serve` / `sync` / `status` subcommands
-//! and their application-data configuration are added by task [003] (CLI and
-//! application-data configuration), and typed errors plus stderr tracing are
-//! added by task [004].
+//! The [003] CLI skeleton: parse `serve` / `sync` / `status` plus an explicit
+//! `--data-dir` override and dispatch to the matching handler. The subcommand
+//! bodies are placeholders at this milestone — real runtime/ingestion wiring
+//! lands in M2/M4 — but the command surface, data-directory resolution, and
+//! error routing are complete.
 //!
-//! Per `plan.md` section 8/section 9 (and the AGENTS "product boundaries" note),
-//! during `serve` **stdout carries only MCP protocol messages** and every
-//! diagnostic goes to **stderr**. This stub honours that from the start.
-//!
-//! The binary deliberately owns no logic and delegates to the internal library,
-//! so the package and its module tree boot together as a unit.
-use rust_docs_mcp::bootstrap_check;
+//! Per `plan.md` §8/§9 (and the AGENTS "product boundaries" note), during
+//! `serve` **stdout carries only MCP protocol messages** and every diagnostic
+//! goes to **stderr**. This binary honours that from the start: it owns no logic
+//! of its own and delegates to the internal library's parsing helpers.
 
-fn main() {
-    // No-op self-check for the [002] bootstrap; task [003] replaces this with the
-    // CLI dispatch.
-    bootstrap_check();
+use rust_docs_mcp::Cli;
 
-    // ASCII diagnostic on stderr only - never stdout.
-    eprintln!("rust-docs-mcp: bootstrap self-check passed");
+fn main() -> std::process::ExitCode {
+    // `from_env` prints an actionable usage/argument message to stderr and exits
+    // non-zero on a parse error ("invalid arguments produce actionable errors").
+    Cli::from_env().run()
 }

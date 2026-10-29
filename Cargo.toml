@@ -36,8 +36,10 @@ rmcp = { version = "3.8.0", features = ["server", "macros", "client"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 schemars = "1"
+clap = { version = "4.6.7", features = ["derive"] }
 
-# NOTE: tracing/tracing-subscriber ([004]), clap ([003]), and the ingestion
-# clients reqwest/scraper/html2md ([010]/[013]/[014]) are deferred to their
-# owning tasks per docs/COMPATIBILITY.md section 3 ("not pinned until their task
-# runs"). Do not add them here.
+# `clap` 4.6 (derive) is the CLI skeleton for task [003]; its MSRV-1.88
+# sub-closure resolved cleanly (see Cargo.lock). The remaining as-needed deps are
+# deferred to their owning tasks per docs/COMPATIBILITY.md section 3: tracing/
+# tracing-subscriber ([004]) and the ingestion clients reqwest/scraper/html2md
+# ([010]/[013]/[014]). Do not add them here.
