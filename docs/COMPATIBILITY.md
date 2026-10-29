@@ -1,7 +1,7 @@
 # Rust / SDK / Protocol Compatibility Baseline
 
 **Task:** [001] M1 — Record the Rust, SDK, and protocol compatibility baseline (issue #1).
-**Status:** Baseline recorded and **review addressed (2026-10-29); re-review pending.** No Cargo package exists yet — this
+**Status:** Baseline recorded; **review round of 2026-10-29 addressed** (SEP-2164 error-code attribution corrected; discovery SEPs added; PR matrix refreshed) — **re-review pending.** No Cargo package exists yet — this
 document is the authoritative record that task [002] consumes when it creates
 `Cargo.toml` / `Cargo.lock` / `rust-toolchain.toml`.
 **Verified:** 2026-10-29, on `rustc`/`cargo` 1.99.1 (stable `aarch64-apple-darwin`),
@@ -132,13 +132,23 @@ custom handshake") — we do **not** hardcode a single version.
 - **`2026-07-28` has no `initialize` handshake.** `ProtocolVersion::has_initialize()`
   is `true` for `2024-11-05` through `2025-11-25` (the whole `Known` list up to
   and including `LATEST_WITH_INITIALIZE = V_2025_11_25`, `2024-11-05` included) and
-  `false` for `2026-07-28` (`NO_INITIALIZE = V_2026_07_28`;
-  client code: *"2026-07-28 has no ping, and a cancelled send could leave a
-  partial frame"*). Newer clients therefore use **discovery** instead of
-  `initialize`.
-- **`2026-07-28` changes error responses:** request `id` is optional/omitted for
-  peers negotiating `2026-07-28` or newer (SEP-2164), and error mapping shifts at
-  that boundary. Task [048] must map errors version-aware.
+  `false` at/after `2026-07-28` (`NO_INITIALIZE = V_2026_07_28`; see `model.rs:218`).
+  Newer clients therefore use **discovery** instead of the `initialize` handshake: the
+  sessionless / per-request `_meta` model is **SEP-2567** (*"Sessionless MCP via Explicit
+  State Handles"*, `model.rs:180,218`), which is complementary to **SEP-2575** (*"Make MCP
+  Stateless"*, per SEP-2567 the one that drops `initialize`); the standard HTTP headers at
+  this boundary are **SEP-2243** (*"HTTP standardization"*, `model.rs:176`).
+  The SDK client observation is verbatim: *"2026-07-28 has no ping, and a cancelled send
+  could leave a partial frame."*
+- **`2026-07-28` changes error responses.** The server upgrades the
+  **resource-not-found error code** from `-32002` to `INVALID_PARAMS` (`-32602`) for
+  peers negotiating `2026-07-28` or newer, per **SEP-2164** (*"Standardize Resource Not
+  Found Error Code"*, Final) — recorded in `rmcp` @ `rmcp-v3.8.0` at `model.rs:682`
+  (the `ResourceNotFound`/`-32002` note). Error mapping therefore shifts at that boundary;
+  Task [048] must map errors version-aware. *(The optional/omitted error-response `id` claim
+  previously attributed here to SEP-2164 was removed as unsupported: SEP-2164 concerns only
+  the error-code upgrade, and `rmcp` v3.8.0 cites no SEP/spec for an omittable error `id`
+  at this boundary.)*
 
 Consequences for our MVP: we must validate **both** a discovery-style client
 (2026-07-28) and an `initialize`-style client (`2024-11-05`…`2025-11-25`, with the
@@ -286,6 +296,15 @@ the raw anonymous crates.io API returns 403 without one):**
   dependencies re-confirmed: `tokio` `features = ["sync","macros","rt","time"]`
   and `reqwest` `0.13.2, default-features = false, features = ["json","stream"]`
   with `reqwest` feature = `reqwest?/rustls`.
+- SEP-citation corrections (2026-10-29, after reviewer findings on this PR): the SEP
+  references in §4 were re-checked by pulling `rmcp` `3.8.0` from crates.io and the MCP
+  SEPs from `seps/`. Confirmed: `model.rs:682` is the SEP-2164 resource-not-found code
+  upgrade (`-32002` → `-32602`/`INVALID_PARAMS`; SEP-2164 *"Standardize Resource Not Found
+  Error Code"*, Final), `model.rs:176` is SEP-2243 standard HTTP headers, and
+  `model.rs:180,218` are SEP-2567 (per-request `_meta` / sessionless; complementary to
+  SEP-2575 *"Make MCP Stateless"*). The earlier "request `id` is optional/omitted …
+  (SEP-2164)" claim in §4 was **removed** as unsupported — no SEP or spec reference in
+  `rmcp` v3.8.0 attributes an omittable error `id` to `2026-07-28`.
 - The spec `/basic` page body is JS-rendered, so the on-page `protocol_version`
   string was not scraped directly; 2026-07-28-as-latest is established via the
   `/specification/latest` redirect (authoritative) plus rmcp's own `LATEST`
