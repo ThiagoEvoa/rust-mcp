@@ -7,6 +7,9 @@
 //!
 //! - [`cli`] — command-line parsing and application-data configuration
 //!   (`[003]`), plus the pure data-directory resolution helpers,
+//! - [`error`] — the project-wide typed error layer (`[004]`),
+//! - [`logging`] — stderr-only, configurable-verbosity diagnostics with the
+//!   query-body gate (`[004]`),
 //! - [`model`] — corpus and tool-contract types (`[007]`-`[008]`),
 //! - [`ingest`] — fetching, extraction, validation, publication (`[010]`-`[028]`),
 //! - [`corpus`] — snapshot loading, IDs, bounded reads (`[029]`-`[030]`),
@@ -23,9 +26,13 @@
 mod cli;
 mod commands;
 mod corpus;
+mod error;
 mod ingest;
+mod logging;
 mod mcp;
 mod model;
 mod search;
 
 pub use cli::{Cli, Command, DataDirError, apply_override, default_data_dir, resolve_data_dir};
+pub use error::{AppError, AppResult};
+pub use logging::{QUERY_TARGET, init_tracing};

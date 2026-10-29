@@ -127,3 +127,37 @@ fn subcommand_runs_keep_stdout_clean() {
         );
     }
 }
+
+/// Task [004] acceptance #2: diagnostics are routed to stderr even when the
+/// caller raises verbosity, so `--verbose` can never push a diagnostic onto
+/// stdout (the MCP-exclusive channel). The flag is global, so it is accepted
+/// before the subcommand.
+#[test]
+fn verbose_stub_keeps_stdout_clean() {
+    let dir = temp_data_dir("verbose-clean-stdout");
+    let args = ["--verbose", "serve", "--data-dir", dir.as_str()];
+    let (code, stdout, stderr) = run(&args);
+    assert_ne!(
+        code, 0,
+        "--verbose stub should still exit non-zero until wired (M2/M4)"
+    );
+    assert!(
+        stdout.is_empty(),
+        "--verbose must not move diagnostics to stdout: {stdout:?}"
+    );
+    assert!(
+        !stderr.trim().is_empty(),
+        "diagnostics must still appear on stderr under --verbose:\n{stderr}"
+    );
+}
+
+/// `--verbose` is advertised by `--help` as a global diagnostics flag.
+#[test]
+fn help_documents_verbose() {
+    let (code, stdout, _stderr) = run(&["--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("--verbose"),
+        "help should document the `--verbose` diagnostics flag:\n{stdout}"
+    );
+}
