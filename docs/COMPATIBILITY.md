@@ -1,13 +1,17 @@
 # Rust / SDK / Protocol Compatibility Baseline
 
 **Task:** [001] M1 — Record the Rust, SDK, and protocol compatibility baseline (issue #1).
-**Status:** Baseline recorded, awaiting review. No Cargo package exists yet — this
+**Status:** Baseline recorded and **review addressed (2026-10-29); re-review pending.** No Cargo package exists yet — this
 document is the authoritative record that task [002] consumes when it creates
 `Cargo.toml` / `Cargo.lock` / `rust-toolchain.toml`.
 **Verified:** 2026-10-29, on `rustc`/`cargo` 1.99.1 (stable `aarch64-apple-darwin`),
 `rustup` 1.29.2. Every version and claim below was checked with the commands
 listed in [Evidence](#8-evidence). Unverifiable items are marked `UNVERIFIED`;
 nothing was guessed.
+**Re-verified after review (2026-10-29):** the `KNOWN_VERSIONS` omission of
+`V_2024_11_05`, the `tokio` `time`/feature-gate detail, the `reqwest`
+`default-features = false` TLS note, and the `scraper` license status were each
+re-checked against `rmcp` @ `rmcp-v3.8.0` (see [Evidence](#8-evidence)).
 
 > Sources of truth used: `plan.md` §4 (core choices) and §10/M1; the MCP
 > specification 2026-07-28 (`/specification/latest` also resolves to
@@ -24,7 +28,7 @@ nothing was guessed.
 | Rust toolchain | **stable** (current `rustc`/`cargo` 1.99.1; `rustup` 1.29.2) | Confirmed |
 | Edition | **2024** | Confirmed — the SDK itself ships as edition 2024 |
 | MSRV | **1.88** (equals the binding floor: `rmcp`/`rmcp-macros` `rust-version`) | Confirmed |
-| Protocol(s) served | `KNOWN_VERSIONS` = `2025-03-26`, `2025-06-18`, `2025-11-25`, **`2026-07-28` (latest)**; SDK negotiates highest common | Confirmed |
+| Protocol(s) served | `KNOWN_VERSIONS` = `2024-11-05` *(oldest)*, `2025-03-26`, `2025-06-18`, `2025-11-25`, **`2026-07-28` (latest)**; SDK negotiates highest common | Confirmed |
 | Spec reference | MCP **2026-07-28** (current latest spec) | Confirmed |
 | First supported client | **rmcp's built-in in-process client / SDK test harness** | Confirmed |
 | Real-world clients | Listed in §7 as **STILL TO TEST** (untested) | To-test |
@@ -66,12 +70,12 @@ via `cargo info` on 2026-10-29. MSRV is each crate's `rust-version`.
 | --- | --- | --- | --- | --- | --- |
 | `rmcp` | `3.8.0` | **3.8.0** | **1.88** | Apache-2.0 | Official MCP Rust SDK — protocol, schema, lifecycle, stdio transport. |
 | `rmcp-macros` | `3.8.0` | **3.8.0** | **1.88** | Apache-2.0 | Tool/schema derive macros; twin version, pulled by `rmcp` `macros`+`server`. |
-| `tokio` | `1` (rmcp uses `1`) | **1.54.1** | 1.85 | MIT | Async runtime; `sync`, `rt`, `macros`, `io-util` (+ `process`/`net` where child/streamable transports are used). |
+| `tokio` | `1` (rmcp uses `1`) | **1.54.1** | 1.85 | MIT | Async runtime; rmcp's **direct** dependency declares `features = ["sync", "macros", "rt", "time"]`. `io-util`/`io-std`/`net`/`process` are enabled **only** through the transport feature gates (`transport-async-rw` → `io-util`/`codec`, `transport-io` → `io-std`/`net`, `process-wrap` → `process`), not the base dependency. |
 | `serde` | `1` | **1.0.229** | 1.56 | MIT OR Apache-2.0 | Corpus + tool payloads; `derive` + `rc` (rmcp requires these). |
 | `serde_json` | `1` | **1.0.154** | 1.71 | MIT OR Apache-2.0 | JSON (de)serialization and MCP message payloads. |
 | `schemars` | `1` (rmcp floor `1.0`; `chrono04` feature for the `server` feature) | **1.2.3** | 1.74 | MIT | **SDK-compatible JSON-Schema crate.** The `rmcp` `server` feature enables `dep:schemars`; tool/resource schemas are built with it. Major must be `1.x`. |
-| `reqwest` | `0.13` (rmcp floor `0.13.2`, `default-features=false`, `json`+`stream`) | **0.13.5** | **1.85** | MIT OR Apache-2.0 | Bounded HTTP client for the `sync` ingestion path. Default TLS is **rustls** (`default-tls = [rustls]`) — no system TLS dependency, offline-friendly. `http2`+`system-proxy` default on. |
-| `scraper` | `0.29` | **0.29.0** | **UNVERIFIED** — `rust-version` not declared on the crate | **ISC** (as declared on crates.io) | HTML parser for `books.rs` article extraction. Exact license/spdx is unresolved from the API → fold into the task [006] license audit. Must be validated to build on MSRV 1.88 in task [002]. |
+| `reqwest` | `0.13` (rmcp floor `0.13.2`, `default-features=false`, `json`+`stream`) | **0.13.5** | **1.85** | MIT OR Apache-2.0 | Bounded HTTP client for the `sync` ingestion path. TLS is **rustls**: rmcp sets `default-features = false` (so reqwest's own defaults — `default-tls`, `charset`, `http2`, `system-proxy` — are all **off**) and re-enables `reqwest?/rustls` via the `reqwest` feature. No system TLS dependency; offline-friendly. `http2`/`system-proxy` are **not** active in rmcp's usage. |
+| `scraper` | `0.29` | **0.29.0** | **UNVERIFIED** — `rust-version` not declared on the crate | **ISC** (crates.io; task [006]) | HTML parser for `books.rs` article extraction. crates.io authoritatively declares the license **`ISC`** (`cargo info scraper`, 2026-10-29), so task [006] may record it confidently; the repo's `LICENSE` SPDX id is still unresolved via the GitHub API and remains part of the audit. Must be validated to build on MSRV 1.88 in task [002]. |
 
 **As-needed (declared now; not pinned until their task runs):**
 `thiserror` `2` (typed errors; already a direct rmcp dep), `tracing`/`tracing-subscriber`
@@ -104,12 +108,18 @@ aligns with `rmcp`'s `LATEST`.
 **What the chosen SDK supports** (`rmcp` `3.8.0`, `src/model.rs`):
 
 ```text
+ProtocolVersion::V_2024_11_05 = "2024-11-05"   // oldest; still has an `initialize` handshake
 ProtocolVersion::V_2025_03_26 = "2025-03-26"
 ProtocolVersion::V_2025_06_18 = "2025-06-18"
 ProtocolVersion::V_2025_11_25 = "2025-11-25"
 ProtocolVersion::V_2026_07_28 = "2026-07-28"   // = LATEST, = STANDARD_HEADERS, = NO_INITIALIZE
-ProtocolVersion::KNOWN_VERSIONS = [ V_2025_03_26, V_2025_06_18, V_2025_11_25, V_2026_07_28 ]
+ProtocolVersion::KNOWN_VERSIONS = [ V_2024_11_05, V_2025_03_26, V_2025_06_18, V_2025_11_25, V_2026_07_28 ]  // 5 elements
 ```
+
+`KNOWN_VERSIONS` has **5** elements (`2024-11-05` is the oldest, `2026-07-28` the
+latest). The server must advertise the full list; omitting `2024-11-05` would
+make a client negotiating that version fail to connect. `2024-11-05` still has an
+`initialize` handshake because it sits below `NO_INITIALIZE`.
 
 **What the server will negotiate:** the SDK's default
 `Service::supported_protocol_versions()` returns the **full `KNOWN_VERSIONS`**
@@ -120,8 +130,9 @@ custom handshake") — we do **not** hardcode a single version.
 
 **Critical behavior to carry into testing (task [003]/[057]/[058]):**
 - **`2026-07-28` has no `initialize` handshake.** `ProtocolVersion::has_initialize()`
-  is `true` for `2025-11-25` and below and `false` for `2026-07-28`
-  (`LATEST_WITH_INITIALIZE = V_2025_11_25`; `NO_INITIALIZE = V_2026_07_28`;
+  is `true` for `2024-11-05` through `2025-11-25` (the whole `Known` list up to
+  and including `LATEST_WITH_INITIALIZE = V_2025_11_25`, `2024-11-05` included) and
+  `false` for `2026-07-28` (`NO_INITIALIZE = V_2026_07_28`;
   client code: *"2026-07-28 has no ping, and a cancelled send could leave a
   partial frame"*). Newer clients therefore use **discovery** instead of
   `initialize`.
@@ -130,8 +141,8 @@ custom handshake") — we do **not** hardcode a single version.
   that boundary. Task [048] must map errors version-aware.
 
 Consequences for our MVP: we must validate **both** a discovery-style client
-(2026-07-28) and an `initialize`-style client (≤ 2025-11-25), and error-mapping
-must branch on the negotiated version.
+(2026-07-28) and an `initialize`-style client (`2024-11-05`…`2025-11-25`, with the
+`2024-11-05` floor), and error-mapping must branch on the negotiated version.
 
 ---
 
@@ -169,8 +180,8 @@ client config). Candidates for the first external client:
 2. **A third-party agent/client that launches an MCP server over stdio** (e.g.
    a general-purpose coding agent with an MCP client, or the MCP reference
    client). The negotiated version may be an `initialize`-style one
-   (≤ 2025-11-25) *or* a 2026-07-28 discovery one — must be measured, not
-   assumed. *Status: STILL TO TEST.*
+   (`2024-11-05`…`2025-11-25`, with `2024-11-05` the floor) *or* a 2026-07-28
+   discovery one — must be measured, not assumed. *Status: STILL TO TEST.*
 3. **A second, independent runtime client** (a non-rmcp MCP implementation, e.g.
    TypeScript/Python-based) to catch any rmcp-specific assumptions.
    *Status: STILL TO TEST.*
@@ -202,11 +213,12 @@ upstream examples** (headings, anchors, lists, tables, fenced Rust code,
    binding floor (`rmcp`/`rmcp-macros` `rust-version`); nothing in the set forces
    higher, and it is a real stable toolchain.
 3. **Edition 2024 is safe** because the SDK itself is edition 2024 / MSRV 1.88.
-4. **Server advertises all `KNOWN_VERSIONS` and negotiates** — we do not invent a
-   handshake. This means tests must cover both `initialize` (≤ 2025-11-25) and
-   discovery (2026-07-28) paths.
-5. **Default HTTP client TLS = rustls** (reqwest default), chosen so `sync` has
-   no system-TLS coupling and the default build stays reproducible.
+4. **Server advertises all `KNOWN_VERSIONS` (5 elements, `2024-11-05` … `2026-07-28`) and negotiates** — we do not invent a
+   handshake. This means tests must cover both `initialize` (`2024-11-05` … `2025-11-25`)
+   and discovery (`2026-07-28`) paths.
+5. **Default HTTP client TLS = rustls** — rmcp sets `default-features = false` and
+   re-enables `reqwest?/rustls` (disabling reqwest's own `http2`/`system-proxy`/`charset` defaults),
+   so `sync` has no system-TLS coupling and the default build stays reproducible.
 6. **`scraper` MSRV is undeclared** — carried as a risk into task [002]
    (build-time check); license exactness carried into task [006] audit. These are
    the two explicit "unknown" items; everything else is confirmed.
@@ -261,9 +273,19 @@ the raw anonymous crates.io API returns 403 without one):**
 **Unverified / unknown (honest limits):**
 - `scraper` `rust-version` is **not declared** on the crate → MSRV UNVERIFIED;
   build-time check owed to task [002].
-- `scraper` license shows **ISC** on crates.io but the repo's `LICENSE` SPDX id
-  could not be resolved via the GitHub API → exact license terms owed to the
-  task [006] upstream license audit.
+- `scraper` license: crates.io authoritatively declares **`ISC`** (confirmed via
+  `cargo info scraper`, 2026-10-29), so task [006] may record it as `ISC`
+  confidently. The repo's `LICENSE` SPDX id is **still unresolved** via the GitHub
+  API — `GET /repos/rust-scraper/scraper/license` returns `spdx_id: null`
+  (2026-10-29) — so that specific audit item remains owed, but the crates.io
+  SPDX id is not.
+- `KNOWN_VERSIONS` was re-verified against `crates/rmcp/src/model.rs` @
+  `rmcp-v3.8.0` (2026-10-29): it has **5** elements incl. `V_2024_11_05 = "2024-11-05"`
+  (lines 202–208); `has_initialize()` is `true` for `2024-11-05…2025-11-25` and
+  `false` from `NO_INITIALIZE = V_2026_07_28` (line 228–229). rmcp's direct
+  dependencies re-confirmed: `tokio` `features = ["sync","macros","rt","time"]`
+  and `reqwest` `0.13.2, default-features = false, features = ["json","stream"]`
+  with `reqwest` feature = `reqwest?/rustls`.
 - The spec `/basic` page body is JS-rendered, so the on-page `protocol_version`
   string was not scraped directly; 2026-07-28-as-latest is established via the
   `/specification/latest` redirect (authoritative) plus rmcp's own `LATEST`
