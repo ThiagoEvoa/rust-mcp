@@ -160,11 +160,12 @@ pub fn serve() -> AppResult<ExitCode> {
     run_runtime(serve_stdio())
 }
 
-/// Build the single-threaded-block-on async runtime and await `future`.
+/// Build a multi-threaded async runtime and block on `future` to completion.
 ///
-/// Shared by the `serve` CLI dispatch and the spawned-binary test path so the
-/// runtime is constructed identically. A construction failure is a startup
-/// failure, not a panic.
+/// Used on the `serve` CLI dispatch path ([`serve`](crate::mcp::serve) →
+/// `main`) so the skeleton runtime is constructed in exactly one place. A
+/// construction failure is a startup failure, not a panic — it is mapped to
+/// [`AppError::Io`](crate::error::AppError::Io) for the CLI boundary.
 fn run_runtime<F>(future: F) -> AppResult<ExitCode>
 where
     F: std::future::Future<Output = AppResult<()>>,
@@ -179,15 +180,6 @@ where
     Ok(ExitCode::SUCCESS)
 }
 
-// ---------------------------------------------------------------------------
-// In-process lifecycle tests. These use the *official rmcp client* against the
-// same `DocsServer` over an in-memory `tokio::io::duplex` pipe, proving (for
-// every SDK-known, `initialize`-capable protocol version) that discovery /
-// initialization negotiates the client's requested version and that a clean
-// disconnect ends the runtime — without spawning a process, so the checks are
-// fast and hermetic. The spawned-binary test in `tests/stdio_lifecycle.rs`
-// proves the connect/disconnect and "no orphaned processes" behaviour over the
-// real stdio streams.
 // ---------------------------------------------------------------------------
 // Tests.
 //

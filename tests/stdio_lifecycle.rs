@@ -60,7 +60,12 @@ fn fresh_data_dir() -> std::path::PathBuf {
 /// the two acceptance criteria. See the module docs for the reasoning.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_negotiates_each_known_version_and_disconnects_cleanly() {
-    for protocol_version in ["2024-11-05", "2025-03-26", "2025-06-18"] {
+    // `LATEST_WITH_INITIALIZE` is `2025-11-25`; the SDK's `KNOWN_VERSIONS` lists
+    // five entries but `2026-07-28` (`NO_INITIALIZE`) dropped the `initialize`
+    // handshake (SEP-2567), so these four are *all* the `initialize`-capable
+    // versions. Exercising every one keeps the test coverage in lockstep with
+    // the module docs' "each known, `initialize`-capable version" claim.
+    for protocol_version in ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"] {
         serve_negotiates_version_and_disconnects_cleanly(protocol_version).await;
     }
 }
