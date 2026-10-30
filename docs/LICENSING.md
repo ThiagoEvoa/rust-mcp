@@ -60,10 +60,10 @@ so they are recorded as *where the content originates*, not hard-coded.
 |---|---|---|---|---|---|
 | 1 | `api-guidelines` | https://rust-lang.github.io/api-guidelines/about.html + `/checklist.html` + chapters | `rust-lang/api-guidelines` (`master`) | **MIT OR Apache-2.0** | `Copyright (c) 2017 The Rust Project Developers` |
 | 2 | `style-guide` | https://doc.rust-lang.org/style-guide/index.html + book nav | `rust-lang/rust`, `src/doc/style-guide/` (`master`) | **MIT OR Apache-2.0** | `Copyright (c) The Rust Project Contributors` |
-| 3 | `cargo` | https://doc.rust-lang.org/cargo/ (+ `/commands/index.html`) | `rust-lang/cargo` (`master`; MDBook `book/`) | **MIT OR Apache-2.0** | `Copyright (c) The Rust Project Contributors` |
+| 3 | `cargo` | https://doc.rust-lang.org/cargo/ (+ `/commands/index.html`) | `rust-lang/cargo` (`master`; MDBook `book/`) | **MIT OR Apache-2.0** | — no in-file copyright line in `LICENSE-MIT`/`LICENSE-APACHE`; attributed to *The Rust Project* |
 | 4 | `rustc` | https://doc.rust-lang.org/rustc/ | `rust-lang/rust`, `src/doc/rustc` (`master`) | **MIT OR Apache-2.0** | `Copyright (c) The Rust Project Contributors` |
-| 5 | `rustup` | https://rust-lang.github.io/rustup/ | `rust-lang/rustup` (`main`) | **MIT OR Apache-2.0** | `Copyright (c) The Rust Project Contributors` |
-| 6 | `rustfmt` | https://github.com/rust-lang/rustfmt#readme + Configurations (commit-pinned `README.md`, `Configurations.md` under `raw.githubusercontent.com`) | `rust-lang/rustfmt` (`main`) | **MIT OR Apache-2.0** | `Copyright (c) The Rust Project Contributors` |
+| 5 | `rustup` | https://rust-lang.github.io/rustup/ | `rust-lang/rustup` (`main`) | **MIT OR Apache-2.0** | `Copyright (c) 2016 The Rust Project Developers` |
+| 6 | `rustfmt` | https://github.com/rust-lang/rustfmt#readme + Configurations (commit-pinned `README.md`, `Configurations.md` under `raw.githubusercontent.com`) | `rust-lang/rustfmt` (`main`) | **MIT OR Apache-2.0** | `Copyright (c) 2016-2021 The Rust Project Developers` |
 | 7 | `clippy` | https://doc.rust-lang.org/clippy/ + catalog https://clippy.rust-lang.org/stable/index.html | `rust-lang/rust-clippy` (`main`; `clippy_lints/src`, lint catalog generated from it) | **MIT OR Apache-2.0** | `Copyright (c) The Rust Project Contributors` |
 | 8 | `rustdoc` | https://doc.rust-lang.org/rustdoc/ | `rust-lang/rust`, `src/doc/rustdoc` (`master`) | **MIT OR Apache-2.0** | `Copyright (c) The Rust Project Contributors` |
 
@@ -99,7 +99,7 @@ because Apache-2.0 is a superset of the MIT obligations here. Under that choice:
 | Obligation | Source | Action for the bundle |
 |---|---|---|
 | Retain the license text | Apache-2.0 §4(c); MIT "accompany" clause | Ship the full `LICENSE-APACHE` text (and `LICENSE-MIT` for completeness) in the distribution. The project's own source uses these two files. |
-| Preserve copyright/copyright-holder attributions | MIT second paragraph; Apache-2.0 §4(b) | Record `The Rust Project Contributors` and `The Rust Project Developers (api-guidelines, since 2017)` in `THIRD_PARTY_NOTICES.md`, with per-source repo + revision ([template §below](#8-notice-template-for-third_party_noticesmd)). |
+| Preserve copyright/copyright-holder attributions | MIT second paragraph; Apache-2.0 §4(b) | Record the per-source copyright holders in `THIRD_PARTY_NOTICES.md`, with per-source repo + revision ([template §below](#8-notice-template-for-third_party_noticesmd)). Two holders appear: **`The Rust Project Contributors`** (`style-guide`, `rustc`, `rustdoc`, `clippy`) and **`The Rust Project Developers`**, split by source — `api-guidelines` (since 2017), `rustfmt` (2016-2021), `rustup` (2016); `cargo`'s `LICENSE-MIT`/`LICENSE-APACHE` carry no in-file copyright line, so it is attributed to *The Rust Project* (see §2). |
 | Preserve a `NOTICE` | Apache-2.0 §4(b) | N/A — no upstream ships a `NOTICE`; we author our own `THIRD_PARTY_NOTICES.md` instead of propagating one. Any *future* upstream `NOTICE` is added to it. |
 | State that changes were made (if any) | Apache-2.0 §4(b) | We **transcribe and lightly reformat** prose/Markdown, not modify the upstream code; where extraction changes formatting (e.g. HTML→Markdown), mark the change. No semantic edits to upstream text are permitted, per `plan.md` §5 ("Preserve original source wording…"). |
 | Provide attribution per document | MIT/Apache | Each `Section` records its canonical upstream URL and source ID (`plan.md` §5 data model); each `Source` records the upstream revision. `list_sources` and tool outputs surface `snapshot_id`, `source_id`, canonical URL, and freshness, satisfying runtime attribution. |
@@ -227,7 +227,7 @@ for r in cargo rust rustfmt rust-clippy rustup api-guidelines; do
         "https://raw.githubusercontent.com/rust-lang/$r/$b/$f"; done
   done
 done
-# -> LICENSE-MIT/LICENSE-APACHE HTTP 200 for cargo(master), rust(main),
+# -> LICENSE-MIT/LICENSE-APACHE HTTP 200 for cargo(master), rust(master),
 #    rustfmt(main), rust-clippy(main), rustup(main), api-guidelines(master).
 
 # GitHub API confirms the primary license of each repo
@@ -297,7 +297,7 @@ Reproduce the full license text of each named license in the distribution.
      Repository : https://github.com/rust-lang/cargo
      Rendered   : https://doc.rust-lang.org/cargo/
      Revision   : {rev}
-     Copyright  : Copyright (c) The Rust Project Contributors
+     Copyright  : The Rust Project (no in-file copyright line in LICENSE-MIT/LICENSE-APACHE; see docs/LICENSING.md §2)
      License    : Apache-2.0 OR MIT
   4. The rustc Book
      Repository : https://github.com/rust-lang/rust/tree/HEAD/src/doc/rustc
@@ -309,14 +309,14 @@ Reproduce the full license text of each named license in the distribution.
      Repository : https://github.com/rust-lang/rustup
      Rendered   : https://rust-lang.github.io/rustup/
      Revision   : {rev}
-     Copyright  : Copyright (c) The Rust Project Contributors
+     Copyright  : Copyright (c) 2016 The Rust Project Developers
      License    : Apache-2.0 OR MIT
   6. rustfmt usage & configuration
      Repository : https://github.com/rust-lang/rustfmt (README.md, Configurations.md)
      Rendered   : https://github.com/rust-lang/rustfmt#readme ;
                   https://rust-lang.github.io/rustfmt/
      Revision   : {commit}  (commit-pinned raw.githubusercontent.com)
-     Copyright  : Copyright (c) The Rust Project Contributors
+     Copyright  : Copyright (c) 2016-2021 The Rust Project Developers
      License    : Apache-2.0 OR MIT
   7. Clippy documentation & stable lint catalog
      Repository : https://github.com/rust-lang/rust-clippy
