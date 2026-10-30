@@ -29,7 +29,16 @@ path = "src/lib.rs"
 # `client` (in-process SDK test client, tasks [003]/[005]). The heavy
 # transport-streamable-http-* / auth features stay off: they are not needed for a
 # local stdio MVP.
-rmcp = { version = "3.8.0", features = ["server", "macros", "client"] }
+rmcp = {
+    version = "3.8.0",
+    features = ["server", "macros", "client", "transport-io"],
+}
+
+# `transport-io` (the MCP stdio transport task [005] runs the skeleton on) is
+# *not* in rmcp's default feature set, so we opt in explicitly. It brings
+# `tokio` + the async-rw codec closure transitively. The heavy HTTP/SSE/auth
+# transports stay off: a local stdio MVP never uses them. `client` adds the
+# in-process SDK client used by the lifecycle tests.
 
 # Corpus/tool payloads (task [007]); schemars builds the MCP JSON schemas
 # (task [048]). `serde/derive` mirrors what rmcp's server closure already needs.
@@ -52,3 +61,22 @@ clap = { version = "4.6.7", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Tokio async runtime for task [005]: the `serve` command runs the official rmcp
+# MCP server over stdio, and the stdio lifecycle smoke test ([005]) exercises it
+# with the SDK's own client. `rmcp` already pulls tokio in *indirectly*, but its
+# default feature set does not expose `process` (needed to spawn the binary in
+# the spawned-test path) or `#[tokio::test]` macros; declaring tokio directly
+# opts those in without altering the pinned rmcp closure. Features kept to the
+# runtime/reactor/process surface only -- no network, preserving the plan's
+# offline posture. `rmcp`'s async closure is already a tokio runtime, so this
+# adds no second async runtime.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "io-std",
+    "io-util",
+    "sync",
+    "process",
+] }

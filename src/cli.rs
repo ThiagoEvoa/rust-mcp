@@ -85,7 +85,8 @@ pub struct Cli {
 pub enum Command {
     /// Launch the stdio MCP server against the selected immutable snapshot.
     ///
-    /// (Runtime wiring lands in M2/M4; task [003] parses and dispatches only.)
+    /// Task [005] wires this to the real M1 skeleton runtime ([`crate::mcp::serve`]);
+    /// the catalog/section resources and the five tools land in M4 ([048]-[059]).
     Serve,
 
     /// Refresh the documentation corpus from the official sources.
@@ -124,50 +125,52 @@ impl Cli {
     /// Dispatch to the selected subcommand.
     ///
     /// Resolves the data directory first (so an unavailable default is reported
-    /// through the typed error layer before any subcommand work), then runs the
-    /// matching placeholder. Returns the process [`ExitCode`]; on a startup
+    /// through the typed error layer before any subcommand work, for *every*
+    /// subcommand including `serve`), then dispatches. `serve` now runs the real
+    /// M1 stdio runtime; `sync`/`status` remain labelled placeholders whose
+    /// bodies land in M2/M4. Returns the process [`ExitCode`]; on a startup
     /// failure this yields an [`AppError`] so the caller ([`main`]) can turn it
-    /// into a non-zero exit *without ever panicking* on external input. The stub
-    /// subcommands route their diagnostics through the stderr-only tracer and
-    /// still exit non-zero because real behaviour is not wired yet — this keeps
-    /// the "no apparently healthy empty server" invariant from `plan.md` §5
-    /// intact while proving the typed-error + stderr path for this task.
+    /// into a non-zero exit *without ever panicking* on external input.
     pub fn run(self) -> AppResult<ExitCode> {
         // `DataDirError` folds into `AppError` via `From`, so `?` gives a typed
-        // context-carrying failure instead of a bare unwrap.
+        // context-carrying failure instead of a bare unwrap. M1 does not read the
+        // corpus, but resolving first preserves [003]'s "an unavailable default is
+        // a typed error before a command runs" contract and keeps the CLI's
+        // data-dir handling uniform across subcommands.
         let data_dir = self.resolve_data_dir()?;
 
-        // Each subcommand is a labelled placeholder (its real behaviour lands in
-        // M2/M4). We *emit* the diagnostic through the stderr-only tracer rather
-        // than `eprintln!` so diagnostics flow through the gated subscriber and
-        // stdout stays MCP-exclusive (plan.md §8/§9 / task [004]).
-        let message = match self.command {
-            Command::Serve => format!(
-                "serve: the stdio MCP runtime is not wired yet (tasks [003]/[004] wire \
-                 the CLI and diagnostics; the runtime lands in M2/M4). Data directory: \
-                 {data_dir:?}",
-            ),
-            Command::Sync => format!(
-                "sync: bounded network ingestion is not wired yet (ingestion lands in \
-                 M2). Data directory: {data_dir:?}",
-            ),
-            Command::Status => format!(
-                "status: snapshot reporting is not wired yet (reporting lands in \
-                 M2/M4). Data directory: {data_dir:?}",
-            ),
-        };
+        match &self.command {
+            // `serve` is wired to the real (M1 skeleton) stdio runtime. Any
+            // startup/transport failure is surfaced as a typed `AppError` *here*
+            // so `main` turns it into a non-zero exit and an stderr diagnostic —
+            // never query text on stdout.
+            Command::Serve => crate::mcp::serve(),
 
-        tracing::warn!("rust-docs-mcp: {message}");
-        // NOTE (M1): this stub diagnostic routes through the *global* subscriber
-        // that `init_tracing` installed via `try_init()`. If a global subscriber
-        // were already set, that second `try_init()` no-ops silently, so this
-        // `warn!` would be swallowed rather than printed. Harmless at M1 — the
-        // stub still exits non-zero and nothing else emits — but when M2/M4
-        // replace the stub, emit diagnostics through a subscriber the caller owns
-        // rather than relying on the first-install-wins `try_init()`.
-        // Non-zero: the work is deliberately not implemented, so we must not
-        // present a clean exit as if the command had run successfully.
-        Ok(ExitCode::FAILURE)
+            // `sync` and `status` are still [003] placeholders whose bodies land in
+            // M2/M4. We *emit* the diagnostic through the stderr-only tracer rather
+            // than `eprintln!` so diagnostics flow through the gated subscriber and
+            // stdout stays MCP-exclusive (plan.md §8/§9 / task [004]).
+            Command::Sync | Command::Status => {
+                // `data_dir` is resolved for every command (above) so the uniform
+                // path contract holds, even though M1's `serve` doesn't read corpus
+                // contents yet; it's shown here so the diagnostic is concrete.
+                let message = match &self.command {
+                    Command::Serve => unreachable!("`serve` is handled above"),
+                    Command::Sync => format!(
+                        "sync: bounded network ingestion is not wired yet (ingestion lands \
+                         in M2). Data directory: {data_dir:?}.",
+                    ),
+                    Command::Status => format!(
+                        "status: snapshot reporting is not wired yet (reporting lands in \
+                         M2/M4). Data directory: {data_dir:?}.",
+                    ),
+                };
+                tracing::warn!("rust-docs-mcp: {message}");
+                // Non-zero: the work is deliberately not implemented, so we must
+                // not present a clean exit as if the command had run successfully.
+                Ok(ExitCode::FAILURE)
+            }
+        }
     }
 }
 
