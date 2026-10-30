@@ -158,6 +158,13 @@ impl Cli {
         };
 
         tracing::warn!("rust-docs-mcp: {message}");
+        // NOTE (M1): this stub diagnostic routes through the *global* subscriber
+        // that `init_tracing` installed via `try_init()`. If a global subscriber
+        // were already set, that second `try_init()` no-ops silently, so this
+        // `warn!` would be swallowed rather than printed. Harmless at M1 — the
+        // stub still exits non-zero and nothing else emits — but when M2/M4
+        // replace the stub, emit diagnostics through a subscriber the caller owns
+        // rather than relying on the first-install-wins `try_init()`.
         // Non-zero: the work is deliberately not implemented, so we must not
         // present a clean exit as if the command had run successfully.
         Ok(ExitCode::FAILURE)

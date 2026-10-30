@@ -49,9 +49,19 @@ pub enum AppError {
     ///
     /// The runtime itself is wired in a later milestone (M4); the variant exists
     /// now so that *any* future start failure surfaces as an actionable message
-    /// rather than an unwrap/panic on external input.
-    #[error("mcp runtime failed to start: {0}")]
-    RuntimeStart(String),
+    /// rather than an unwrap/panic on external input. It carries the typed cause
+    /// in `source` so the failure's full chain survives `AppError::source()` once
+    /// M4 wires it — a bare `String` would flatten any cause into text and lose
+    /// that chain, unlike the `Io` variant. Build it with
+    /// [`AppError::runtime_start`].
+    #[error("mcp runtime failed to start: {message}")]
+    RuntimeStart {
+        /// Short, human description of the start failure.
+        message: String,
+        /// The underlying cause, when known, so the source chain is preserved.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 }
 
 /// The crate's fallible-operation result type.
@@ -65,6 +75,24 @@ impl AppError {
     pub fn io<S: Into<String>>(context: S, source: io::Error) -> Self {
         Self::Io {
             context: context.into(),
+            source,
+        }
+    }
+
+    /// Build an [`AppError::RuntimeStart`], optionally carrying a typed cause.
+    ///
+    /// The `source` is preserved through `AppError::source()` so M4 can attach a
+    /// concrete start failure (a transport/runtime error) without flattening it
+    /// into text — matching the `Io` variant's "preserve the cause" discipline.
+    /// Pass `None` when no cause is available. The cause is boxed so callers
+    /// supply a concrete `Box::new(err)` (e.g. a transport error) without
+    /// `runtime_start` having to be generic over the cause type.
+    pub fn runtime_start(
+        message: impl Into<String>,
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        Self::RuntimeStart {
+            message: message.into(),
             source,
         }
     }
@@ -142,10 +170,25 @@ mod tests {
 
     #[test]
     fn runtime_start_failure_is_actionable() {
-        let app = AppError::RuntimeStart("stdio transport unavailable".into());
+        let app = AppError::runtime_start("stdio transport unavailable", None);
         assert!(
             app.to_string().contains("stdio transport unavailable"),
             "the start cause must be reported: {app}"
         );
+    }
+
+    #[test]
+    fn runtime_start_preserves_the_source_chain() {
+        // Unlike a bare `String`, the typed cause must survive `source()` so M4
+        // can report the whole chain — the discipline the `Io` variant already
+        // pins. No construct path flattens the cause into text on the way in.
+        let cause = io::Error::other("transport down");
+        let app = AppError::runtime_start("stdio transport unavailable", Some(Box::new(cause)));
+        assert!(app.to_string().contains("stdio transport unavailable"));
+        let source = app
+            .source()
+            .and_then(|s| s.downcast_ref::<io::Error>())
+            .expect("RuntimeStart must carry its cause via source()");
+        assert_eq!(source.kind(), io::ErrorKind::Other);
     }
 }

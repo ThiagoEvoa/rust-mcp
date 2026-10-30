@@ -50,7 +50,7 @@ fn log_query_bodies() -> bool {
 /// The default gate decision: ordinary diagnostics pass, query-body events are
 /// held back unless [`LOG_QUERY_BODIES`] is set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Decision {
+pub(crate) enum Decision {
     /// Emitted to stderr (ordinary diagnostics).
     Allow,
     /// Held back by default (a query-body event).
@@ -59,7 +59,12 @@ pub enum Decision {
 
 /// The default-gate decision for one target, reading the live
 /// [`LOG_QUERY_BODIES`] switch.
-pub fn decision(target: &str) -> Decision {
+///
+/// `pub(crate)` (not `pub`): the gate decision is an internal policy, not a
+/// public API. Only [`init_tracing`] and [`QUERY_TARGET`] are re-exported from
+/// the crate root, so the hermetic cores and the public entry point share one
+/// crate-visible surface.
+pub(crate) fn decision(target: &str) -> Decision {
     decision_for(target, log_query_bodies())
 }
 
@@ -107,7 +112,11 @@ fn parse_query_bodies(value: &str) -> bool {
 /// over any base directive for the same target. This is what makes the gate
 /// enforceable: a space-joined base string is exactly what made the original
 /// gate a silent no-op (see `filter_enforces_query_body_gate_off_by_default`).
-pub fn filter_for(verbose: bool) -> EnvFilter {
+///
+/// `pub(crate)` (not `pub`): the filter is an internal wiring detail; the public
+/// surface the crate exposes is only [`init_tracing`] (which calls this) and
+/// [`QUERY_TARGET`].
+pub(crate) fn filter_for(verbose: bool) -> EnvFilter {
     // The live opt-in flows through the public gate. `decision(QUERY_TARGET)`
     // is `true` exactly when query-body events may emit, so this is the same
     // value as `log_query_bodies()`, routed through the named gate so the public
@@ -133,6 +142,13 @@ pub(crate) fn filter_for_with(verbose: bool, query_bodies: bool) -> EnvFilter {
 /// `rust_log` is the raw `RUST_LOG` value when the variable is present. The gate
 /// level follows the unit-tested [`decision_for`] policy (off unless the
 /// explicit opt-in is on).
+///
+/// Deliberate asymmetry: the opt-in branch caps query bodies at `info` *even
+/// under `--verbose`*. Verbose operation widens the base level for ordinary
+/// diagnostics only; caller-supplied payload text stays bounded at `info` (never
+/// `debug`/`trace`) so `--verbose` can never re-expose query text on its own. This
+/// keeps the `plan.md` §9 invariant — query text is not logged by default, and
+/// verbosity must not re-expose it — pinned rather than left to chance.
 pub(crate) fn filter_for_with_rust_log(
     verbose: bool,
     query_bodies: bool,
@@ -158,6 +174,10 @@ pub(crate) fn filter_for_with_rust_log(
     // (`rust_docs_mcp::query={off|info}`), so parsing cannot fail; the `expect`
     // documents that invariant, and `filter_composes_query_off_with_level`
     // exercises the both-branch parse.
+    //
+    // The opt-in is capped at `info` deliberately: even with `--verbose` the
+    // base widens to `debug` but the query target never does, so verbosity can
+    // not re-expose caller-supplied payload text. See the doc on this function.
     let query_level = match decision_for(QUERY_TARGET, query_bodies) {
         Decision::Suppress => "off",
         Decision::Allow => "info",
