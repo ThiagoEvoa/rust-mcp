@@ -1,0 +1,103 @@
+name: Rust validation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Default-logging tests must not inherit a runner's log-level override.
+  RUST_LOG: ""
+
+jobs:
+  stable:
+    name: Rust stable
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install stable Rust with quality tools
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Record toolchain and configuration
+        run: |
+          rustup show active-toolchain
+          rustc -Vv
+          cargo -V
+          cargo tree --locked -e features
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check all targets
+        run: cargo check --workspace --all-targets --locked
+      - name: Check Clippy warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run unit and integration tests
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo test --workspace --locked
+      - name: Run documentation tests
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo test --doc --locked
+
+  msrv:
+    name: Rust MSRV
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install the declared minimum Rust version
+        run: |
+          msrv="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["rust-version"])')"
+          rustup toolchain install "$msrv" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$msrv" >> "$GITHUB_ENV"
+      - name: Record toolchain and configuration
+        run: |
+          rustup show active-toolchain
+          rustc -Vv
+          cargo -V
+          cargo tree --locked -e features
+      - name: Check all targets on MSRV
+        run: cargo check --workspace --all-targets --locked
+      - name: Run unit and integration tests on MSRV
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo test --workspace --locked
+      - name: Run documentation tests on MSRV
+        env:
+          CARGO_NET_OFFLINE: "true"
+        run: cargo test --doc --locked
+
+  validation:
+    # Keep this name stable: branch rules require this aggregate check.
+    name: PR validation
+    if: ${{ always() }}
+    needs: [stable, msrv]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every validation job to succeed
+        env:
+          STABLE_RESULT: ${{ needs.stable.result }}
+          MSRV_RESULT: ${{ needs.msrv.result }}
+        run: |
+          printf 'Rust stable: %s\nRust MSRV: %s\n' "$STABLE_RESULT" "$MSRV_RESULT"
+          test "$STABLE_RESULT" = success
+          test "$MSRV_RESULT" = success

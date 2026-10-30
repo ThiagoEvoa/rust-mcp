@@ -373,6 +373,8 @@ cargo test --doc --locked
 
 Run the agreed feature configuration and an MSRV check in CI. Keep normal tests offline with local fixtures and temporary directories; upstream ingestion checks are explicit integration jobs rather than mandatory live-network unit tests. Apply the project's own documentation sources to its public APIs and use typed errors without panicking on external input.
 
+The initial [PR validation workflow](.github/workflows/validation.yml) runs these checks on stable and checks/tests the MSRV declared in `Cargo.toml`, with the current default feature configuration. See [CI and merge-protection setup](docs/CI.md) for the required `PR validation` check and remaining task [061] acceptance dependencies; the M5 CI checkbox remains open pending that evidence.
+
 ## 12. Remaining choices and future scope
 
 No further product clarification blocks this plan. The following implementation choices can be resolved from evidence during M1–M2:
