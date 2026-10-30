@@ -1,20 +1,32 @@
 //! `rust-docs-mcp` command-line entry point.
 //!
-//! The [003] CLI skeleton: parse `serve` / `sync` / `status` plus an explicit
-//! `--data-dir` override and dispatch to the matching handler. The subcommand
-//! bodies are placeholders at this milestone — real runtime/ingestion wiring
-//! lands in M2/M4 — but the command surface, data-directory resolution, and
-//! error routing are complete.
-//!
-//! Per `plan.md` §8/§9 (and the AGENTS "product boundaries" note), during
-//! `serve` **stdout carries only MCP protocol messages** and every diagnostic
-//! goes to **stderr**. This binary honours that from the start: it owns no logic
-//! of its own and delegates to the internal library's parsing helpers.
-
-use rust_docs_mcp::Cli;
+//! Parsed via the [`Cli`] surface (task [003]) and routed through the typed
+//! error layer + stderr-only tracing established by task [004]. The subcommand
+//! bodies are still labelled placeholders (their runtime/ingestion wiring lands
+//! in M2/M4), but the diagnostic and error paths are now real: every diagnostic
+//! goes to **stderr**, and a startup failure surfaces as an actionable message
+//! plus a non-zero exit rather than a panic.
+use rust_docs_mcp::{Cli, init_tracing};
 
 fn main() -> std::process::ExitCode {
-    // `from_env` prints an actionable usage/argument message to stderr and exits
-    // non-zero on a parse error ("invalid arguments produce actionable errors").
-    Cli::from_env().run()
+    // On a parse error `clap` already prints a concise, actionable usage message
+    // to stderr and aborts non-zero, so a malformed invocation never reaches
+    // dispatch.
+    let cli = Cli::from_env();
+
+    // stdio-exclusivity: install the stderr-only, gated subscriber before doing
+    // any real work. A global can be installed once; `try_init()`'s failure (a
+    // second install) is a harmless no-op for this single-process binary.
+    init_tracing(cli.verbose);
+
+    // Route every subcommand through the typed error layer: a startup failure
+    // becomes an actionable stderr line (with its `source` chain) and a non-zero
+    // exit — never an unwind on external input.
+    match cli.run() {
+        Ok(code) => code,
+        Err(err) => {
+            tracing::error!("rust-docs-mcp: {err:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }

@@ -23,6 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use crate::error::AppResult;
 use clap::{Parser, Subcommand};
 
 /// Name used to build the OS-appropriate application data directory.
@@ -38,9 +39,9 @@ const APP_DIR: &str = "rust-docs-mcp";
 /// Mirrors `plan.md` §8:
 ///
 /// ```text
-/// rust-docs-mcp serve  [--data-dir PATH]
-/// rust-docs-mcp sync   [--data-dir PATH]
-/// rust-docs-mcp status [--data-dir PATH]
+/// rust-docs-mcp serve  [--verbose] [--data-dir PATH]
+/// rust-docs-mcp sync   [--verbose] [--data-dir PATH]
+/// rust-docs-mcp status [--verbose] [--data-dir PATH]
 /// ```
 ///
 /// `--data-dir` is a *global* option so it is documented once and accepted both
@@ -65,6 +66,12 @@ pub struct Cli {
     /// Accepted globally, before or after the subcommand.
     #[arg(long = "data-dir", global = true, value_name = "PATH")]
     pub data_dir: Option<PathBuf>,
+
+    /// Increase diagnostics verbosity (`--verbose` → `debug` level, or set
+    /// `RUST_LOG`). Diagnostics always go to **stderr**; this flag never
+    /// writes query text to stdout.
+    #[arg(short = 'v', long = "verbose", global = true, default_value_t = false)]
+    pub verbose: bool,
 
     #[command(subcommand)]
     pub command: Command,
@@ -117,45 +124,58 @@ impl Cli {
     /// Dispatch to the selected subcommand.
     ///
     /// Resolves the data directory first (so an unavailable default is reported
-    /// before any subcommand work), then runs the matching placeholder. Returns
-    /// the process exit code; the stubs route their diagnostics to **stderr**
-    /// and exit non-zero because real behaviour is not wired yet — this keeps the
-    /// "no apparently healthy empty server" invariant from `plan.md` §5 intact.
-    pub fn run(self) -> ExitCode {
-        let data_dir = match self.resolve_data_dir() {
-            Ok(path) => path,
-            Err(err) => {
-                eprintln!("rust-docs-mcp: data directory unavailable: {err}");
-                return ExitCode::FAILURE;
-            }
-        };
+    /// through the typed error layer before any subcommand work), then runs the
+    /// matching placeholder. Returns the process [`ExitCode`]; on a startup
+    /// failure this yields an [`AppError`] so the caller ([`main`]) can turn it
+    /// into a non-zero exit *without ever panicking* on external input. The stub
+    /// subcommands route their diagnostics through the stderr-only tracer and
+    /// still exit non-zero because real behaviour is not wired yet — this keeps
+    /// the "no apparently healthy empty server" invariant from `plan.md` §5
+    /// intact while proving the typed-error + stderr path for this task.
+    pub fn run(self) -> AppResult<ExitCode> {
+        // `DataDirError` folds into `AppError` via `From`, so `?` gives a typed
+        // context-carrying failure instead of a bare unwrap.
+        let data_dir = self.resolve_data_dir()?;
 
+        // Each subcommand is a labelled placeholder (its real behaviour lands in
+        // M2/M4). We *emit* the diagnostic through the stderr-only tracer rather
+        // than `eprintln!` so diagnostics flow through the gated subscriber and
+        // stdout stays MCP-exclusive (plan.md §8/§9 / task [004]).
         let message = match self.command {
             Command::Serve => format!(
-                "serve: the stdio MCP runtime is not wired yet (task [003] parses \
-                 and dispatches only; the runtime lands in M2/M4). Data directory: {data_dir:?}",
+                "serve: the stdio MCP runtime is not wired yet (tasks [003]/[004] wire \
+                 the CLI and diagnostics; the runtime lands in M2/M4). Data directory: \
+                 {data_dir:?}",
             ),
             Command::Sync => format!(
-                "sync: bounded network ingestion is not wired yet (task [003] parses \
-                 and dispatches only; ingestion lands in M2). Data directory: {data_dir:?}",
+                "sync: bounded network ingestion is not wired yet (ingestion lands in \
+                 M2). Data directory: {data_dir:?}",
             ),
             Command::Status => format!(
-                "status: snapshot reporting is not wired yet (task [003] parses \
-                 and dispatches only; reporting lands in M2/M4). Data directory: {data_dir:?}",
+                "status: snapshot reporting is not wired yet (reporting lands in \
+                 M2/M4). Data directory: {data_dir:?}",
             ),
         };
 
-        eprintln!("rust-docs-mcp: {message}");
+        tracing::warn!("rust-docs-mcp: {message}");
+        // NOTE (M1): this stub diagnostic routes through the *global* subscriber
+        // that `init_tracing` installed via `try_init()`. If a global subscriber
+        // were already set, that second `try_init()` no-ops silently, so this
+        // `warn!` would be swallowed rather than printed. Harmless at M1 — the
+        // stub still exits non-zero and nothing else emits — but when M2/M4
+        // replace the stub, emit diagnostics through a subscriber the caller owns
+        // rather than relying on the first-install-wins `try_init()`.
         // Non-zero: the work is deliberately not implemented, so we must not
         // present a clean exit as if the command had run successfully.
-        ExitCode::FAILURE
+        Ok(ExitCode::FAILURE)
     }
 }
 
 /// Failure to determine the application data directory.
 ///
-/// A minimal, std-only error (task [004] introduces the project's typed error
-/// layer; this covers just the one edge case task [003] must report).
+/// Defined here as the one actionable failure task [003] must report; task
+/// [004] folds it into the project's typed [`AppError`](crate::error::AppError)
+/// via `From` so the CLI boundary can surface it without panicking.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataDirError {
     /// No `--data-dir` was supplied and the platform exposes no default location.

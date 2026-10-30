@@ -76,17 +76,23 @@ via `cargo info` on 2026-10-29. MSRV is each crate's `rust-version`.
 | `schemars` | `1` (rmcp floor `1.0`; `chrono04` feature for the `server` feature) | **1.2.3** | 1.74 | MIT | **SDK-compatible JSON-Schema crate.** The `rmcp` `server` feature enables `dep:schemars`; tool/resource schemas are built with it. Major must be `1.x`. |
 | `reqwest` | `0.13` (rmcp floor `0.13.2`, `default-features=false`, `json`+`stream`) | **0.13.5** | **1.85** | MIT OR Apache-2.0 | Bounded HTTP client for the `sync` ingestion path. TLS is **rustls**: rmcp sets `default-features = false` (so reqwest's own defaults — `default-tls`, `charset`, `http2`, `system-proxy` — are all **off**) and re-enables `reqwest?/rustls` via the `reqwest` feature. No system TLS dependency; offline-friendly. `http2`/`system-proxy` are **not** active in rmcp's usage. |
 | `scraper` | `0.29` | **0.29.0** | **UNVERIFIED** — `rust-version` not declared on the crate | **ISC** (crates.io; task [006]) | HTML parser for `books.rs` article extraction. crates.io authoritatively declares the license **`ISC`** (`cargo info scraper`, 2026-10-29), so task [006] may record it confidently; the repo's `LICENSE` SPDX id is still unresolved via the GitHub API and remains part of the audit. Must be validated to build on MSRV 1.88 in task [002]. |
+| `thiserror` | `2` | **2.0.21** | **1.77** | MIT OR Apache-2.0 | Typed error layer (`AppError`, task [004]); already a direct transitive dependency of `rmcp` and now a pinned direct dependency. |
+| `tracing` | `0.1` | **0.1.44** | **1.65** | MIT | Structured-log facade behind the stderr-only, gated diagnostics (task [004]). |
+| `tracing-subscriber` | `0.3` (`env-filter`) | **0.3.23** | **1.65** | MIT | Stderr, configurable-verbosity subscriber + the `RUST_LOG`/level base (task [004]). |
 
-**As-needed (declared now; not pinned until their task runs):**
-`thiserror` `2` (typed errors; already a direct rmcp dep), `tracing`/`tracing-subscriber`
-(stderr-only diagnostics, task [004]), `clap` `4.6` (CLI skeleton, task [003]),
-`sha2` / hashing (snapshot integrity — `rmcp` already pulls `sha2` `0.11` under
-`request-state`; reuse its version). All are pulled by `rmcp` or are the minimal
-choice named in `plan.md` §8.
+**Pinned by later M1 tasks (direct, resolved in `Cargo.lock`):** `clap` `4.6.7`
+(CLI skeleton, task [003]) and the `thiserror` `2` / `tracing` `0.1` /
+`tracing-subscriber` `0.3` diagnostic + typed-error closure (task [004]) are now
+**direct, pinned** dependencies — their resolved versions and MSRVs are recorded in
+the matrix above, all comfortably under the 1.88 floor. The remaining deferred
+as-needed item is `sha2` / hashing (snapshot integrity — `rmcp` already pulls
+`sha2` `0.11` under `request-state`; reuse its version), still named in
+`plan.md` §8 but not yet a direct dependency. All are pulled by `rmcp` or are the
+minimal choice named in `plan.md` §8.
 
 **MSRV impact summary:** the binding constraint is `rmcp`/`rmcp-macros` at **1.88**.
-Everything else is ≤ 1.85 (reqwest/tokio), 1.74 (schemars), 1.71 (serde_json),
-1.56 (serde). `scraper`'s undeclared MSRV is the one open item: record it and
+Everything else is ≤ 1.85 (reqwest/tokio), 1.77 (thiserror), 1.74 (schemars), 1.71
+(serde_json), 1.65 (tracing / tracing-subscriber), 1.56 (serde). `scraper`'s undeclared MSRV is the one open item: record it and
 confirm it compiles on 1.88 during task [002] bootstrap. No dependency forces an
 MSRV above 1.88.
 

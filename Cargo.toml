@@ -39,7 +39,16 @@ schemars = "1"
 clap = { version = "4.6.7", features = ["derive"] }
 
 # `clap` 4.6 (derive) is the CLI skeleton for task [003]; its MSRV-1.88
-# sub-closure resolved cleanly (see Cargo.lock). The remaining as-needed deps are
-# deferred to their owning tasks per docs/COMPATIBILITY.md section 3: tracing/
-# tracing-subscriber ([004]) and the ingestion clients reqwest/scraper/html2md
-# ([010]/[013]/[014]). Do not add them here.
+# sub-closure resolved cleanly (see Cargo.lock).
+#
+# Task [004] (typed errors + stderr-only diagnostics) adds the diagnostic/error
+# closure, all of which sit well under the 1.88 MSRV floor: `thiserror` 2
+# (rust-version 1.77) derives the project's typed error layer, and
+# `tracing` + `tracing-subscriber` (both rust-version 1.65) give stderr-only,
+# configurable-verbosity diagnostics. `env-filter` is the only tracing-subscriber
+# feature needed (RUST_LOG / verbosity). Per docs/COMPATIBILITY.md section 3 the
+# heavier ingestion clients reqwest/scraper/html2md are still deferred to their
+# owning tasks ([010]/[013]/[014]) — do not add them here.
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
