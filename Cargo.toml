@@ -26,19 +26,19 @@ path = "src/lib.rs"
 # Core, always-needed closure only. docs/COMPATIBILITY.md (task [001]) pins
 # rmcp 3.8.0 as the official MCP SDK; the server-side stdio closure is
 # `server` (transport-async-rw + schemars) + `macros` (tool/resource derive) +
-# `client` (in-process SDK test client, tasks [003]/[005]). The heavy
-# transport-streamable-http-* / auth features stay off: they are not needed for a
-# local stdio MVP.
-rmcp = {
-    version = "3.8.0",
-    features = ["server", "macros", "client", "transport-io"],
-}
+# `transport-io` (the stdio transport task [005] runs the skeleton on). The
+# heavy transport-streamable-http-* / auth features stay off: they are not
+# needed for a local stdio MVP. The in-process `client` feature was deliberately
+# dropped (PR #77 review): the task [005] lifecycle proof drives the *real*
+# `rust-docs-mcp serve` binary over genuine OS stdio with raw JSON-RPC, so no
+# in-process SDK client is instantiated, and dropping `client` trims the
+# resolved closure by one transitive dep (`tokio-stream`).
+rmcp = { version = "3.8.0", features = ["server", "macros", "transport-io"] }
 
 # `transport-io` (the MCP stdio transport task [005] runs the skeleton on) is
 # *not* in rmcp's default feature set, so we opt in explicitly. It brings
 # `tokio` + the async-rw codec closure transitively. The heavy HTTP/SSE/auth
-# transports stay off: a local stdio MVP never uses them. `client` adds the
-# in-process SDK client used by the lifecycle tests.
+# transports stay off: a local stdio MVP never uses them.
 
 # Corpus/tool payloads (task [007]); schemars builds the MCP JSON schemas
 # (task [048]). `serde/derive` mirrors what rmcp's server closure already needs.
@@ -63,8 +63,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Tokio async runtime for task [005]: the `serve` command runs the official rmcp
-# MCP server over stdio, and the stdio lifecycle smoke test ([005]) exercises it
-# with the SDK's own client. `rmcp` already pulls tokio in *indirectly*, but its
+# MCP server over stdio, and the stdio lifecycle test ([005]) spawns that real
+# binary over OS stdio. `rmcp` already pulls tokio in *indirectly*, but its
 # default feature set does not expose `process` (needed to spawn the binary in
 # the spawned-test path) or `#[tokio::test]` macros; declaring tokio directly
 # opts those in without altering the pinned rmcp closure. Features kept to the

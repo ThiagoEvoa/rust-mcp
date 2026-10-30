@@ -155,6 +155,17 @@ async fn serve_negotiates_version_and_disconnects_cleanly(protocol_version: &str
 /// request (`1`). Every line must be a JSON-RPC 2.0 message, and every read must
 /// arrive within the remaining budget; a premature EOF is a disconnected server
 /// and a timeout are both failures, not clean runs.
+///
+/// The loop stops at the `id == 1` line, so any non-protocol stdout the server
+/// were to emit *after* answering `initialize` (for example the diagnostics a
+/// future tool call would log) is not individually asserted here: this check
+/// proves stdout is protocol-only *up to* the `initialize` reply and that the
+/// process then exits cleanly after the client's disconnect. For the M1
+/// skeleton that is airtight, because the server writes nothing between
+/// `initialize` and the client's disconnect. Tighten this loop to drain stdout to
+/// EOF and assert every tail line as JSON-RPC when the first tool/resource starts
+/// emitting after `initialize` (M4, [048]-[059]); the M4 integration test should
+/// own that stricter assertion (PR #77 review note).
 async fn read_initialize_response<R: AsyncBufReadExt + Unpin + Send>(reader: &mut R) -> Value {
     let deadline = tokio::time::Instant::now() + BUDGET;
     loop {
