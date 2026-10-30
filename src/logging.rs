@@ -74,8 +74,20 @@ pub(crate) fn decision(target: &str) -> Decision {
 /// process-global [`LOG_QUERY_BODIES`] switch, so the opt-in branches can be
 /// exercised without mutating global state under a parallel test harness.
 /// [`filter_for_with_rust_log`] derives its query-body directive from this.
+///
+/// The target test is a **prefix** on [`QUERY_TARGET`] (`==` *or* `starts_with`),
+/// deliberately matching the `EnvFilter` directive that `filter_for_with_rust_log`
+/// appends: that directive — `rust_docs_mcp::query={off|info}` — matches the query
+/// subtree by **target prefix** (a `Layered<EnvFilter, …>` probe confirms that
+/// `rust_docs_mcp::query`, `rust_docs_mcp::query::foo`, and `rust_docs_mcp::query_foo`
+/// are all gated), while an ordinary sibling such as `rust_docs_mcp::sync` is
+/// untouched. Matching the same prefix here keeps the pure policy and the filter
+/// in agreement: a future emit under a query subtree target (e.g.
+/// `rust_docs_mcp::query::section`) is treated as a query-body event by *both*, so
+/// the policy can never report `Allow` for a target the filter suppresses. See
+/// `decision_and_filter_agree_on_subtree_targets`.
 fn decision_for(target: &str, query_bodies: bool) -> Decision {
-    if target == QUERY_TARGET && !query_bodies {
+    if target.starts_with(QUERY_TARGET) && !query_bodies {
         Decision::Suppress
     } else {
         Decision::Allow
@@ -178,6 +190,11 @@ pub(crate) fn filter_for_with_rust_log(
     // The opt-in is capped at `info` deliberately: even with `--verbose` the
     // base widens to `debug` but the query target never does, so verbosity can
     // not re-expose caller-supplied payload text. See the doc on this function.
+    //
+    // This directive matches the query subtree by *target prefix*, so the gate
+    // suppresses `rust_docs_mcp::query`, `rust_docs_mcp::query::foo`, and
+    // `rust_docs_mcp::query_foo` alike; the pure `decision_for` uses the same
+    // prefix test to stay in agreement (see its doc).
     let query_level = match decision_for(QUERY_TARGET, query_bodies) {
         Decision::Suppress => "off",
         Decision::Allow => "info",
@@ -295,6 +312,24 @@ mod tests {
         &META
     };
 
+    // A query *subtree* target: the gate directive matches target prefixes, so
+    // a `rust_docs_mcp::query::section` emit is gated too — not just the exact
+    // `rust_docs_mcp::query` target.
+    static CALLSITE_QUERY_SUB: DefaultCallsite = DefaultCallsite::new(QUERY_SUB_PROBE);
+    static QUERY_SUB_PROBE: &Metadata = {
+        static META: Metadata = Metadata::new(
+            "probe",
+            "rust_docs_mcp::query::section",
+            tracing::Level::INFO,
+            None,
+            None,
+            None,
+            FieldSet::new(&[], Identifier(&CALLSITE_QUERY_SUB)),
+            Kind::EVENT,
+        );
+        &META
+    };
+
     /// Whether `meta` is enabled by `filter`, probed through a fresh
     /// `Layered<EnvFilter, Registry>` subscriber. `EnvFilter` is a `Layer`, so
     /// the layered `enabled` predicate *is* the gate decision.
@@ -329,6 +364,51 @@ mod tests {
         assert_eq!(decision_for(QUERY_TARGET, true), Decision::Allow);
         assert_eq!(decision_for("rust_docs_mcp::sync", false), Decision::Allow);
         assert_eq!(decision_for("rust_docs_mcp::sync", true), Decision::Allow);
+        // The gate matches the query *subtree* by target prefix (mirroring the
+        // appended `EnvFilter` directive), not the exact target alone.
+        assert_eq!(
+            decision_for("rust_docs_mcp::query::section", false),
+            Decision::Suppress
+        );
+        assert_eq!(
+            decision_for("rust_docs_mcp::query::section", true),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn decision_and_filter_agree_on_subtree_targets() {
+        // The reviewer's alignment concern: the pure gate and the real `EnvFilter`
+        // directive must classify query-subtree targets identically, for both
+        // gate states, so a later `rust_docs_mcp::query::<x>` emit can never be
+        // suppressed by the filter yet reported `Allow` by `decision_for`.
+        for target in ["rust_docs_mcp::query", "rust_docs_mcp::query::section"] {
+            for gate in [false, true] {
+                let pure = decision_for(target, gate) == Decision::Allow;
+                // The filter built for the same opt-in is the enforcement path;
+                // for an `info`-level target it is enabled exactly when the gate
+                // allows it. The exact `QUERY_TARGET` is probed by `QUERY_PROBE`.
+                let filter = filter_for_with(false, gate);
+                let enabled = enabled_at(
+                    &filter,
+                    if target == "rust_docs_mcp::query::section" {
+                        QUERY_SUB_PROBE
+                    } else {
+                        QUERY_PROBE
+                    },
+                );
+                assert_eq!(
+                    pure, enabled,
+                    "pure gate ({pure}) must match the filter ({enabled}) for target \
+                     {target:?} with opt-in {gate}"
+                );
+            }
+        }
+        // An ordinary sibling is allowed by both, regardless of the gate.
+        for gate in [false, true] {
+            assert_eq!(decision_for("rust_docs_mcp::sync", gate), Decision::Allow);
+            assert!(enabled_at(&filter_for_with(false, gate), SYNC_PROBE));
+        }
     }
 
     #[test]
