@@ -444,7 +444,10 @@ impl SectionId {
 impl FromStr for SectionId {
     type Err = SchemaError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(s.to_string()))
+        // Route through the same validating gate as `TryFrom<String>` so a bare
+        // `parse::<SectionId>()` cannot bypass the URI-safety + source/chapter/
+        // anchor/continuation grammar that the rest of the module enforces.
+        SectionId::from_parts(&SectionId::parse(s)?)
     }
 }
 
@@ -1534,6 +1537,22 @@ mod tests {
     fn section_id_rejects_malformed_input() {
         let err = SectionId::parse("cargo//missinganchor").unwrap_err();
         assert!(matches!(err, SchemaError::InvalidId(_)));
+    }
+
+    #[test]
+    fn section_id_from_str_routes_through_the_validating_gate() {
+        // `FromStr` must not wrap an arbitrary string: a bare `parse::<SectionId>()`
+        // runs the same URL-safety + source/chapter/anchor/continuation gate as the
+        // serde `TryFrom<String>` path, so malformed input fails rather than slipping
+        // through unchecked.
+        assert!("garbage-with/#and/$/chars".parse::<SectionId>().is_err());
+        assert!("cargo//missinganchor".parse::<SectionId>().is_err());
+        // A well-formed id parses and round-trips through its components, matching
+        // `section_id_round_trips_through_parts`.
+        let source = SourceId::new("cargo").unwrap();
+        let id = SectionId::derive(&source, "commands/index", Some("build"), None).unwrap();
+        let parsed = id.as_str().parse::<SectionId>().unwrap();
+        assert_eq!(parsed, id);
     }
 
     #[test]
