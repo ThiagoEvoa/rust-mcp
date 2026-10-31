@@ -249,6 +249,7 @@ impl From<SnapshotId> for String {
 /// toolchain changes, publication). `detail` carries the human note; it never
 /// authorizes the effect.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EffectNote {
     /// The effect family this note describes.
     pub kind: EffectKind,
@@ -485,6 +486,7 @@ pub struct SectionIdParts {
 
 /// A section's 1-based continuation part and the total number of parts.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Continuation {
     pub part: usize,
     pub parts: usize,
@@ -575,6 +577,7 @@ pub enum Channel {
 /// with unknown values preserved explicitly. A commit-pinned rustfmt document is
 /// *not* automatically a `Stable` release (see `plan.md` §5).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Release {
     /// The distribution channel the documentation was captured from.
     pub channel: Channel,
@@ -663,16 +666,18 @@ impl From<Url> for String {
 /// A content hash identifying captured content.
 ///
 /// Per `plan.md` §5 a content hash identifies captured *content*; it is not a
-/// compiler version or proof of an upstream publication date. The 128-bit
-/// FNV-1a dual accumulator below is a deterministic, dependency-free stand-in
-/// whose *role* (identity of the captured bytes) is all [007] requires; task
-/// [025] may swap the algorithm when it adds snapshot integrity checks.
+/// compiler version or proof of an upstream publication date. The 128-bit dual
+/// accumulator below is a deterministic, dependency-free stand-in whose *role*
+/// (identity of the captured bytes) is all [007] requires; task [025] may swap
+/// the algorithm when it adds snapshot integrity checks. It is **not** the
+/// FNV-1a algorithm — the prefix `c128-` simply denotes a 128-bit content hash;
+/// task [025] should adopt a standardized cryptographic hash (e.g. SHA-256).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct ContentHash(String);
+pub struct CorpusHash(String);
 
-impl ContentHash {
-    const PREFIX: &str = "fnv1a-";
+impl CorpusHash {
+    const PREFIX: &str = "c128-";
 
     /// Compute the content hash of `bytes` deterministically.
     pub fn compute(bytes: impl AsRef<[u8]>) -> Self {
@@ -692,7 +697,7 @@ impl ContentHash {
     }
 }
 
-impl TryFrom<String> for ContentHash {
+impl TryFrom<String> for CorpusHash {
     type Error = SchemaError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
         if value.is_empty() {
@@ -705,8 +710,8 @@ impl TryFrom<String> for ContentHash {
     }
 }
 
-impl From<ContentHash> for String {
-    fn from(h: ContentHash) -> String {
+impl From<CorpusHash> for String {
+    fn from(h: CorpusHash) -> String {
         h.0
     }
 }
@@ -722,6 +727,7 @@ impl From<ContentHash> for String {
 /// release when identifiable, upstream revision, and parser adapter. Preserve
 /// unknown values explicitly."
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Source {
     /// The source id (one of the eight approved registry ids; task [009]).
     pub id: SourceId,
@@ -742,7 +748,7 @@ pub struct Source {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_modified: Option<Timestamp>,
     /// Hash identifying the captured content of this source.
-    pub content_hash: ContentHash,
+    pub content_hash: CorpusHash,
     /// The documentation release / channel / revision this was captured from;
     /// unknown values are preserved via [`Release`].
     pub release: Release,
@@ -757,6 +763,7 @@ pub struct Source {
 /// keys/lint IDs when present, stability/version qualifications, and content
 /// hash."
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Section {
     /// The deterministic, URI-safe section identity.
     pub id: SectionId,
@@ -792,7 +799,7 @@ pub struct Section {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub qualifications: Vec<String>,
     /// Hash identifying this section's content.
-    pub content_hash: ContentHash,
+    pub content_hash: CorpusHash,
     /// The continuation part of a split section; `None` for an unsplit
     /// section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -800,7 +807,7 @@ pub struct Section {
 }
 
 impl Section {
-    /// Build a section, deriving its [`SectionId`] and [`ContentHash`] from the
+    /// Build a section, deriving its [`SectionId`] and [`CorpusHash`] from the
     /// supplied components.
     ///
     /// `continuation` is `None` for an unsplit section; `Some(c)` requires
@@ -825,7 +832,7 @@ impl Section {
         // error rather than being silently dropped.
         let cont = continuation.as_ref().map(|c| (c.part, c.parts));
         let id = SectionId::derive(&source_id, chapter_path.as_str(), anchor.as_deref(), cont)?;
-        let content_hash = ContentHash::compute(section_content(&Section {
+        let content_hash = CorpusHash::compute(section_content(&Section {
             id: id.clone(),
             source_id: source_id.clone(),
             doc_title: doc_title.clone(),
@@ -838,7 +845,7 @@ impl Section {
             command_keys: command_keys.clone(),
             lint_ids: lint_ids.clone(),
             qualifications: qualifications.clone(),
-            content_hash: ContentHash::compute(b""),
+            content_hash: CorpusHash::compute(b""),
             continuation: continuation.clone(),
         }));
         Ok(Self {
@@ -860,7 +867,7 @@ impl Section {
     }
 }
 
-/// The canonical content bytes a [`ContentHash`] is computed over: every content
+/// The canonical content bytes a [`CorpusHash`] is computed over: every content
 /// field except the id, the hash itself, and the structural continuation
 /// metadata.
 fn section_content(s: &Section) -> Vec<u8> {
@@ -902,6 +909,7 @@ fn section_content(s: &Section) -> Vec<u8> {
 /// `plan.md` §5: "upstream code, title, category, checklist location, and
 /// explanatory section IDs."
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChecklistEntry {
     /// The upstream guideline code (e.g. `C-CONV`).
     pub code: String,
@@ -924,6 +932,7 @@ pub struct ChecklistEntry {
 /// kept distinct from [`EffectNote`]s, which describe possible side effects and
 /// are *not* permission controls.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommandEntry {
     /// The canonical command key (e.g. `cargo test`); validated to reject shell
     /// operators.
@@ -1096,6 +1105,7 @@ pub struct ValidationSummary {
 /// A license / attribution reference preserved per `plan.md` §5 and the
 /// [006] licensing audit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AttributionRef {
     /// The source this attribution applies to.
     pub source: SourceId,
@@ -1577,7 +1587,7 @@ mod tests {
                     last_checked: Some(Timestamp::new("2026-10-28T00:00:00Z").unwrap()),
                     fetched_at: Timestamp::new("2026-10-30T00:00:00Z").unwrap(),
                     upstream_modified: None,
-                    content_hash: ContentHash::compute(b"cargo"),
+                    content_hash: CorpusHash::compute(b"cargo"),
                     release: Release::channel_only(Channel::Stable),
                     parser: "books/2024".into(),
                 }],
@@ -1620,9 +1630,17 @@ mod tests {
         let json = manifest.to_json_string().unwrap();
         // The on-disk schema version must be a bare integer.
         assert!(json.contains("\"schema_version\":1"), "json: {json}");
-        // Unknown fields must fail clearly (deny_unknown_fields).
-        let tampered = json.replace("}", ", \"weird\":1 }");
-        assert!(SnapshotManifest::from_json_str(&tampered).is_err());
+        // Unknown top-level fields must fail clearly (deny_unknown_fields).
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        value.as_object_mut().expect("is object").insert(
+            "unknown_top_level_field".to_string(),
+            serde_json::json!("oops"),
+        );
+        let tampered = serde_json::to_string(&value).expect("serialize tampered");
+        assert!(
+            SnapshotManifest::from_json_str(&tampered).is_err(),
+            "unknown top-level field must be rejected: {tampered}"
+        );
         // The clean JSON round-trips byte-for-byte-equivalent through the typed API.
         let back = SnapshotManifest::from_json_str(&json).unwrap();
         assert_eq!(manifest, back);
@@ -1697,6 +1715,69 @@ mod tests {
                 "`{bad}` must be rejected when written as a command key",
             );
         }
+    }
+
+    /// An unknown field *inside* a nested record (e.g. `Source`, `Section`,
+    /// `CommandEntry`) must also be rejected, verifying that the module-wide
+    /// `deny_unknown_fields` invariant holds at every level — not just the
+    /// manifest envelope.
+    #[test]
+    fn nested_unknown_fields_fail_clearly() {
+        // Inject an unknown field into a `Source` within a valid manifest.
+        let json = r#"{
+            "schema_version": 1,
+            "snapshot_id": "s1",
+            "created_at": "2026-10-30T00:00:00Z",
+            "parser_version": "v1",
+            "sources": [{
+                "id": "cargo",
+                "title": "The Cargo Book",
+                "entry_url": "https://doc.rust-lang.org/cargo/",
+                "fetched_at": "2026-10-30T00:00:00Z",
+                "content_hash": "c128-deadbeef",
+                "release": { "channel": "stable" },
+                "parser": "books/2024",
+                "unknown_nest_field": "surprise"
+            }]
+        }"#;
+        let err = SnapshotManifest::from_json_str(json).unwrap_err();
+        assert!(
+            matches!(err, SchemaError::Json(_)),
+            "nested unknown field must produce a JSON error, got {err:?}"
+        );
+    }
+
+    /// A `Continuation` stored on a `Section` must round-trip through JSON,
+    /// exercising the `Serialize`/`Deserialize` path that the other tests
+    /// (which pass `continuation: None`) skip.
+    #[test]
+    fn continuation_round_trips_through_json() {
+        let source = SourceId::new("cargo").unwrap();
+        let cont = Some(Continuation { part: 2, parts: 5 });
+        let section = Section::build(
+            source.clone(),
+            "Continued doc".into(),
+            "chapters/long".into(),
+            Some("intro".into()),
+            vec!["Intro".into()],
+            Url::new("https://doc.rust-lang.org/cargo/index.html#intro").unwrap(),
+            "part 2 of 5".into(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            cont,
+        )
+        .unwrap();
+        assert!(
+            section.continuation.is_some(),
+            "build must keep the continuation"
+        );
+
+        let json = serde_json::to_string(&section).expect("serialize section");
+        let back: Section = serde_json::from_str(&json).expect("deserialize section");
+        assert_eq!(section, back);
+        assert_eq!(back.continuation, Some(Continuation { part: 2, parts: 5 }));
     }
 
     #[test]

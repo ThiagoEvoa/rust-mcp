@@ -13,7 +13,7 @@
       ],
       "last_checked": "2026-10-28T00:00:00Z",
       "fetched_at": "2026-10-30T00:00:00Z",
-      "content_hash": "fnv1a-0000000000000001ab12cd34ef567890",
+      "content_hash": "c128-0000000000000001ab12cd34ef567890",
       "release": {
         "channel": "stable"
       },
@@ -44,7 +44,7 @@
       "qualifications": [
         "stable"
       ],
-      "content_hash": "fnv1a-0000000000000002bc23de45ef678901"
+      "content_hash": "c128-0000000000000002bc23de45ef678901"
     }
   ],
   "checklist": [
