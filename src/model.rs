@@ -709,6 +709,11 @@ impl TryFrom<String> for CorpusHash {
                 reason: "must be non-empty".to_string(),
             });
         }
+        // `TODO([025])`: [007] only requires a non-empty hash; the
+        // `c128-` prefix that `compute` emits (and a recomputation against the
+        // captured bytes) are integrity checks deferred to task [025]. Until
+        // then any non-empty string loads, which is why the recorded fixtures
+        // carry decorative hashes rather than `compute` output.
         Ok(Self(value))
     }
 }
@@ -765,6 +770,14 @@ pub struct Source {
 /// URL including original anchor, Markdown body, guideline codes/command
 /// keys/lint IDs when present, stability/version qualifications, and content
 /// hash."
+// `TODO([025])`: on load, `Section` deserializes `id`, `source_id`,
+// `chapter_path`, `anchor`, and `continuation` independently, so a corrupt
+// corpus could carry an `id` that does not match
+// `SectionId::derive(source_id, chapter_path, anchor, continuation)`. Likewise
+// a deserialized `content_hash` is accepted without recomputation. Both
+// cross-checks (id-vs-fields and hash-vs-content) are deferred to task [025],
+// which validates a complete corpus; until then the recorded fixtures carry
+// hand-written, decorative content hashes that only clear the non-empty gate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Section {
