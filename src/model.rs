@@ -822,63 +822,159 @@ pub struct Section {
     pub continuation: Option<Continuation>,
 }
 
-impl Section {
-    /// Build a section, deriving its [`SectionId`] and [`CorpusHash`] from the
-    /// supplied components.
-    ///
-    /// `continuation` is `None` for an unsplit section; `Some(c)` requires
-    /// `c.part <= c.parts` (both 1-based).
-    #[allow(clippy::too_many_arguments)]
-    pub fn build(
+/// A fluent builder for [`Section`], deriving the section's [`SectionId`] and
+/// [`CorpusHash`] from the supplied components.
+///
+/// [`SectionBuilder::new`] takes the five fields every section must carry
+/// (`source_id`, `doc_title`, `chapter_path`, `canonical_url`, `body`); the
+/// remaining fields default to empty/`None` (no anchor, an empty heading path,
+/// empty `guideline_codes` / `command_keys` / `lint_ids` / `qualifications`
+/// lists, and no continuation) and are set fluently.
+///
+/// Unlike the previous positional `Section::build` — which took twelve
+/// positional arguments, four of them identical `Vec<String>` slots a caller
+/// could silently swap — every list here is named, so no caller can swap one
+/// for another. `build` returns `Result<_, SchemaError>` because it derives the
+/// [`SectionId`] (which validates any [`Continuation`]) and the [`CorpusHash`];
+/// an invalid continuation surfaces as a typed error rather than a panic.
+#[derive(Clone, Debug)]
+pub struct SectionBuilder {
+    source_id: SourceId,
+    doc_title: String,
+    chapter_path: String,
+    anchor: Option<String>,
+    heading_path: Vec<String>,
+    canonical_url: Url,
+    body: String,
+    guideline_codes: Vec<String>,
+    command_keys: Vec<String>,
+    lint_ids: Vec<String>,
+    qualifications: Vec<String>,
+    continuation: Option<Continuation>,
+}
+
+impl SectionBuilder {
+    /// Start a builder from the five fields every section must carry; every
+    /// other field defaults to empty/`None` and is set with the fluent methods
+    /// below.
+    pub fn new(
         source_id: SourceId,
-        doc_title: String,
-        chapter_path: String,
-        anchor: Option<String>,
-        heading_path: Vec<String>,
+        doc_title: impl Into<String>,
+        chapter_path: impl Into<String>,
         canonical_url: Url,
-        body: String,
-        guideline_codes: Vec<String>,
-        command_keys: Vec<String>,
-        lint_ids: Vec<String>,
-        qualifications: Vec<String>,
-        continuation: Option<Continuation>,
-    ) -> Result<Self, SchemaError> {
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            source_id,
+            doc_title: doc_title.into(),
+            chapter_path: chapter_path.into(),
+            anchor: None,
+            heading_path: Vec::new(),
+            canonical_url,
+            body: body.into(),
+            guideline_codes: Vec::new(),
+            command_keys: Vec::new(),
+            lint_ids: Vec::new(),
+            qualifications: Vec::new(),
+            continuation: None,
+        }
+    }
+
+    /// Set the original anchor the section was split from.
+    pub fn anchor(mut self, anchor: impl Into<String>) -> Self {
+        self.anchor = Some(anchor.into());
+        self
+    }
+
+    /// Set the heading-hierarchy breadcrumb, most-to-least specific.
+    pub fn heading_path(
+        mut self,
+        heading_path: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.heading_path = heading_path.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// API guideline codes present in this section (e.g. `C-CONV`).
+    pub fn guideline_codes(mut self, codes: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.guideline_codes = codes.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Command keys this section documents (e.g. `cargo test`).
+    pub fn command_keys(mut self, keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.command_keys = keys.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Clippy lint IDs present in this section (e.g. `clippy::unwrap_used`).
+    pub fn lint_ids(mut self, ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.lint_ids = ids.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Stability/version qualifications, preserved as supplied.
+    pub fn qualifications(
+        mut self,
+        qualifications: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.qualifications = qualifications.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Mark this section as a continuation of a split section.
+    ///
+    /// `part` / `parts` are both 1-based and `part <= parts`; an invalid pair
+    /// is rejected by [`SectionBuilder::build`].
+    pub fn continuation(mut self, continuation: Continuation) -> Self {
+        self.continuation = Some(continuation);
+        self
+    }
+
+    /// Derive and return the [`Section`], validating the continuation and
+    /// computing the [`CorpusHash`].
+    pub fn build(self) -> Result<Section, SchemaError> {
         // `derive` validates the continuation (rejecting a part that exceeds the
         // total or a 0 total), so an invalid continuation surfaces as a typed
         // error rather than being silently dropped.
-        let cont = continuation.as_ref().map(|c| (c.part, c.parts));
-        let id = SectionId::derive(&source_id, chapter_path.as_str(), anchor.as_deref(), cont)?;
+        let cont = self.continuation.as_ref().map(|c| (c.part, c.parts));
+        let id = SectionId::derive(
+            &self.source_id,
+            self.chapter_path.as_str(),
+            self.anchor.as_deref(),
+            cont,
+        )?;
         let content_hash = CorpusHash::compute(section_content(&Section {
             id: id.clone(),
-            source_id: source_id.clone(),
-            doc_title: doc_title.clone(),
-            chapter_path: chapter_path.clone(),
-            anchor: anchor.clone(),
-            heading_path: heading_path.clone(),
-            canonical_url: canonical_url.clone(),
-            body: body.clone(),
-            guideline_codes: guideline_codes.clone(),
-            command_keys: command_keys.clone(),
-            lint_ids: lint_ids.clone(),
-            qualifications: qualifications.clone(),
+            source_id: self.source_id.clone(),
+            doc_title: self.doc_title.clone(),
+            chapter_path: self.chapter_path.clone(),
+            anchor: self.anchor.clone(),
+            heading_path: self.heading_path.clone(),
+            canonical_url: self.canonical_url.clone(),
+            body: self.body.clone(),
+            guideline_codes: self.guideline_codes.clone(),
+            command_keys: self.command_keys.clone(),
+            lint_ids: self.lint_ids.clone(),
+            qualifications: self.qualifications.clone(),
             content_hash: CorpusHash::compute(b""),
-            continuation: continuation.clone(),
+            continuation: self.continuation.clone(),
         }));
-        Ok(Self {
+        Ok(Section {
             id,
-            source_id,
-            doc_title,
-            chapter_path,
-            anchor,
-            heading_path,
-            canonical_url,
-            body,
-            guideline_codes,
-            command_keys,
-            lint_ids,
-            qualifications,
+            source_id: self.source_id,
+            doc_title: self.doc_title,
+            chapter_path: self.chapter_path,
+            anchor: self.anchor,
+            heading_path: self.heading_path,
+            canonical_url: self.canonical_url,
+            body: self.body,
+            guideline_codes: self.guideline_codes,
+            command_keys: self.command_keys,
+            lint_ids: self.lint_ids,
+            qualifications: self.qualifications,
             content_hash,
-            continuation,
+            continuation: self.continuation,
         })
     }
 }
@@ -1589,21 +1685,20 @@ mod tests {
 
     #[test]
     fn full_manifest_round_trips_through_json() {
-        let source = SourceId::new("cargo").unwrap();
-        let section = Section::build(
-            source.clone(),
-            "The cargo book".into(),
-            "commands/index".into(),
-            Some("build".into()),
-            vec!["Building".into()],
+        let section = SectionBuilder::new(
+            SourceId::new("cargo").unwrap(),
+            "The cargo book",
+            "commands/index",
             Url::new("https://doc.rust-lang.org/cargo/commands/index.html#build").unwrap(),
-            "# Build\n\nrun `cargo build`".into(),
-            vec!["C-CONV".into()],
-            vec!["cargo test".into()],
-            vec!["clippy::unwrap_used".into()],
-            vec!["nightly-only".into()],
-            None,
+            "# Build\n\nrun `cargo build`",
         )
+        .anchor("build")
+        .heading_path(["Building"])
+        .guideline_codes(["C-CONV"])
+        .command_keys(["cargo test"])
+        .lint_ids(["clippy::unwrap_used"])
+        .qualifications(["nightly-only"])
+        .build()
         .unwrap();
         let manifest = SnapshotManifest {
             schema_version: SchemaVersion::CURRENT,
@@ -1784,22 +1879,17 @@ mod tests {
     /// (which pass `continuation: None`) skip.
     #[test]
     fn continuation_round_trips_through_json() {
-        let source = SourceId::new("cargo").unwrap();
-        let cont = Some(Continuation { part: 2, parts: 5 });
-        let section = Section::build(
-            source.clone(),
-            "Continued doc".into(),
-            "chapters/long".into(),
-            Some("intro".into()),
-            vec!["Intro".into()],
+        let section = SectionBuilder::new(
+            SourceId::new("cargo").unwrap(),
+            "Continued doc",
+            "chapters/long",
             Url::new("https://doc.rust-lang.org/cargo/index.html#intro").unwrap(),
-            "part 2 of 5".into(),
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            cont,
+            "part 2 of 5",
         )
+        .anchor("intro")
+        .heading_path(["Intro"])
+        .continuation(Continuation { part: 2, parts: 5 })
+        .build()
         .unwrap();
         assert!(
             section.continuation.is_some(),
@@ -1810,6 +1900,31 @@ mod tests {
         let back: Section = serde_json::from_str(&json).expect("deserialize section");
         assert_eq!(section, back);
         assert_eq!(back.continuation, Some(Continuation { part: 2, parts: 5 }));
+    }
+
+    /// The builder defaults every optional list/field to empty/`None`, so a
+    /// caller supplies only what a section actually carries — and the named
+    /// list setters (four interchangeable `Vec<String>` slots under the old
+    /// positional `build`) cannot be swapped for one another.
+    #[test]
+    fn section_builder_defaults_optional_lists() {
+        let section = SectionBuilder::new(
+            SourceId::new("cargo").unwrap(),
+            "Cargo reference",
+            "reference",
+            Url::new("https://doc.rust-lang.org/cargo/").unwrap(),
+            "# Reference",
+        )
+        .build()
+        .expect("a section with no optional fields must build");
+
+        assert!(section.anchor.is_none());
+        assert!(section.heading_path.is_empty());
+        assert!(section.guideline_codes.is_empty());
+        assert!(section.command_keys.is_empty());
+        assert!(section.lint_ids.is_empty());
+        assert!(section.qualifications.is_empty());
+        assert!(section.continuation.is_none());
     }
 
     #[test]
