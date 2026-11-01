@@ -59,6 +59,7 @@ use crate::model::{Source, SourceId};
 /// `UnregisteredHost` / `OutsidePathBoundary` together *reject arbitrary
 /// sources* (a foreign host vs. an in-host-but-off-boundary path), while
 /// `UnregisteredSource` rejects a `Source` whose id is not one of the eight.
+#[allow(dead_code)] // transitional: unwired until [010]/[029]-[030]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {
     /// The input is not a parseable `http(s)` URL with a host and path
@@ -120,6 +121,7 @@ impl std::error::Error for RegistryError {}
 /// `id()` of every variant is URI-safe, so it always constructs a
 /// [`SourceId`]; the tests assert that invariant so a future id cannot drift
 /// into an invalid form.
+#[allow(dead_code)] // transitional: unwired until [010]/[029]-[030]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SourceCollection {
     /// `api-guidelines` — the Rust API Guidelines (`rust-lang.github.io/api-guidelines/`).
@@ -140,6 +142,7 @@ pub enum SourceCollection {
     Rustdoc,
 }
 
+#[allow(dead_code)] // transitional: these items are wired up by [010]/[029]-[030]
 impl SourceCollection {
     /// The eight approved collections, in `plan.md` §2 table order.
     ///
@@ -406,6 +409,7 @@ impl SourceCollection {
 /// prefix), and the *commit-file* strategy for rustfmt's "approved files only"
 /// rule (the path must route through a prefix, then a resolved commit segment,
 /// then end at one of a fixed set of file names).
+#[allow(dead_code)] // transitional: unwired until [010]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PathBoundary {
     /// The path must *start with* this exact prefix.
@@ -413,13 +417,18 @@ pub enum PathBoundary {
     /// Every prefix carries its trailing `/`, so `/cargo/` cannot accidentally
     /// match `/carbon/` and `/rustc/` cannot match `/rustdoc/`.
     Prefix(&'static str),
-    /// The path must route through `prefix`, then at least one
+    /// The path must route through `prefix`, then exactly one
     /// resolved-commit/branch segment, then end at one of `files`.
     ///
     /// This encodes rustfmt's "approved files at a resolved commit" rule:
     /// `raw.githubusercontent.com/rust-lang/rustfmt/<commit>/README.md`. A
-    /// missing commit segment, a wrong file name, or a wrong repository all
-    /// fail — nothing outside the approved two files is fetchable.
+    /// missing commit segment, a wrong file name, a wrong repository, or a
+    /// doubled path segment all fail — nothing outside the approved two files is
+    /// fetchable. The commit segment is validated as a *single, non-empty path
+    /// segment* (a resolved SHA, branch name, or tag); it is *not* checked as a
+    /// 40-character SHA here, because that stricter form plus the per-collection
+    /// byte/entry download limits belong to the fetch layer (task [010]). This
+    /// module only pins the boundary shape.
     CommitFiles {
         /// The fixed path prefix (e.g. `/rust-lang/rustfmt/`).
         prefix: &'static str,
@@ -429,6 +438,7 @@ pub enum PathBoundary {
 }
 
 /// The document format a boundary produces.
+#[allow(dead_code)] // transitional: unwired until [010]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DocFormat {
     /// Rendered book HTML, discovered through book navigation.
@@ -445,6 +455,7 @@ pub enum DocFormat {
 /// `Rustfmt` → `ingest::rustfmt`, `Clippy` → `ingest::clippy`. Selecting a
 /// parser *per boundary* lets a single collection (e.g. `clippy`) route its
 /// book and its catalog to different adapters.
+#[allow(dead_code)] // transitional: unwired until [010]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Parser {
     /// Book navigation discovery + faithful Markdown extraction (`ingest::books`).
@@ -456,6 +467,7 @@ pub enum Parser {
 }
 
 /// What role a [`Boundary`] plays in its collection.
+#[allow(dead_code)] // transitional: unwired until [010]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BoundaryKind {
     /// The collection's normal entry host.
@@ -472,6 +484,7 @@ pub enum BoundaryKind {
 /// the matching `path` rule, the `format` the host serves, the `parser` that
 /// ingests it, and its `kind` (with `aliased_to` set only for an
 /// [`BoundaryKind::Alias`]).
+#[allow(dead_code)] // transitional: unwired until [010]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Boundary {
     /// The exact host this boundary is confined to.
@@ -489,6 +502,7 @@ pub struct Boundary {
     pub aliased_to: Option<SourceCollection>,
 }
 
+#[allow(dead_code)] // transitional: unwired until [010]
 impl Boundary {
     /// Whether this boundary is an explicit source-specific alias.
     pub fn is_alias(&self) -> bool {
@@ -501,6 +515,7 @@ impl Boundary {
 // ---------------------------------------------------------------------------
 
 /// A URL resolved against the registry to its owning collection and boundary.
+#[allow(dead_code)] // transitional: unwired until [010]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedEntry<'a> {
     /// The collection this URL belongs to.
@@ -517,6 +532,7 @@ pub struct ResolvedEntry<'a> {
 /// ingestion layer (`[010]`) consults so that *only* registered sources within
 /// their boundaries are ever fetched, and explicit aliases resolve to their
 /// canonical collection.
+#[allow(dead_code)] // transitional: unwired until [010]
 pub fn resolve_url(url: &str) -> Result<ResolvedEntry<'static>, RegistryError> {
     let parsed = split_url(url)?;
 
@@ -545,6 +561,7 @@ pub fn resolve_url(url: &str) -> Result<ResolvedEntry<'static>, RegistryError> {
 }
 
 /// Whether any registered boundary uses this host.
+#[allow(dead_code)] // transitional: unwired until [010]
 pub fn host_is_registered(host: &str) -> bool {
     SourceCollection::ALL
         .iter()
@@ -558,6 +575,7 @@ pub fn host_is_registered(host: &str) -> bool {
 
 /// A URL stripped to the two components the registry matches on: host and the
 /// path *before* any query string or fragment.
+#[allow(dead_code)] // transitional: reachable only via resolve_url until [010]
 struct ParsedUrl {
     host: String,
     path: String,
@@ -572,6 +590,7 @@ struct ParsedUrl {
 /// control character, or a host whose charset is not the safe
 /// `{alnum, '.', '-'}` set is [`RegistryError::MalformedUrl`] — this is what
 /// stops host-suffix tricks like `raw.githubusercontent.com.evil.ru`.
+#[allow(dead_code)] // transitional: reachable only via resolve_url until [010]
 fn split_url(url: &str) -> Result<ParsedUrl, RegistryError> {
     let rest = match url
         .strip_prefix("https://")
@@ -633,21 +652,31 @@ fn split_url(url: &str) -> Result<ParsedUrl, RegistryError> {
 }
 
 /// Whether a URL path satisfies a path boundary.
+#[allow(dead_code)] // transitional: reachable only via resolve_url until [010]
 fn matches_path(boundary: &PathBoundary, path: &str) -> bool {
     match boundary {
         PathBoundary::Prefix(prefix) => path.starts_with(prefix),
         PathBoundary::CommitFiles { prefix, files } => {
-            // The path must start with the prefix (which ends in `/`), leaving
-            // `<commit-segment(s)>/ <file>`. The commit segment(s) and the
-            // single tail file are split by the last `/`.
+            // The path starts with the prefix (which ends in `/`), leaving
+            // exactly `<commit>/<file>`. A resolved commit/branch identifier is a
+            // single path segment (a SHA, a branch like `main`, or a tag); it is
+            // *not* validated as a 40-char SHA here — that check, with the
+            // per-collection byte/entry download limits, belongs to the fetch
+            // layer ([010]). What this boundary guarantees is strict: the URL
+            // routes through the approved repo prefix, carries exactly one
+            // non-empty, slash-free commit segment, and ends at an approved file.
             let after = match path.strip_prefix(prefix) {
                 Some(remainder) => remainder,
                 None => return false,
             };
             match after.rsplit_once('/') {
-                // A non-empty commit segment precedes the file, and the file
-                // must be one of the approved names.
-                Some((commit, file)) => !commit.is_empty() && files.contains(&file),
+                // Exactly one commit segment precedes the file: it must be
+                // non-empty, must itself contain no `/` (which rejects doubled
+                // segments like `//main/README.md` or `main//README.md`), and the
+                // tail must be one of the approved names.
+                Some((commit, file)) => {
+                    !commit.is_empty() && !commit.contains('/') && files.contains(&file)
+                }
                 // No commit segment (e.g. `.../rustfmt/README.md`, the file
                 // directly under the prefix) or an empty tail: not fetchable.
                 None => false,
@@ -825,12 +854,41 @@ mod tests {
             )
             .is_ok()
         );
-        // The rendered site is not a fetch boundary (JS shell is not ingestible).
-        assert!(resolve_url("https://rust-lang.github.io/rustfmt/").is_err());
         // A non-approved file under the same commit is refused.
         assert!(
             resolve_url("https://raw.githubusercontent.com/rust-lang/rustfmt/3a1b2c/Other.md")
                 .is_err()
+        );
+    }
+
+    // The rendered `rust-lang.github.io/rustfmt/` site is listed in `plan.md`
+    // §2 as an *entry point*, but it requires JavaScript ("an empty HTML shell
+    // is not a successful ingestion"). It is therefore NOT a fetch boundary:
+    // rustfmt's only fetch boundary is the approved raw Markdown files. This
+    // locks that decision in for the `[010]` consumer so it never tries to
+    // crawl the rendered, JS-dependent site.
+    #[test]
+    fn rustfmt_rendered_js_site_is_not_a_fetch_boundary() {
+        for url in [
+            "https://rust-lang.github.io/rustfmt/",
+            "https://rust-lang.github.io/rustfmt/options.html",
+            "https://rust-lang.github.io/rustfmt/index.html",
+        ] {
+            let err = resolve_url(url).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    RegistryError::OutsidePathBoundary { .. }
+                        | RegistryError::UnregisteredHost { .. }
+                ),
+                "{url} must be refused as a rustfmt fetch boundary, got {err:?}",
+            );
+        }
+        // The approved Markdown sibling *is* accepted, so the refusal is the
+        // rendered host, not rustfmt as a whole.
+        assert!(
+            resolve_url("https://raw.githubusercontent.com/rust-lang/rustfmt/main/README.md")
+                .is_ok()
         );
     }
 
@@ -863,6 +921,19 @@ mod tests {
             )
             .is_ok()
         );
+
+        // A doubled path segment is a malformed commit/branch identifier and is
+        // refused: the commit segment must be a single, slash-free segment.
+        for url in [
+            "https://raw.githubusercontent.com/rust-lang/rustfmt//main/README.md",
+            "https://raw.githubusercontent.com/rust-lang/rustfmt/main//README.md",
+        ] {
+            let err = resolve_url(url).unwrap_err();
+            assert!(
+                matches!(err, RegistryError::OutsidePathBoundary { .. }),
+                "{url} has a malformed (doubled) commit segment and must be refused, got {err:?}",
+            );
+        }
     }
 
     // -- Criterion 1 (part): every book resolves through its prefix. --
@@ -1097,10 +1168,21 @@ mod tests {
         );
     }
 
-    // A no-op compile check that the model types this module integrates with are
-    // the ones we expect (keeps a regression on the `Source` shape visible here).
+    // A corpus snapshot id is a URI-safe identity the future corpora loader
+    // (`crate::corpus`, `[029]-[030]`) will carry. Assert a real round trip:
+    // every URI-safe registry id also builds a `SnapshotId` whose string form
+    // is unchanged, and non-URI-safe input is rejected rather than coerced.
     #[test]
     fn snapshot_identity_round_trips_as_uri_safe() {
-        assert!(SnapshotId::new("snap-001").is_ok());
+        for c in SourceCollection::ALL {
+            let id = c.id();
+            let snap = SnapshotId::new(id).expect("{id} must build a SnapshotId");
+            assert_eq!(snap.as_str(), id, "as_str must round-trip {id}");
+            // Re-reads through the string back into an id without loss.
+            assert_eq!(SourceId::new(snap.as_str()).unwrap().as_str(), id);
+        }
+        // A non-URI-safe snapshot id is rejected, not silently coerced.
+        assert!(SnapshotId::new("snap with space").is_err());
+        assert!(SnapshotId::new("").is_err());
     }
 }
