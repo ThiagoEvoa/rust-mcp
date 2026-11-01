@@ -19,8 +19,9 @@
 //! `channel`, documentation `release`, `revision`, and stability qualifications
 //! are interpreted, compared, and surfaced — are the territory of task [008]
 //! (XS, depends on this one); `plan.md` §5 lists those fields here because they
-//! live on these records. They are modeled as explicit, unknown-preserving
-//! holders now so [008] can specialize them without re-modeling the records.
+//! live on these records. [007] models them as explicit, unknown-preserving
+//! holders so [008] can specialize them (in `crate::provenance`) without
+//! re-modeling the records.
 //!
 //! The eight *source ids* themselves are registered by task [009], the
 //! validation of a complete corpus by task [025], and the on-disk file *layout*
@@ -500,16 +501,20 @@ pub struct Continuation {
 // These model the *fields* `plan.md` §5 places on a Source; their *semantics*
 // (how `channel`/`release`/`revision`/stability are interpreted and compared,
 // and how "unknown" is surfaced) are task [008]'s. They are deliberately modeled
-// as explicit, unknown-preserving holders now so [008] can specialize them with-
-// out re-modeling the records that carry them.
+// as explicit, unknown-preserving holders here so [008] can specialize them with-
+// out re-modeling the records that carry them. As of [008] those semantics live
+// in `crate::provenance` (freshness/time, content identity, toolchain
+// compatibility); this module keeps the holders and their on-disk contract.
 // ---------------------------------------------------------------------------
 
 /// A captured-document timestamp, stored as an RFC 3339 UTC string.
 ///
 /// `plan.md` §5 distinguishes *download time*, *last-check time*, and *known
-/// upstream modification time*; task [008] owns the richer distinctions between
-/// them. Here a timestamp is a validated, non-empty string; `None` on a field
-/// means *unknown* and is preserved explicitly rather than guessed.
+/// upstream modification time*. This type is a validated, non-empty string at
+/// the [007] layer; `None` on a field means *unknown* and is preserved explicitly
+/// rather than guessed. The richer distinctions between the three times, and the
+/// RFC-3339 grammar used to compare them, are specialized by `Timestamp::as_instant`
+/// in `crate::provenance` ([008]).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Timestamp(String);
@@ -518,8 +523,9 @@ impl Timestamp {
     /// Build a timestamp from a string, rejecting empty / non-ASCII input.
     ///
     /// A full RFC 3339 grammar is not validated here (no third-party time crate
-    /// is in scope for [007]); task [008] tightens this once provenance
-    /// comparisons exist.
+    /// is in scope for [007]); RFC-3339 comparison is tightened additively in
+    /// `crate::provenance` ([008]) via `Timestamp::as_instant`, so this
+    /// constructor stays permissive and no recorded `v1` fixture is disturbed.
     pub fn new(value: impl Into<String>) -> Result<Self, SchemaError> {
         let s = value.into();
         validate_timestamp(&s)?;
@@ -561,7 +567,8 @@ impl fmt::Display for Timestamp {
 /// The distribution channel a documentation release is captured from.
 ///
 /// `plan.md` §5 calls to distinguish `stable`, `nightly-only`, `rolling`, and
-/// `unknown`; task [008] specializes when each applies. `Unknown` is the
+/// `unknown`; `crate::provenance::classify_compatibility` ([008]) decides when
+/// each applies without guessing. `Unknown` is the
 /// default-free explicit "we do not know" value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

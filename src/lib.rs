@@ -11,6 +11,8 @@
 //! - [`logging`] — stderr-only, configurable-verbosity diagnostics with the
 //!   query-body gate (`[004]`),
 //! - [`model`] — corpus and tool-contract types (`[007]`-`[008]`),
+//! - [`provenance`] — the provenance / compatibility / freshness *semantics*
+//!   layered over the [007] record holders (`[008]`),
 //! - [`ingest`] — fetching, extraction, validation, publication (`[010]`-`[028]`),
 //! - [`corpus`] — snapshot loading, IDs, bounded reads (`[029]`-`[030]`),
 //! - [`search`] — tokenization, ranking, pagination (`[033]`-`[047]`),
@@ -31,6 +33,7 @@ mod ingest;
 mod logging;
 mod mcp;
 mod model;
+mod provenance;
 mod search;
 
 pub use cli::{Cli, Command, DataDirError, apply_override, default_data_dir, resolve_data_dir};
