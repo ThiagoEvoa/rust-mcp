@@ -537,9 +537,9 @@ fn parse_tz_offset(tz_part: &str) -> Result<i64, ProvenanceError> {
     let oh = parse_int_field(h, "offset hour")?;
     let om = parse_int_field(m, "offset minute")?;
     // Bound the offset to a real RFC 3339 zone: hours `0..=14` and minutes
-    // `0..=59`. Without this, a value such as `+25:99` would be silently
-    // accepted. `sign` already extracted the literal `+`/`-`, so `oh`/`om` are
-    // non-negative and only the upper bounds need checking.
+    // `0..=59`. [`parse_int_field`] already rejects a negative magnitude, so the
+    // only remaining failure here is an upper-bound violation such as `+25:99`;
+    // without this check that would be silently accepted.
     if oh > 14 || om > 59 {
         return Err(ProvenanceError::InvalidTimestamp(format!(
             "timezone offset out of range: {oh:02}:{om:02}"
@@ -549,15 +549,27 @@ fn parse_tz_offset(tz_part: &str) -> Result<i64, ProvenanceError> {
 }
 
 /// Parse a run of ASCII digits into a non-negative integer named `field`.
+///
+/// The magnitude must be non-negative: every caller (date/time components and
+/// the offset hour/minute) requires it, and the timezone sign is extracted
+/// separately as a literal `+`/`-` in [`parse_tz_offset`]. A magnitude carrying
+/// its own sign (e.g. the `-5` in the double-signed `+-5:30`) is therefore
+/// rejected as malformed rather than accepted as a meaningless offset.
 fn parse_int_field(field: &str, name: &str) -> Result<i64, ProvenanceError> {
     if field.is_empty() {
         return Err(ProvenanceError::InvalidTimestamp(format!(
             "{name} is empty"
         )));
     }
-    field.parse::<i64>().map_err(|_| {
+    let value = field.parse::<i64>().map_err(|_| {
         ProvenanceError::InvalidTimestamp(format!("{name} is not an integer: {field:?}"))
-    })
+    })?;
+    if value < 0 {
+        return Err(ProvenanceError::InvalidTimestamp(format!(
+            "{name} must be non-negative: {field:?}"
+        )));
+    }
+    Ok(value)
 }
 
 /// Days since the Unix epoch for a proleptic Gregorian `(year, month, day)`.
@@ -1103,6 +1115,49 @@ mod tests {
             "-14:59 is a valid offset"
         );
         // A valid non-zero offset still normalises to UTC as before.
+        let with_offset = Instant::parse("2024-01-01T12:00:00+02:30")
+            .expect("+02:30 is valid")
+            .as_secs();
+        let as_utc = Instant::parse("2024-01-01T09:30:00Z")
+            .expect("UTC equivalent is valid")
+            .as_secs();
+        assert_eq!(with_offset, as_utc);
+    }
+
+    #[test]
+    fn double_signed_timezone_offsets_are_rejected() {
+        // A magnitude that carries its own sign after the leading `+`/`-` is
+        // stripped. `parse_tz_offset` now routes every offset component through
+        // `parse_int_field`, whose non-negative contract rejects it, so a
+        // double-signed body is an InvalidTimestamp rather than a silently
+        // accepted meaningless offset.
+        assert!(
+            Instant::parse("2024-01-01T00:00:00+-5:30").is_err(),
+            "+-5:30 has a negative offset-hour magnitude"
+        );
+        assert!(
+            Instant::parse("2024-01-01T00:00:00+15:-1").is_err(),
+            "+15:-1 has a negative offset-minute magnitude"
+        );
+        assert!(
+            Instant::parse("2024-01-01T00:00:00--1:00").is_err(),
+            "--1:00 has a negative offset-hour magnitude"
+        );
+        assert!(
+            Instant::parse("2024-01-01T00:00:00+5:-30").is_err(),
+            "+5:-30 has a negative offset-minute magnitude"
+        );
+        // Valid extremes and a non-zero offset still parse and normalise as
+        // before (guards against regressing the ±14:59 bounds the prior P3 fix
+        // added).
+        assert!(
+            Instant::parse("2024-01-01T00:00:00+14:59").is_ok(),
+            "+14:59 is a valid offset"
+        );
+        assert!(
+            Instant::parse("2024-01-01T00:00:00-14:59").is_ok(),
+            "-14:59 is a valid offset"
+        );
         let with_offset = Instant::parse("2024-01-01T12:00:00+02:30")
             .expect("+02:30 is valid")
             .as_secs();
