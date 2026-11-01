@@ -362,7 +362,7 @@ impl SectionId {
     /// Parse a previously derived id back into its components.
     ///
     /// The inverse of [`derive`]. Continuation parts are validated as
-    /// `part >= 1`. Returns [`SectionError::InvalidId`] for any string that is
+    /// `part >= 1`. Returns [`SchemaError::InvalidId`] for any string that is
     /// not a well-formed, URI-safe section id.
     pub fn parse(s: &str) -> Result<SectionIdParts, SchemaError> {
         ensure_id_uri_safe(s)?;
