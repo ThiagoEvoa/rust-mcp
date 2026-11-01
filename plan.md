@@ -300,7 +300,7 @@ Exit: a client can connect to the server and disconnect cleanly; no diagnostic o
 
 ### M2 — Build a trustworthy documentation corpus
 
-- [ ] Register all eight sources, allowed paths/aliases, document formats, and bounded fetching policies.
+- [x] Register all eight sources, allowed paths/aliases, document formats, and bounded fetching policies. Recorded in `src/registry.rs` (task [009], issue #9): `SourceCollection` enumerates exactly the eight approved ids; each collection owns fixed `Boundary` rules pinning the permitted host(s), path prefixes, `DocFormat`, and `Parser`; the Clippy legacy `rust-lang.github.io/rust-clippy/stable/` host is an explicit `Boundary::Alias` to the canonical catalog, and rustfmt's fetch boundary is restricted to the two approved static files (`README.md`, `Configurations.md`) at a resolved commit under `raw.githubusercontent.com/rust-lang/rustfmt/`. `resolve_url`/`resolve_source` reject any arbitrary host, off-boundary path, or unregistered id. Per-collection *byte/entry download limits* (the quantitative part of "bounded") and *redirect resolution at fetch time* are explicitly handed to task [010]; [009] establishes the boundary *shape* those limits run against.
 - [ ] Implement book/command discovery, rustfmt Markdown ingestion, and Clippy lint-catalog extraction.
 - [ ] Extract semantic Markdown sections with preserved examples and original anchors.
 - [ ] Parse API checklist entries and validate their explanatory targets.
