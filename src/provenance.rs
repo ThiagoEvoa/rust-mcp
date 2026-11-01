@@ -342,20 +342,31 @@ pub enum ToolchainCompat {
 pub fn classify_compatibility(release: &Release) -> ToolchainCompat {
     match release.channel {
         Channel::Stable => {
-            if let Some(rev) = &release.revision {
-                // A commit-pinned "stable" release is still not an identified
-                // installed stable release -> CommitPinned, never Stable.
-                if release.documentation_release.is_none() {
-                    return ToolchainCompat::CommitPinned {
-                        revision: rev.clone(),
-                    };
-                }
-            }
-            match &release.documentation_release {
-                Some(rel) => ToolchainCompat::Stable {
-                    release: rel.clone(),
+            // A present-but-blank `documentation_release` reads as *absent*, not
+            // as an empty version number. Per `plan.md` §5 we "expose
+            // unavailable upstream version information as unknown" rather than
+            // surface a fabricated `""`/whitespace value in `list_sources`.
+            match release
+                .documentation_release
+                .as_deref()
+                .map(str::trim)
+                .filter(|release| !release.is_empty())
+            {
+                Some(release) => ToolchainCompat::Stable {
+                    release: release.to_string(),
                 },
-                None => ToolchainCompat::Unknown,
+                None => {
+                    // No identified stable release. A pinned revision (even on a
+                    // `Stable` channel) is an upstream commit pin, never an
+                    // installed stable release -> CommitPinned.
+                    if let Some(rev) = &release.revision {
+                        ToolchainCompat::CommitPinned {
+                            revision: rev.clone(),
+                        }
+                    } else {
+                        ToolchainCompat::Unknown
+                    }
+                }
             }
         }
         Channel::Nightly => ToolchainCompat::Nightly,
@@ -369,6 +380,35 @@ pub fn classify_compatibility(release: &Release) -> ToolchainCompat {
 // ---------------------------------------------------------------------------
 // Dependency-free RFC 3339 helpers
 // ---------------------------------------------------------------------------
+
+/// Whether `year` is a leap year in the proleptic Gregorian calendar.
+///
+/// Divisible by 4, except centuries, except four-century years. This mirrors the
+/// calendar [`civil_days_from_epoch`] already assumes, so a validated date and
+/// its epoch mapping stay consistent.
+fn is_leap_year(year: i64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+/// The number of days in the given Gregorian `(year, month)`.
+///
+/// `month` is assumed to already be validated as `1..=12` by the caller, so this
+/// only ever returns a real month length (`28..=31`); the `0` arm exists only to
+/// make the `match` exhaustive, not to be used in a comparison.
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
 
 /// Split a date stem (`YYYY-MM-DD`) into `(year, month, day)`, validating ranges.
 fn parse_date(date_part: &str) -> Result<(i64, i64, i64), ProvenanceError> {
@@ -395,9 +435,13 @@ fn parse_date(date_part: &str) -> Result<(i64, i64, i64), ProvenanceError> {
             "month out of range: {month}"
         )));
     }
-    if !matches!(day, 1..=31) {
+    // Day must be a real day *for that month*, leap-year aware. Without this,
+    // an impossible date such as `2024-02-31` would silently roll to an adjacent
+    // day via [`civil_days_from_epoch`]; instead it is rejected as malformed.
+    let max_day = days_in_month(year, month);
+    if day < 1 || day > max_day {
         return Err(ProvenanceError::InvalidTimestamp(format!(
-            "day out of range: {day}"
+            "day out of range for {year}-{month} month: {day} (max {max_day})"
         )));
     }
     Ok((year, month, day))
@@ -492,6 +536,15 @@ fn parse_tz_offset(tz_part: &str) -> Result<i64, ProvenanceError> {
     }
     let oh = parse_int_field(h, "offset hour")?;
     let om = parse_int_field(m, "offset minute")?;
+    // Bound the offset to a real RFC 3339 zone: hours `0..=14` and minutes
+    // `0..=59`. Without this, a value such as `+25:99` would be silently
+    // accepted. `sign` already extracted the literal `+`/`-`, so `oh`/`om` are
+    // non-negative and only the upper bounds need checking.
+    if oh > 14 || om > 59 {
+        return Err(ProvenanceError::InvalidTimestamp(format!(
+            "timezone offset out of range: {oh:02}:{om:02}"
+        )));
+    }
     Ok(sign * (oh * 3_600 + om * 60))
 }
 
@@ -933,5 +986,129 @@ mod tests {
                 assert_ne!(a, b, "the four compatibility verdicts must differ");
             }
         }
+    }
+
+    // P3-1 hardening: a present-but-blank `documentation_release` must read as
+    // *unknown*, never an empty/whitespace version. (§5: expose unavailable
+    // upstream version information as unknown.)
+    #[test]
+    fn blank_documentation_release_is_unknown_not_empty_stable() {
+        let empty = Release {
+            channel: Channel::Stable,
+            documentation_release: Some(String::new()),
+            revision: None,
+        };
+        assert_eq!(
+            classify_compatibility(&empty),
+            ToolchainCompat::Unknown,
+            "an empty documentation_release is unknown, not an empty version"
+        );
+
+        for whitespace in ["   ", "\t", "\n", " \t\n "] {
+            let padded = Release {
+                channel: Channel::Stable,
+                documentation_release: Some(whitespace.to_string()),
+                revision: None,
+            };
+            assert_eq!(
+                classify_compatibility(&padded),
+                ToolchainCompat::Unknown,
+                "a whitespace documentation_release {whitespace:?} is unknown"
+            );
+        }
+
+        // A blank release plus a pinned revision is still a commit pin, never
+        // `Stable { release: "" }`.
+        let blank_pinned = Release {
+            channel: Channel::Stable,
+            documentation_release: Some("   ".into()),
+            revision: Some("deadbeef".into()),
+        };
+        assert_eq!(
+            classify_compatibility(&blank_pinned),
+            ToolchainCompat::CommitPinned {
+                revision: "deadbeef".into()
+            },
+            "a blank release with a revision is a commit pin, not an empty stable"
+        );
+
+        // A genuinely identified release (surrounded by incidental whitespace)
+        // still resolves to Stable using its trimmed value.
+        let padded_real = Release {
+            channel: Channel::Stable,
+            documentation_release: Some("  1.88.0 ".into()),
+            revision: None,
+        };
+        assert_eq!(
+            classify_compatibility(&padded_real),
+            ToolchainCompat::Stable {
+                release: "1.88.0".into()
+            },
+            "a real release with surrounding whitespace trims to its value"
+        );
+    }
+
+    // P3-2 hardening: an impossible calendar day is rejected rather than
+    // silently rolling to an adjacent day via `civil_days_from_epoch`.
+    #[test]
+    fn invalid_calendar_days_are_rejected() {
+        // Feb 31 does not exist in any year and must error, not map to Mar 2/3.
+        assert!(
+            Instant::parse("2024-02-31T00:00:00Z").is_err(),
+            "Feb 31 is not a valid day"
+        );
+        // 2023 is not a leap year, so Feb 29 2023 is invalid too.
+        assert!(
+            Instant::parse("2023-02-29T00:00:00Z").is_err(),
+            "Feb 29 2023 is not a leap day"
+        );
+        assert!(
+            Instant::parse("2023-02-31T00:00:00Z").is_err(),
+            "Feb 31 2023 is not a leap day"
+        );
+        // A real leap day still parses.
+        assert!(
+            Instant::parse("2024-02-29T00:00:00Z").is_ok(),
+            "Feb 29 2024 is a valid leap day"
+        );
+        // A 30-day month rejects the 31st without regressing a valid 30th.
+        assert!(Instant::parse("2024-04-31T00:00:00Z").is_err());
+        assert!(Instant::parse("2024-04-30T00:00:00Z").is_ok());
+    }
+
+    // P3-2 hardening: an out-of-range timezone offset is rejected.
+    #[test]
+    fn out_of_range_timezone_offsets_are_rejected() {
+        // Offset hours beyond ±14:00 are not valid RFC 3339 offsets.
+        assert!(
+            Instant::parse("2024-01-01T00:00:00+25:00").is_err(),
+            "+25:00 has an out-of-range offset hour"
+        );
+        assert!(
+            Instant::parse("2024-01-01T00:00:00-25:00").is_err(),
+            "-25:00 has an out-of-range offset hour"
+        );
+        // Minutes beyond 59 are not valid offsets.
+        assert!(
+            Instant::parse("2024-01-01T00:00:00+15:99").is_err(),
+            "+15:99 has an out-of-range offset minute"
+        );
+        // Valid offsets (including the ±14:59 extremes) still parse.
+        assert!(
+            Instant::parse("2024-01-01T00:00:00+14:59").is_ok(),
+            "+14:59 is a valid offset"
+        );
+        assert!(
+            Instant::parse("2024-01-01T00:00:00-14:59").is_ok(),
+            "-14:59 is a valid offset"
+        );
+        // A valid non-zero offset still normalises to UTC as before.
+        let with_offset = Instant::parse("2024-01-01T12:00:00+02:30")
+            .expect("+02:30 is valid")
+            .as_secs();
+        let as_utc = Instant::parse("2024-01-01T09:30:00Z")
+            .expect("UTC equivalent is valid")
+            .as_secs();
+        assert_eq!(with_offset, as_utc);
     }
 }
