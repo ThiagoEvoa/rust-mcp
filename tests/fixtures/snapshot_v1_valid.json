@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "rust-docs-2026-10-30",
+  "created_at": "2026-10-30T00:00:00Z",
+  "parser_version": "rust-docs-mcp/1",
+  "sources": [
+    {
+      "id": "cargo",
+      "title": "The Cargo Book",
+      "entry_url": "https://doc.rust-lang.org/cargo/",
+      "document_urls": [
+        "https://doc.rust-lang.org/cargo/commands/index.html"
+      ],
+      "last_checked": "2026-10-28T00:00:00Z",
+      "fetched_at": "2026-10-30T00:00:00Z",
+      "content_hash": "c128-0000000000000001ab12cd34ef567890",
+      "release": {
+        "channel": "stable"
+      },
+      "parser": "books/2024"
+    }
+  ],
+  "sections": [
+    {
+      "id": "cargo/commands%2Findex#build",
+      "source_id": "cargo",
+      "doc_title": "The cargo book",
+      "chapter_path": "commands/index",
+      "anchor": "build",
+      "heading_path": [
+        "Building"
+      ],
+      "canonical_url": "https://doc.rust-lang.org/cargo/commands/index.html#build",
+      "body": "# Build\n\nRun `cargo build` to type-check and compile without linking the final artifact.",
+      "guideline_codes": [
+        "C-CONV"
+      ],
+      "command_keys": [
+        "cargo build"
+      ],
+      "lint_ids": [
+        "clippy::unwrap_used"
+      ],
+      "qualifications": [
+        "stable"
+      ],
+      "content_hash": "c128-0000000000000002bc23de45ef678901"
+    }
+  ],
+  "checklist": [
+    {
+      "code": "C-CONV",
+      "title": "Prefer `From`/`Into` for conversions",
+      "category": "Conversions and From",
+      "location": "Conversions and From#C-CONV",
+      "explanation_sections": [
+        "cargo/commands%2Findex#build"
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "key": "cargo test",
+      "purpose": "Run unit and integration tests",
+      "upstream_sections": [
+        "cargo/commands%2Findex#build"
+      ],
+      "syntax": [
+        "cargo test [OPTIONS] [TESTNAME] [-- <TESTNAME>]"
+      ],
+      "compatibility": [
+        "stable"
+      ],
+      "effect_notes": [
+        {
+          "kind": "project_code_execution",
+          "detail": "compiles and runs the project's own test code"
+        }
+      ]
+    }
+  ],
+  "validation": {
+    "documents": 1,
+    "sections": 1,
+    "checklist_entries": 1,
+    "command_entries": 1,
+    "warnings": [
+      "recorded schema fixture; not a validated upstream corpus"
+    ]
+  },
+  "attribution": [
+    {
+      "source": "cargo",
+      "licenses": [
+        "MIT OR Apache-2.0"
+      ],
+      "repository": "https://github.com/rust-lang/rust"
+    }
+  ]
+}
