@@ -13,6 +13,9 @@
 //! - [`model`] — corpus and tool-contract types (`[007]`-`[008]`),
 //! - [`provenance`] — the provenance / compatibility / freshness *semantics*
 //!   layered over the [007] record holders (`[008]`),
+//! - [`registry`] — the fixed source registry: the eight approved collections,
+//!   their entry points, path/host boundaries, document formats, parser adapters,
+//!   and explicit aliases (`[009]`),
 //! - [`ingest`] — fetching, extraction, validation, publication (`[010]`-`[028]`),
 //! - [`corpus`] — snapshot loading, IDs, bounded reads (`[029]`-`[030]`),
 //! - [`search`] — tokenization, ranking, pagination (`[033]`-`[047]`),
@@ -34,6 +37,7 @@ mod logging;
 mod mcp;
 mod model;
 mod provenance;
+mod registry;
 mod search;
 
 pub use cli::{Cli, Command, DataDirError, apply_override, default_data_dir, resolve_data_dir};
