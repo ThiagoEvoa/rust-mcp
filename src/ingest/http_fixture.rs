@@ -57,8 +57,6 @@ pub(super) enum Behavior {
         /// The body the eventual `200` returns.
         ok_body: Vec<u8>,
     },
-    /// `503 Service Unavailable` for *every* request — retry exhaustion.
-    Always503,
     /// `429 Too Many Requests` (with `Retry-After: <retry_after>` delta-seconds)
     /// for the first `times` requests, then `200` with `ok_body`.
     RateLimitedThenOk {
@@ -397,7 +395,6 @@ fn plan(behavior: &Behavior, n: Option<u32>) -> (u16, &'static str, Vec<u8>) {
             (200, "OK", b)
         }
         Behavior::Big { size } => (200, "OK", vec![b'x'; *size]),
-        Behavior::Always503 => (503, "Service Unavailable", b"503\r\n".to_vec()),
         Behavior::FlakyThenOk {
             ok_body,
             fail_times,

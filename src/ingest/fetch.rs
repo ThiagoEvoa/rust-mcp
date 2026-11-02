@@ -111,16 +111,10 @@ impl Default for FetchPolicy {
 }
 
 impl FetchPolicy {
-    /// The transient backoff for a 1-based attempt, capped at
-    /// [`FetchPolicy::retry_after_max`].
-    fn backoff(self, attempt: u32) -> Duration {
-        let shift = attempt.saturating_sub(1).min(31);
-        let factor = self.transient_backoff.as_millis() * (1u128 << shift);
-        Duration::from_millis(factor as u64).min(self.retry_after_max)
-    }
-
-    /// A `'static` closure form of [`FetchPolicy::backoff`], borrowed once so
-    /// the transfer loop can call it from `&self` without moving the policy.
+    /// A `'static` closure form of the transient backoff, computed from
+    /// [`FetchPolicy::transient_backoff`] and capped at
+    /// [`FetchPolicy::retry_after_max`]; borrowed once so the transfer loop can
+    /// call it from `&self` without moving the policy.
     fn backoff_fn(&self) -> impl Fn(u32) -> Duration + '_ {
         let (base, cap) = (self.transient_backoff, self.retry_after_max);
         move |attempt| {
@@ -454,25 +448,35 @@ impl BoundClient {
         let mut outcomes: Vec<Option<Result<Fetched, FetchError>>> =
             (0..urls.len()).map(|_| None).collect();
 
+        // Each spawn is tagged with its slot index and URL so a joined failure
+        // is reported through that slot instead of crashing the batch.
         let mut joins = Vec::with_capacity(urls.len());
-        for (i, url) in urls.iter().enumerate() {
+        for (i, u) in urls.iter().enumerate() {
             let permit = sem.clone().acquire_owned().await.unwrap();
             let client = self.clone();
-            let url = url.clone();
-            joins.push(tokio::spawn(async move {
+            let spawn_url = u.clone();
+            let handle = tokio::spawn(async move {
                 let _permit = permit;
-                let out = client.download_with_limit(url.clone(), cap).await;
-                (i, out)
-            }));
+                client.download_with_limit(spawn_url, cap).await
+            });
+            joins.push((i, u.clone(), handle));
         }
 
-        for task in joins {
+        for (i, url, task) in joins {
             match task.await {
-                Ok((slot, out)) => {
-                    outcomes[slot] = Some(out);
+                Ok(out) => {
+                    outcomes[i] = Some(out);
                 }
+                // A transfer that *panicked* would leave its slot unset. Map the
+                // `JoinError` to a typed error so this batch path also preserves
+                // the "no avoidable panic on external input" invariant instead of
+                // deferring to the `unreachable!` guard below.
                 Err(join_err) => {
-                    tracing::warn!("fetch task cancelled/joined with error: {join_err:#}");
+                    tracing::warn!("fetch task for {url} joined with error: {join_err:#}");
+                    outcomes[i] = Some(Err(FetchError::Transport {
+                        what: format!("fetch for {url} aborted (task join error): {join_err}"),
+                        url: Some(url),
+                    }));
                 }
             }
         }
@@ -481,6 +485,9 @@ impl BoundClient {
             .into_iter()
             .map(|o| match o {
                 Some(r) => r,
+                // Every slot is written exactly once above (both the `Ok` and
+                // `JoinError` arms assign it), so this guard only trips if that
+                // invariant is ever broken.
                 None => unreachable!("every slot was written exactly once"),
             })
             .collect()
@@ -838,6 +845,10 @@ mod tests {
             f.last_modified.as_deref(),
             Some("Thu, 01 Jan 2020 00:00:00 GMT")
         );
+        // `Content-Length` is the fourth metadata header the fixture advertises;
+        // it equals the body length the server computes, so the "preserves
+        // response metadata" criterion covers all four headers.
+        assert_eq!(f.content_length, Some(f.body.len() as u64));
         // The server must have captured our self-identifying UA.
         let ua = server
             .last_user_agent()
@@ -1065,6 +1076,42 @@ mod tests {
             err,
             FetchError::TooManyRedirects { hops, .. } if hops == 3
         ));
+    }
+
+    // -- redirect loop -----------------------------------------------------
+
+    #[tokio::test]
+    async fn redirect_loop_is_detected_as_redirectloop() {
+        // A two-node cycle (`/a` -> `/b` -> `/a`) with a generous hop budget so
+        // the repeating-location detector fires *before* the hop cap does,
+        // exercising the `!visited.insert(target)` branch that the 3-node
+        // `redirect_chain_exceeding_limit_is_terminal` test skips.
+        let server = FixtureServer::start(vec![
+            (
+                "/a".to_string(),
+                Behavior::Redirect {
+                    location: "/b".to_string(),
+                },
+            ),
+            (
+                "/b".to_string(),
+                Behavior::Redirect {
+                    location: "/a".to_string(),
+                },
+            ),
+        ]);
+        // `no_backoff_policy` carries a 5-hop budget, enough to reach the repeat
+        // at the second `/b` before `TooManyRedirects` trips.
+        let client = loopback_client(no_backoff_policy(0)).unwrap();
+        let u = url(&server, "/a");
+        let err = client
+            .fetch(&u)
+            .await
+            .expect_err("a repeating location must be a loop, not a walk");
+        assert!(
+            matches!(err, FetchError::RedirectLoop { .. }),
+            "expected RedirectLoop, got {err:?}",
+        );
     }
 
     // -- bounded concurrency ---------------------------------------------
