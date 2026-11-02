@@ -40,10 +40,16 @@
 //!
 //! The public items are reached by the tests in this module and by the later
 //! M2 consumers (ingestion `[010]`, corpus loading `[029]`-`[030]`, and the MCP
-//! catalog surface `[048]`-`[059]`). Until those land the module-scoped
-//! `allow` below mirrors the precedent in [`crate::model`] and
-//! [`crate::provenance`]; it is lifted incrementally as consumers are wired in.
-#![allow(dead_code)]
+//! catalog surface `[048]`-`[059]`). Until those land, each still-unwired item
+//! carries its own `#[allow(dead_code)]` (see the per-item transitional notes
+//! below); each is lifted as its consumer is wired in.
+//!
+//! The allows are deliberately *item-scoped* rather than a single module-level
+//! `#![allow(dead_code)]`: that mirrors the precedent in [`crate::model`] and
+//! [`crate::provenance`], and — critically — any *future* unwired item added to
+//! this module re-appears in a dead-code check the moment it is written, instead
+//! of being masked by a blanket. Each transitional `#[allow(dead_code)]` comment
+//! names the task that wires it, so the last one to land can be removed cleanly.
 
 use crate::model::{Source, SourceId};
 
