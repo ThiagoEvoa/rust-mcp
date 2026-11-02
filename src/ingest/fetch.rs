@@ -1,4 +1,3 @@
-#![allow(dead_code)] // transitional: reachable once the sync pipeline consumes the fetcher
 #![allow(clippy::result_large_err)] // FetchError::Bound carries a Url, which is large
 
 //! Bounded documentation HTTP fetcher for `sync` ingestion (task [010], issue #10).
@@ -66,6 +65,7 @@ use std::time::Duration;
 /// `user_agent` self-identifies the client. The defaults are conservative
 /// upstream-courtesy values a caller can override per source.
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // transitional: wired in by the [011] sync pipeline
 pub struct FetchPolicy {
     /// A total wall-clock deadline for a whole transfer (connect + read).
     pub request_timeout: Duration,
@@ -115,6 +115,7 @@ impl FetchPolicy {
     /// [`FetchPolicy::transient_backoff`] and capped at
     /// [`FetchPolicy::retry_after_max`]; borrowed once so the transfer loop can
     /// call it from `&self` without moving the policy.
+    #[allow(dead_code)] // transitional: wired in by the [011] sync pipeline
     fn backoff_fn(&self) -> impl Fn(u32) -> Duration + '_ {
         let (base, cap) = (self.transient_backoff, self.retry_after_max);
         move |attempt| {
@@ -131,6 +132,7 @@ impl FetchPolicy {
 
 /// Whether an (intermediate or final) URL may be fetched, resolved against the
 /// source registry's host/path boundaries.
+#[allow(dead_code)] // transitional: wired in by the [011] sync pipeline
 pub(crate) trait UrlGate: Send + Sync {
     /// Classify `url`, returning the registry's reason when it is refused.
     fn allow(&self, url: &Url) -> Result<(), RegistryError>;
@@ -141,6 +143,7 @@ pub(crate) trait UrlGate: Send + Sync {
 /// falls within that host's declared boundary). This is the seam that wires the
 /// `registry` ([009]) into the fetcher ([010]): every hop a transfer takes is
 /// checked here, so an arbitrary source and an escaping redirect are refused.
+#[allow(dead_code)] // transitional: wired in by the [011] sync pipeline
 pub(crate) struct RegistryGate;
 
 impl UrlGate for RegistryGate {
@@ -192,6 +195,7 @@ impl UrlGate for LoopbackGate {
 /// `FetchError::Oversized` (the cap is all-or-nothing — see
 /// [`FetchError::Oversized`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // transitional: wired in by the [011] sync pipeline
 pub struct Fetched {
     /// The `Url` the caller requested (the transfer's start).
     pub requested: Url,
@@ -224,6 +228,7 @@ pub struct Fetched {
 /// posture of task [004], applied to the fetch layer. The sync pipeline ([011]+)
 /// maps these onto the crate's typed-error layer when it consumes this module.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // transitional: wired in by the [011] sync pipeline
 pub enum FetchError {
     /// No URL passed the [`UrlGate`] (a foreign host, an off-boundary path, or a
     /// redirect that escapes it), with the registry's reason.
@@ -371,12 +376,18 @@ impl std::error::Error for FetchError {}
 /// Reuse one client across a whole sync: the underlying connection pool and TLS
 /// session cache are amortized.
 #[derive(Clone)]
+#[allow(dead_code)] // transitional: wired in by the [011] sync pipeline
 pub struct BoundClient {
     client: reqwest::Client,
     policy: FetchPolicy,
     gate: Arc<dyn UrlGate>,
 }
 
+// Every method on `BoundClient` is transitional (no in-crate caller yet): the
+// [011] sync pipeline is the first consumer, so they are dead until it lands.
+// Scoped to the `impl` rather than module-wide so a *newly* added item is still
+// surfaced by the dead-code check.
+#[allow(dead_code)]
 impl BoundClient {
     /// Build a production fetcher whose boundary is the source registry.
     ///
@@ -419,10 +430,18 @@ impl BoundClient {
         &self.policy
     }
 
-    /// Fetch one URL within the boundary (no per-call cap; uses the policy
-    /// default).
+    /// Fetch one URL within the boundary, capped by the policy's
+    /// [`FetchPolicy::max_body_bytes`].
+    ///
+    /// This is the default single-transfer entry: a body that would exceed the
+    /// policy cap is refused (`FetchError::Oversized`), never buffered whole.
+    /// A one-off cap that differs from the policy default is available via
+    /// [`BoundClient::fetch_with_limit`] (and `fetch_all` applies the same policy
+    /// default when its per-call `cap` is `None`), so the three fetch entry
+    /// points agree on what an uncapped call means.
     pub async fn fetch(&self, url: &Url) -> Result<Fetched, FetchError> {
-        self.download_with_limit(url.clone(), None).await
+        self.download_with_limit(url.clone(), self.policy.max_body_bytes)
+            .await
     }
 
     /// Fetch one URL with a per-call body cap overriding the policy default.
@@ -618,6 +637,7 @@ impl BoundClient {
 /// reproducible and MSRV-1.88-safe. Redirects are disabled (`Policy::none()`) so
 /// the caller owns the bounded, gated walk; there is no `reqwest`-managed retry
 /// because ours honors a capped `Retry-After` the built-in one does not.
+#[allow(dead_code)] // transitional: wired in by the [011] sync pipeline
 fn build_client(policy: &FetchPolicy) -> Result<reqwest::Client, FetchError> {
     let mut builder: ClientBuilder = reqwest::Client::builder()
         .timeout(policy.request_timeout)
@@ -633,6 +653,7 @@ fn build_client(policy: &FetchPolicy) -> Result<reqwest::Client, FetchError> {
 }
 
 /// Join a 3xx's `Location` header against the URL that produced it.
+#[allow(dead_code)] // transitional: wired in by the [011] sync pipeline
 fn resolve_location(resp: &reqwest::Response, current: &Url) -> Result<Url, FetchError> {
     let location = resp
         .headers()
@@ -648,10 +669,14 @@ fn resolve_location(resp: &reqwest::Response, current: &Url) -> Result<Url, Fetc
     })
 }
 
-/// Parse a `Retry-After` header (delta-seconds form) into a `Duration`.
+/// Parse a `Retry-After` header in delta-seconds form into a `Duration`, or
+/// `None` when the header is absent or carries a non-delta-seconds value.
 ///
-/// The HTTP-date form is treated as "immediate" (an empty wait), since a stale
+/// Only the delta-seconds form is honored. The HTTP-date form (and any other
+/// non-numeric value) is *not* parsed, so the caller falls back to the policy's
+/// exponential transient backoff rather than retrying immediately: a stale
 /// upstream date is a freshness concern for `[008]`, not a pacing one.
+#[allow(dead_code)] // transitional: wired in by the [011] sync pipeline
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     headers
         .get("retry-after")
@@ -662,7 +687,12 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 
 /// Whether a transport error is worth a retry (a transient connection/IO
 /// failure as opposed to a permanent one like an unresolvable host).
+#[allow(dead_code)] // transitional: wired in by the [011] sync pipeline
 fn is_retryable_transport(err: &reqwest::Error) -> bool {
+    // `is_request()` is treated as transient on purpose: a request-shape error
+    // (a malformed or oversize request) is usually recoverable by re-sending.
+    // This is a fixed policy choice, not a claim that *every* request error is
+    // safe to retry.
     err.is_connect() || err.is_body() || err.is_request()
 }
 
@@ -671,6 +701,7 @@ fn is_retryable_transport(err: &reqwest::Error) -> bool {
 // capping the body and preserving the select metadata headers.
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)] // transitional: wired in by the [011] sync pipeline
 async fn read_capped(
     resp: reqwest::Response,
     cap_override: Option<usize>,
@@ -719,6 +750,7 @@ async fn read_capped(
 /// Read an HTTP header by its well-known (case-insensitive) name, as
 /// `Option<String>`. A `char::WHITESPACE`-free literal is a syntactic
 /// `HeaderName` so this never allocates a `HeaderName` per call.
+#[allow(dead_code)] // transitional: wired in by the [011] sync pipeline
 fn opt_header(headers: &reqwest::header::HeaderMap, name: &'static str) -> Option<String> {
     headers
         .get(name)
@@ -982,6 +1014,30 @@ mod tests {
             .fetch_with_limit(&u, Some(1024))
             .await
             .expect_err("should trip the cap");
+        match &err {
+            FetchError::Oversized { cap, .. } => assert_eq!(*cap, 1024),
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    /// The default `fetch` (no per-call cap) is still bounded by
+    /// [`FetchPolicy::max_body_bytes`], so the single-transfer entry cannot
+    /// buffer an unbounded body; it is the same entry as `fetch_all` uses when
+    /// its `cap` is `None`.
+    #[tokio::test]
+    async fn fetch_caps_the_body_with_the_policy_default() {
+        let server = FixtureServer::start(vec![(
+            "/big".to_string(),
+            Behavior::Big { size: 64 * 1024 },
+        )]);
+        let mut p = no_backoff_policy(0);
+        p.max_body_bytes = Some(1024);
+        let client = loopback_client(p).unwrap();
+        let u = url(&server, "/big");
+        let err = client
+            .fetch(&u)
+            .await
+            .expect_err("the policy default cap must still bound `fetch`");
         match &err {
             FetchError::Oversized { cap, .. } => assert_eq!(*cap, 1024),
             other => panic!("wrong error: {other:?}"),
