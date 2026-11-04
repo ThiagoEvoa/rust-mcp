@@ -37,6 +37,24 @@
 //! Every failure mode is a typed [`ResolveError`] that names the offending
 //! reference and the registry's reason — the "no avoidable panic on external
 //! input" posture of task `[004]`, applied to links.
+//!
+//! ## Relationship to the fetcher's per-hop redirect gate
+//!
+//! Network redirects are *already* boundary-enforced at the fetch layer: the
+//! `UrlGate`/`RegistryGate` in [`crate::ingest::fetch`] vets the initial URL and
+//! **every** redirect hop against the same `resolve_url` authority
+//! (`fetch`'s `out_of_boundary_redirect_is_rejected`,
+//! `redirect_chain_exceeding_limit_is_terminal`, and
+//! `redirect_loop_is_detected_as_redirectloop` tests).
+//! This module does **not** duplicate that — it owns a different concern: the
+//! **document-identity normalization** a *discovered link* needs before it can be
+//! fetched, namely resolving a relative reference against its page, normalizing
+//! (`../` collapse) the result, and preserving the original requested reference and
+//! anchor for attribution. A future extraction stage (`[012]+`) is expected to
+//! call [`resolve_document`] on links it discovers, then hand the resulting
+//! `canonical_url` to the gated fetcher; at that point both halves compose
+//! end-to-end. Until then this module carries a transitional `#[allow(dead_code)]`
+//! on each unwired item, mirroring the precedent in [`crate::ingest::fetch`].
 
 use crate::registry::{RegistryError, ResolvedEntry, resolve_url};
 use reqwest::Url;
@@ -442,13 +460,18 @@ mod tests {
     }
 
     #[test]
-    fn an_http_with_an_explicit_port_is_a_supported_scheme() {
-        // `http` is a supported scheme, so a non-standard port is *not* a scheme
-        // refusal: the registry deliberately ignores the port and matches on host
-        // + path, so this lands in the `cargo` boundary. This pins the intent that
-        // only the *scheme* is rejected here, not a port-carrying http URL.
+    fn an_http_url_with_an_explicit_port_is_accepted_on_its_scheme_and_path() {
+        // `http` is a supported *scheme* so a non-standard port does not trip the
+        // scheme check: the registry deliberately ignores the port and matches on
+        // host + path, so a port-carrying `http` URL lands in the `cargo` boundary.
+        // This pins the intent that only the *scheme* is refused (by
+        // `unsupported_schemes_are_refused`), not a port — by asserting all three
+        // of: scheme was accepted, host was accepted, boundary matched.
         let base = cargo_base();
         let doc = resolve_document("http://doc.rust-lang.org:8080/cargo/", &base).unwrap();
+        assert_eq!(doc.canonical_url.scheme(), "http");
+        assert_eq!(doc.canonical_url.host_str(), Some("doc.rust-lang.org"));
+        assert_eq!(doc.canonical_url.port(), Some(8080));
         assert_eq!(
             doc.entry.collection,
             crate::registry::SourceCollection::Cargo
@@ -471,28 +494,50 @@ mod tests {
 
     #[test]
     fn malformed_reference_is_a_typed_error() {
-        // A reference that cannot be joined — a relative reference under a base that
-        // has no path (a bare host) has no parent to resolve against, so
-        // `Url::join` fails with a "relative reference with no base" parse error.
-        // That surfaces as `MalformedReference`, not a panic: the "no avoidable
-        // panic on external input" invariant of task `[004]`.
+        // A reference that cannot be joined yields a `MalformedReference` — never a
+        // panic. The "no avoidable panic on external input" invariant of task `[004]`
+        // is what we pin: the input must be surfaced as a *typed* error whose
+        // `reason` names the join failure, not swallowed into an `Ok` arm.
+        //
+        // `///absolute-looking-but-not/a/path` has no authority component (no
+        // `host:path`), so `Url::join` against even a bare-host base fails with a
+        // non-empty-host parse error and cannot silently succeed. We assert that
+        // specific, deterministic variant rather than a three-arm `match` that no
+        // input could route through its other branches.
         let base = Url::parse("https://doc.rust-lang.org/").unwrap();
         let err = resolve_document("///absolute-looking-but-not/a/path", &base);
-        // `Url::join` of a path that cannot resolve yields a parse error; either the
-        // join fails (typed error) or, if it resolves, the outcome must still be
-        // in-boundary or a typed refusal — never a panic.
-        match err {
-            Err(ResolveError::MalformedReference { .. }) => {}
-            Err(ResolveError::OutOfBoundary { .. }) => {}
-            Ok(doc) => {
-                // If it joined, the registry still gated it to a real collection.
-                assert!(matches!(
-                    doc.entry.collection,
-                    crate::registry::SourceCollection::Cargo
-                ));
-            }
-            other => panic!("expected a typed result, got {other:?}"),
-        }
+        let resolve_err = match err {
+            Ok(doc) => panic!("a join-less reference must not silently resolve, got {doc:?}"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(
+                resolve_err,
+                ResolveError::MalformedReference {
+                    ref reference,
+                    ref reason
+                } if reference == "///absolute-looking-but-not/a/path" && !reason.is_empty()
+            ),
+            "expected a `MalformedReference` naming the offending reference, got {resolve_err:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_reference_is_a_typed_error_with_actionable_reason() {
+        // The human-readable `reason` preserves the `url` crate's parse message —
+        // enough for a caller to diagnose why a link refused without re-deriving it.
+        let base = Url::parse("https://doc.rust-lang.org/").unwrap();
+        let resolve_err = resolve_document("///no-host/x", &base)
+            .expect_err("an authority-less path must fail to join");
+        let ResolveError::MalformedReference { reason, .. } = resolve_err else {
+            panic!(
+                "an authority-less path must surface as `MalformedReference`, got {resolve_err:?}"
+            );
+        };
+        assert!(
+            !reason.trim().is_empty(),
+            "a `MalformedReference` must carry a non-empty parse reason for the caller"
+        );
     }
 
     #[test]
