@@ -138,8 +138,9 @@ impl std::error::Error for ResolveError {
 /// section to carry: the raw reference the page named, the normalized absolute
 /// URL that reference resolves to (fragment intact), the original anchor, and the
 /// registry boundary that owns it. A downstream section builder (`[013]`/`[014]`)
-/// can derive a section's `canonical_url` (the [`canonical_url`]) and its anchor
-/// from this without re-deriving them.
+/// can derive a section's `canonical_url` (the
+/// [`ResolvedDocument::canonical_url`] field) and its anchor from this without
+/// re-deriving them.
 #[allow(dead_code)] // transitional: first consumer is the [012]+ extraction pipeline
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedDocument {
@@ -379,10 +380,13 @@ mod tests {
     }
 
     #[test]
-    fn off_source_redirect_target_landed_on_via_relative_escape_is_refused() {
-        // A relative `../` that escapes the base's prefix onto a foreign *path* on
-        // the same registered host is an off-boundary target — a redirect that
-        // "lands" off-boundary must be refused, not crawled.
+    fn a_relative_escape_off_the_path_boundary_is_refused() {
+        // A relative `../` that climbs out of the base's prefix onto a foreign
+        // `path` on the same registered host is an off-boundary target. This is
+        // the resolution half of AC1's "off-source redirect": `resolve_document`
+        // normalizes the escape and defers the refusal to the registry (via
+        // `OutsidePathBoundary`); the *actual* multi-hop redirect walk is owned by
+        // the fetcher's `RegistryGate` (see the module note above), not here.
         let base = cargo_base();
         let err = resolve_document("../../book/ch01-00/hello.html", &base).unwrap_err();
         assert!(
