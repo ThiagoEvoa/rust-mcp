@@ -526,13 +526,10 @@ pub async fn discover_inventory(
     // fetch distinguishes the two.
     let pending = std::mem::take(&mut diff.removed);
     for e in pending {
-        let url = match Url::parse(&e) {
-            Ok(u) => u,
-            Err(err) => {
-                diff.unavailable.push(format!("{e} (unparseable: {err})"));
-                continue;
-            }
-        };
+        // `build_diff` only ever pushes *parseable* URLs into `diff.removed`
+        // (its `Err(_) => continue` arms skip anything else), so this parse is
+        // guaranteed to succeed — there is no unparseable branch to fall back on.
+        let url = Url::parse(&e).expect("build_diff guarantees parseable URLs in diff.removed");
         match client.fetch(&url).await {
             Ok(_) => diff.removed.push(e),
             Err(err) => diff.unavailable.push(format!("{e} ({err})")),
@@ -591,8 +588,8 @@ pub struct InventoryDiff {
     pub added: Vec<String>,
     /// Expected documents the navigation no longer exposes, that still fetch.
     pub removed: Vec<String>,
-    /// Expected documents that no longer fetch (4xx/5xx/transport or
-    /// unparseable), surfaced so a missing body is reported, not dropped.
+    /// Expected documents that no longer fetch (4xx/5xx/transport),
+    /// surfaced so a missing body is reported, not dropped.
     pub unavailable: Vec<String>,
 }
 
@@ -799,6 +796,7 @@ mod tests {
             <a href="rust-print-protocol.html">protocol</a>
             <a href="printing.html">printing</a>
             <a href="chapter-1-print.html">leaf-print-suffix</a>
+            <a href="module_print.html">leaf-print-underscore</a>
             <a href="print/intro.html">print-subdir</a>
             <a href="intro.html">intro</a>
             </body></html>"#;
@@ -815,10 +813,21 @@ mod tests {
         );
         // The genuine print-edition shapes must still be excluded.
         assert!(
-            booked
-                .iter()
-                .all(|u| !u.contains("chapter-1-print.html") && !u.contains("/print/intro.html")),
+            booked.iter().all(|u| !u.contains("chapter-1-print.html")
+                && !u.contains("/print/intro.html")
+                && !u.contains("module_print.html")),
             "genuine print-edition shapes must be excluded, not booked, got {booked:?}"
+        );
+        // The `*_print.html` leaf shape specifically must be excluded as
+        // `PrintEdition` (the underscore arm, distinct from the `-print.html`
+        // suffix arm exercised above).
+        assert!(
+            inv.excluded
+                .iter()
+                .any(|e| e.requested.contains("module_print.html")
+                    && matches!(e.reason, Exclusion::PrintEdition)),
+            "a `*_print.html` leaf must be excluded as PrintEdition, got {:?}",
+            inv.excluded
         );
         // And a print-edition exclusion reason is actually present.
         assert!(
@@ -857,6 +866,33 @@ mod tests {
             diff.removed.iter().any(|r| r.contains("chapter2")),
             "chapter2 must be removed (expected but not discovered), got removed={:?}",
             diff.removed
+        );
+    }
+
+    #[test]
+    fn diff_reports_added_documents_not_in_expected() {
+        // A chapter that IS in the navigation but NOT in the expected set must
+        // land in `added`, not silently dropped.
+        let base = Url::parse("https://doc.rust-lang.org/rustc/index.html").unwrap();
+        // Nav exposes intro.html + extra.html; expected only has intro.html.
+        let html = r#"<html><body>
+            <a href="intro.html">intro</a>
+            <a href="extra.html">extra</a>
+        </body></html>"#;
+        let inv = build_inventory(html, &base, "rustc");
+        let expected = vec!["https://doc.rust-lang.org/rustc/intro.html".to_string()];
+        let diff = build_diff(&inv, &expected);
+        // extra.html was discovered but not expected → added.
+        assert!(
+            diff.added.iter().any(|a| a.contains("extra.html")),
+            "a discovered doc not in expected must be `added`, got added={:?}",
+            diff.added
+        );
+        // intro.html is in both → not added.
+        assert!(
+            !diff.added.iter().any(|a| a.contains("intro.html")),
+            "`intro.html` is expected so it must not be added, got added={:?}",
+            diff.added
         );
     }
 
