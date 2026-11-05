@@ -10,10 +10,13 @@
 //! - [`rustfmt`] — adapter for the approved upstream rustfmt Markdown files.
 //! - [`clippy`]  — per-entry extraction from the Clippy lint catalog.
 //! - [`fetch`]   — the bounded HTTP fetcher every ingestion stage downloads through.
+//! - [`html`]    — shared HTML→Markdown article converter reused by the book,
+//!   rustfmt, and clippy ingestion stages (task `[013]`).
 
 mod books;
 mod clippy;
 mod fetch;
+mod html;
 mod resolve;
 mod rustfmt;
 
