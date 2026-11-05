@@ -90,15 +90,12 @@ fn classify(reference: &str, resolved: &ResolvedDocument) -> Option<Exclusion> {
 
     // Print editions: the rustc book's `/rustc/print/<chapter>.html` and the
     // Cargo book's `print_chapter` page — a duplicate edition of the rendered
-    // chapter, not a distinct document. Detected by the `print` path / `-print`
-    // / `_print` / `print_` shape, not by any file allow-list.
-    if path_lc.contains("/print/")
-        || path_lc.ends_with("-print.html")
-        || path_lc.ends_with("_print.html")
-        || path_lc.ends_with("/print_chapter.html")
-        || path_lc.contains("print_chapter")
-        || path_lc.contains("print-")
-    {
+    // chapter, not a distinct document. Matched on the print subdirectory
+    // segment and the print-edition *leaf shapes* only, so an unrelated path
+    // that merely contains "print" (e.g. `rust-print-protocol.html`, or a
+    // chapter legitimately about printing) is still booked, not silently
+    // dropped (the "nothing silently dropped" risk `plan.md` §2/§4 guard).
+    if is_print_edition(&path_lc) {
         return Some(Exclusion::PrintEdition);
     }
 
@@ -130,6 +127,27 @@ fn classify(reference: &str, resolved: &ResolvedDocument) -> Option<Exclusion> {
     // off-boundary case never reaches here: the resolver already refused it and
     // `disco…ory` records it as `Exclusion::Excluded`.
     None
+}
+
+/// Whether a lowercased canonical path names a *print* edition of a chapter:
+/// the print subdirectory (`/print/`) or a print-edition leaf shape
+/// (`*-print.html`, `*_print.html`, `print_chapter.html`). Scopes the decision
+/// to the path's segments and the leaf filename, so an unrelated path that
+/// merely *contains* "print" (e.g. `rust-print-protocol.html`) is not matched.
+fn is_print_edition(path_lc: &str) -> bool {
+    // A `/print/` segment on the way to a chapter (rustc: `/rustc/print/…`).
+    if path_lc.contains("/print/") {
+        return true;
+    }
+    // Match the print-edition shapes on the leaf filename only, not anywhere in
+    // the path — a leaf is the substring after the last `/` (or the whole path).
+    let leaf = match path_lc.rsplit('/').next() {
+        // `rsplit('/').next()` is always `Some` for the empty path, but a
+        // leading slash yields an empty trailing field; treat that as "no leaf".
+        Some(leaf) if !leaf.is_empty() => leaf,
+        _ => return false,
+    };
+    leaf == "print_chapter.html" || leaf.ends_with("-print.html") || leaf.ends_with("_print.html")
 }
 
 /// The fragmentless canonical identity of `url`: scheme + host + path + query,
@@ -772,6 +790,47 @@ mod tests {
     }
 
     #[test]
+    fn print_edition_match_is_scoped_not_substring() {
+        // The `PrintEdition` decision must key the leaf / segment, not a bare
+        // `contains`, so an unrelated page that merely names "print" is booked,
+        // not silently dropped — the "nothing silently dropped" guard.
+        let base = Url::parse("https://doc.rust-lang.org/rustc/index.html").unwrap();
+        let html = r#"<html><body>
+            <a href="rust-print-protocol.html">protocol</a>
+            <a href="printing.html">printing</a>
+            <a href="chapter-1-print.html">leaf-print-suffix</a>
+            <a href="print/intro.html">print-subdir</a>
+            <a href="intro.html">intro</a>
+            </body></html>"#;
+        let inv = build_inventory(html, &base, "rustc");
+        let booked: HashSet<&str> = inv.urls.iter().map(|u| u.as_str()).collect();
+        // Unrelated "print"-containing pages must still be booked.
+        assert!(
+            booked.contains("https://doc.rust-lang.org/rustc/rust-print-protocol.html"),
+            "an unrelated print-named page must be booked, got {booked:?}"
+        );
+        assert!(
+            booked.contains("https://doc.rust-lang.org/rustc/printing.html"),
+            "`printing.html` (about printing) must be booked, got {booked:?}"
+        );
+        // The genuine print-edition shapes must still be excluded.
+        assert!(
+            booked
+                .iter()
+                .all(|u| !u.contains("chapter-1-print.html") && !u.contains("/print/intro.html")),
+            "genuine print-edition shapes must be excluded, not booked, got {booked:?}"
+        );
+        // And a print-edition exclusion reason is actually present.
+        assert!(
+            inv.excluded
+                .iter()
+                .any(|e| matches!(e.reason, Exclusion::PrintEdition)),
+            "a print-edition exclusion must be recorded, got {:?}",
+            inv.excluded
+        );
+    }
+
+    #[test]
     fn diff_reports_added_removed_and_unavailable() {
         // A navigation that lists only `intro`; the caller expects `chapter2`
         // — which is `removed`. The caller also provides a `chapter1` that was
@@ -827,12 +886,13 @@ mod tests {
     // -- Loopback integration: fetch + build_inventory end-to-end --------------
 
     #[tokio::test]
-    async fn discover_inventory_loopback_books_registered_chapters() {
+    async fn build_inventory_loopback_books_registered_chapters() {
         // The navigation page is served from a loopback fixture via
         // `FixtureServer`; the HTML contains absolute registered-host links
         // so that `resolve_document` (which gates through the *real* registry)
         // accepts them. `LoopbackGate` allows `127.0.0.1`, so the fetch
-        // succeeds offline.
+        // succeeds offline. This tests the pure builder: fetch the nav page,
+        // then hand its HTML to `build_inventory` directly.
         let nav_html = r#"<html><body>
             <a href="https://doc.rust-lang.org/rustc/intro.html">intro</a>
             <a href="https://doc.rust-lang.org/rustc/traits.html">traits</a>
@@ -851,9 +911,8 @@ mod tests {
         // `server.addr` is `127.0.0.1:<ephemeral>`; the nav route is `/rustc/…`.
         let base_url = Url::parse(&format!("http://{}/rustc/index.html", server.addr))
             .expect("a valid loopback nav URL");
-        // Fetch the nav page through the gate, then call build_inventory directly
-        // on the fetched HTML so we can inspect the inventory without
-        // constructing a BoundClient per document.
+        // Fetch the nav page through the gate, then call build_inventory on the
+        // fetched HTML (the pure core, exercised in isolation).
         let fetched = client
             .fetch(&base_url)
             .await
@@ -882,6 +941,136 @@ mod tests {
             "all excluded must be Excluded, got {:?}",
             inv.excluded
         );
+    }
+
+    // -- discover_inventory: the public entry point, driven end-to-end ---------
+
+    #[tokio::test]
+    async fn discover_inventory_reports_removed_and_unavailable() {
+        // End-to-end through the *public* entry point — `discover_inventory`
+        // itself, not `build_inventory`. The nav page lists the registered
+        // `intro`/`traits` chapters (booked), while `expected` names two loopback
+        // documents the navigation does *not* expose: one that still fetches (a
+        // moved-out chapter → `removed`) and one that no longer serves (`404` →
+        // `unavailable`). This exercises the only path that populates
+        // `InventoryDiff::unavailable`, proving criterion 2's "…or unavailable
+        // expected documents are reported" rather than asserting a hand-built diff.
+        let nav_html = r#"<html><body>
+            <a href="https://doc.rust-lang.org/rustc/intro.html">intro</a>
+            <a href="https://doc.rust-lang.org/rustc/traits.html">traits</a>
+            </body></html>"#;
+        // One server, one client: the nav route serves the navigation; the two
+        // probe routes are the `expected` documents the diff fetches to split
+        // `removed` (still serves) from `unavailable` (no longer serves).
+        let server = FixtureServer::start(vec![
+            (
+                "/rustc/index.html".to_string(),
+                Behavior::Text {
+                    body: nav_html.as_bytes().to_vec(),
+                    etag: Some("\"nav-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            // A moved-out chapter that still fetches → back to `removed`.
+            (
+                "/intro.html".to_string(),
+                Behavior::Text {
+                    body: b"<html><body>still here</body></html>".to_vec(),
+                    etag: None,
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            // A document the source no longer serves → `unavailable`.
+            ("/gone.html".to_string(), Behavior::NotFound),
+        ]);
+        let client = loopback_client().expect("loopback client builds");
+        let addr = server.addr.clone();
+        let base_url = Url::parse(&format!("http://{addr}/rustc/index.html"))
+            .expect("a valid loopback nav URL");
+        // `expected` names documents the navigation did not expose. Loopback
+        // hosts pass the `LoopbackGate`, so the probe can fetch them offline;
+        // they are absent from the nav HTML, so `build_diff` starts them as
+        // `removed` and the probe then splits the two.
+        let intro_probe = format!("http://{addr}/intro.html");
+        let gone_probe = format!("http://{addr}/gone.html");
+        let expected = vec![intro_probe.clone(), gone_probe.clone()];
+
+        let (inv, diff) = discover_inventory(&client, &base_url, "rustc", Some(&expected))
+            .await
+            .expect("discover_inventory succeeds offline");
+
+        // The navigation still books the registered chapters through the public
+        // entry point (the happy path of criterion 1).
+        let keys = inv.keys();
+        assert!(
+            keys.contains("https://doc.rust-lang.org/rustc/intro.html"),
+            "intro must be booked, got {keys:?}"
+        );
+        assert!(
+            keys.contains("https://doc.rust-lang.org/rustc/traits.html"),
+            "traits must be booked, got {keys:?}"
+        );
+        // The moved-out chapter that still fetches is `removed` (the probe split
+        // it off from `unavailable`).
+        assert!(
+            diff.removed.iter().any(|r| r.contains("/intro.html")),
+            "a still-fetching expected doc must be `removed`, got removed={:?}",
+            diff.removed
+        );
+        // The document that no longer serves is `unavailable` — the headline gap
+        // this test closes: the fetch-probe path is now exercised end-to-end.
+        assert!(
+            diff.unavailable.iter().any(|u| u.contains("/gone.html")),
+            "a non-served expected doc must be `unavailable`, got unavailable={:?}",
+            diff.unavailable
+        );
+        // A discovered chapter the caller did not list is `added`, so the diff
+        // is not "complete" — nothing is silently dropped.
+        assert!(
+            !diff.is_complete(),
+            "with added/removed/unavailable deltas the diff must not be complete, got {diff:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_inventory_none_expected_skips_the_diff() {
+        // `expected = None` is the diff short-circuit: discovery returns the
+        // booked inventory with an empty diff — no `removed`/`unavailable` probe
+        // fetches happen.
+        let nav_html = r#"<html><body>
+            <a href="https://doc.rust-lang.org/rustc/intro.html">intro</a>
+            <a href="https://doc.rust-lang.org/rustc/traits.html">traits</a>
+            </body></html>"#;
+        let server = FixtureServer::start(vec![(
+            "/rustc/index.html".to_string(),
+            Behavior::Text {
+                body: nav_html.as_bytes().to_vec(),
+                etag: None,
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+            },
+        )]);
+        let client = loopback_client().expect("loopback client builds");
+        let addr = server.addr.clone();
+        let base_url = Url::parse(&format!("http://{addr}/rustc/index.html"))
+            .expect("a valid loopback nav URL");
+
+        let (inv, diff) = discover_inventory(&client, &base_url, "rustc", None)
+            .await
+            .expect("discover_inventory succeeds offline");
+
+        // The navigation books the registered chapters even with no expected set.
+        let keys = inv.keys();
+        assert!(
+            keys.contains("https://doc.rust-lang.org/rustc/intro.html"),
+            "intro must be booked, got {keys:?}"
+        );
+        // No expected set → an empty diff that is "complete" (no deltas).
+        assert_eq!(diff, InventoryDiff::default(), "None → empty diff");
+        assert!(diff.is_complete(), "an empty diff is complete");
+        assert_eq!(server.request_count(), 1, "only the nav page is fetched");
     }
 }
 // End of tests
