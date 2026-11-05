@@ -42,13 +42,13 @@ pub struct ArticleExtraction {
 
 /// A no-panic, typed extraction failure naming the offending input.
 ///
-/// Mirrors the "no avoidable panic on external input" posture of task `[004]`
-/// applied to HTML parsing: every failure path surfaces as a variant here.
+/// Mirrors the "no avoidable panic on external input" posture of task `[004]`.
+/// HTML *parsing* itself is not a failure mode — scraper's `parse_fragment` is
+/// lenient and never fails — so the failure paths are a link the registry
+/// refuses and an article that yields no content after chrome stripping.
 #[allow(dead_code)] // first consumer is the [014] section-splitting stage
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtractionError {
-    /// The page HTML could not be parsed at all.
-    UnparseableHtml,
     /// A content link could not be resolved to a valid in-boundary URL.
     UnresolvableLink {
         /// The raw `href` reference that failed.
@@ -63,7 +63,6 @@ pub enum ExtractionError {
 impl std::fmt::Display for ExtractionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExtractionError::UnparseableHtml => write!(f, "page HTML could not be parsed"),
             ExtractionError::UnresolvableLink { link, reason } => {
                 write!(f, "content link {link:?} could not be resolved: {reason}")
             }
@@ -720,7 +719,9 @@ mod tests {
         }
     }
 
-    /// No panic on malformed HTML; may return `Ok` (best-effort) or `UnparseableHtml`.
+    /// No panic on malformed HTML: scraper's `parse_fragment` is lenient, so a
+    /// broken fragment yields best-effort Markdown (`Ok`) or an empty article
+    /// (`EmptyArticle`) — never a panic.
     #[test]
     fn test_no_panic_on_malformed_html() {
         let malformed = r#"<div><a></p><h2>Heading</h1>unclosed</div>"#;
@@ -733,11 +734,43 @@ mod tests {
                     a.body
                 );
             }
-            Err(ExtractionError::UnparseableHtml) => {
-                // acceptable: defensive variant
-            }
             Err(ExtractionError::EmptyArticle) => {
-                // scraper parsed empty fragment
+                // scraper parsed an empty fragment after chrome-strip: acceptable.
+            }
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    /// A content link the registry refuses (foreign host / off-boundary path)
+    /// surfaces as `ExtractionError::UnresolvableLink` — it is never silently
+    /// dropped, never re-rendered as a live link, and never panics.
+    #[test]
+    fn test_unresolvable_link_fails_the_article() {
+        // `evil.example.com` is not a registered source → `UnregisteredHost`.
+        let html = r#"<!DOCTYPE html>
+<body>
+  <main>
+    <h1>Page</h1>
+    <p>See <a href="https://evil.example.com/x">the off-source link</a>.</p>
+  </main>
+</body>
+</html>"#;
+        let r = convert_article(html, &base());
+        match r {
+            Ok(a) => {
+                // The link must NOT have been resolved into a live absolute URL.
+                assert!(
+                    !a.body.contains("evil.example.com"),
+                    "off-source link must not survive as a rendered link:\n{}",
+                    a.body
+                );
+                panic!("expected UnresolvableLink, got Ok:\n{}", a.body);
+            }
+            Err(ExtractionError::UnresolvableLink { link, .. }) => {
+                assert!(
+                    link.contains("evil.example.com"),
+                    "offending link not named: {link}"
+                );
             }
             Err(other) => panic!("unexpected error variant: {other:?}"),
         }
