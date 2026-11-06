@@ -55,10 +55,12 @@ clap = { version = "4.6.7", features = ["derive"] }
 # (rust-version 1.77) derives the project's typed error layer, and
 # `tracing` + `tracing-subscriber` (both rust-version 1.65) give stderr-only,
 # configurable-verbosity diagnostics. `env-filter` is the only tracing-subscriber
-# feature needed (RUST_LOG / verbosity). The remaining heavier ingestion client
-# `html2md` is still deferred to its owning task ([014]); `reqwest` was added by
-# task [010] (the bounded HTTP fetcher) and `scraper` by task [013] (the HTML
-# parse/select layer of the article extractor) — both are declared below.
+# feature needed (RUST_LOG / verbosity). Task [014] (semantic section
+# splitting) reused the existing `scraper`-based converter in
+# `ingest/html.rs` plus the new `ingest/section.rs` stage, so it added no
+# dependency; `reqwest` was added by task [010] (the bounded HTTP fetcher)
+# and `scraper` by task [013] (the HTML parse/select layer of the article
+# extractor) — both are declared below.
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

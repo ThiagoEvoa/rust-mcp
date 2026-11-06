@@ -500,6 +500,295 @@ fn first_heading_id(root: &ElementRef) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Semantic section grouping (consumed by the [014] splitting stage)
+//
+// The `[013]` converter above flattens a page into one Markdown `body`. The
+// `[014]` stage instead needs the page broken into its *sections* — one per
+// semantic heading boundary — so it can attach original anchors and split
+// oversized sections with continuation metadata. These helpers own the DOM
+// walk; `[014]` (`crate::ingest::section`) re-attaches the heading to each
+// continuation part and derives the section identities.
+// ---------------------------------------------------------------------------
+
+/// One heading-delimited section of a page, before continuation splitting.
+///
+/// `heading` is the section-opening heading rendered as a Markdown line
+/// (e.g. `"## Foo"`), or `None` for a heading-less (preamble-only) article.
+/// `anchor` is that heading's `id` attribute — the *original anchor* the
+/// `[014]` stage records on the section's identity and canonical URL.
+/// `heading_path` is the breadcrumb, most-to-least specific. `segments` holds
+/// the section's content, one rendered block per element (a paragraph, list,
+/// table, code fence, or callout); the heading line is *not* included, so the
+/// `[014]` stage can re-attach it to every continuation part.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArticleSection {
+    /// The section-opening heading line, or `None` for a preamble-only article.
+    pub heading: Option<String>,
+    /// The opening heading's `id` attribute (the original anchor), when present.
+    pub anchor: Option<String>,
+    /// The heading-hierarchy breadcrumb, most-to-least specific.
+    pub heading_path: Vec<String>,
+    /// The section's content blocks, one rendered element each (paragraph,
+    /// list, table, code fence, callout).
+    pub segments: Vec<String>,
+}
+
+/// Split one in-boundary page into its heading-delimited sections.
+///
+/// `html` is content already fetched through the gated fetcher; `base_url` is
+/// the page's canonical URL used for link resolution. Book chrome is stripped,
+/// and the main content is walked so that *each semantic heading opens a new
+/// section* and the content between headings (paragraphs, lists, tables, code
+/// fences, callouts) stays attached to the section it appears in — a code
+/// example never separates from its explanation. Content that appears before the
+/// first heading is prepended to that heading's section.
+///
+/// This is the DOM half of the `[013]`+`[014]` extraction: it produces
+/// [`ArticleSection`]s; the continuation-boundary split and section-identity
+/// derivation live in `crate::ingest::section`.
+///
+/// # Errors
+///
+/// Returns [`ExtractionError::UnresolvableLink`] when a content link escapes
+/// the registry and [`ExtractionError::EmptyArticle`] when nothing survives
+/// chrome stripping — never a panic on malformed or hostile HTML.
+pub fn split_article_sections(
+    html: &str,
+    base_url: &Url,
+) -> Result<Vec<ArticleSection>, ExtractionError> {
+    let document = Html::parse_fragment(html);
+    let main = select_main(&document);
+    let blocks = render_blocks(&main, base_url)?;
+    if blocks.is_empty() {
+        return Err(ExtractionError::EmptyArticle);
+    }
+    Ok(group_sections(&blocks))
+}
+
+/// A single rendered block of the main content: a section-opening heading (a
+/// boundary) or a content block (a paragraph/list/table/code/callout).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Block {
+    /// A section-opening heading, carrying its level, text, original `id`
+    /// anchor, and rendered Markdown line.
+    Heading {
+        /// The heading level (`1`-`6`).
+        level: usize,
+        /// The collapsed heading text.
+        text: String,
+        /// The heading's `id` attribute, when present.
+        anchor: Option<String>,
+        /// The rendered Markdown heading line (e.g. `"## Foo"`).
+        line: String,
+    },
+    /// A content block rendered to Markdown (possibly multi-line).
+    Content(String),
+}
+
+/// Whether a tag is a heading (`h1`-`h6`) that opens a section boundary.
+fn is_heading(name: &str) -> bool {
+    matches!(name, "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+}
+
+/// Whether a tag is a generic container whose *children* should be lifted into
+/// the current block level, so a heading nested inside it still acts as a
+/// boundary. Everything else is a leaf content block.
+fn is_container(name: &str) -> bool {
+    matches!(name, "div" | "section" | "article" | "main" | "header")
+}
+
+/// Walk `parent`'s block-level children into a flat, ordered [`Block`] list.
+///
+/// Chrome is skipped; a heading becomes a [`Block::Heading`] boundary; a generic
+/// container is recursed into so its children (including nested headings) lift
+/// to this level; and every other element is rendered to a single
+/// [`Block::Content`]. Empty headings are dropped (they carry no boundary).
+fn render_blocks(parent: &ElementRef, base_url: &Url) -> Result<Vec<Block>, ExtractionError> {
+    let mut out: Vec<Block> = Vec::new();
+    for child in parent.children() {
+        match child.value() {
+            Node::Text(t) => {
+                let s = collapse_ws(&t.text);
+                if !s.is_empty() {
+                    out.push(Block::Content(s));
+                }
+            }
+            Node::Element(el) => {
+                let name = el.name();
+                if is_chrome_name(name, el) {
+                    continue;
+                }
+                let Some(elem) = ElementRef::wrap(child) else {
+                    continue;
+                };
+                if is_heading(name) {
+                    let text = element_text(&elem);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let level = heading_level(name);
+                    let anchor = el.attr("id").map(|s| s.to_string());
+                    let line = format!("{} {text}", "#".repeat(level));
+                    out.push(Block::Heading {
+                        level,
+                        text,
+                        anchor,
+                        line,
+                    });
+                } else if is_container(name) {
+                    out.extend(render_blocks(&elem, base_url)?);
+                } else if let Some(body) = render_content_block(&elem, base_url)? {
+                    out.push(Block::Content(body));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// Render one non-heading, non-container element to a single Markdown content
+/// block, mirroring the leaf arms of the `[013]` converter but returning one
+/// joined block instead of many lines.
+///
+/// An unexpected element falls back to its collapsed visible text so a block is
+/// never silently dropped, but never re-opens a nested heading as a boundary.
+fn render_content_block(
+    elem: &ElementRef,
+    base_url: &Url,
+) -> Result<Option<String>, ExtractionError> {
+    let name = elem.value().name();
+    let mut parts: Vec<String> = Vec::new();
+    match name {
+        "table" => {
+            let md = render_table(elem);
+            if !md.is_empty() {
+                parts.push(md);
+            }
+        }
+        "ul" | "ol" => {
+            let items = render_list(elem, name == "ol", base_url)?;
+            if !items.is_empty() {
+                parts.push(items.join("\n"));
+            }
+        }
+        "blockquote" => {
+            let text = render_inline(elem, base_url)?;
+            if !text.is_empty() {
+                parts.push(format!("> {text}"));
+            }
+        }
+        "pre" => {
+            let code = render_code(elem);
+            if !code.is_empty() {
+                parts.push(code);
+            }
+        }
+        "p" => {
+            let text = render_inline(elem, base_url)?;
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+        "a" => {
+            let text = render_inline(elem, base_url)?;
+            if text.is_empty() {
+                return Ok(None);
+            }
+            match elem.attr("href") {
+                Some(href) => match resolve_document(href, base_url) {
+                    Ok(rd) => parts.push(format!("[{text}]({})", rd.canonical_url)),
+                    Err(e) => {
+                        return Err(ExtractionError::UnresolvableLink {
+                            link: href.to_string(),
+                            reason: e.to_string(),
+                        });
+                    }
+                },
+                None => parts.push(text),
+            }
+        }
+        _ => {
+            let text = element_text(elem);
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+    }
+    if parts.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(parts.join("\n\n")))
+    }
+}
+
+/// Group a flat [`Block`] list into heading-delimited [`ArticleSection`]s.
+///
+/// A [`Block::Heading`] whose level is not greater than the level of the heading
+/// that opened the current section starts a new section (a deeper heading stays
+/// inside its parent's section). The breadcrumb is a level stack, most-to-least
+/// specific. Content before the first heading is prepended to that heading's
+/// section; a heading-less article yields a single section with no heading.
+fn group_sections(blocks: &[Block]) -> Vec<ArticleSection> {
+    let mut out: Vec<ArticleSection> = Vec::new();
+    // Breadcrumb stack of `(level, text)`, most-to-least specific top-to-bottom.
+    let mut stack: Vec<(usize, String)> = Vec::new();
+    let mut current: Option<ArticleSection> = None;
+    let mut preamble: Vec<String> = Vec::new();
+    let mut first_section = true;
+
+    for block in blocks {
+        match block {
+            Block::Content(s) => match current.as_mut() {
+                Some(section) => section.segments.push(s.clone()),
+                None => preamble.push(s.clone()),
+            },
+            Block::Heading {
+                level,
+                text,
+                anchor,
+                line,
+            } => {
+                if let Some(section) = current.take() {
+                    out.push(section);
+                }
+                // Reset the breadcrumb: drop any heading at least as deep as this
+                // one, then push this heading on top.
+                while stack.last().is_some_and(|&(lvl, _)| lvl >= *level) {
+                    stack.pop();
+                }
+                stack.push((*level, text.clone()));
+                let heading_path = stack.iter().map(|(_, t)| t.clone()).collect();
+                let mut segments = Vec::new();
+                if first_section {
+                    segments = std::mem::take(&mut preamble);
+                    first_section = false;
+                }
+                current = Some(ArticleSection {
+                    heading: Some(line.clone()),
+                    anchor: anchor.clone(),
+                    heading_path,
+                    segments,
+                });
+            }
+        }
+    }
+    if let Some(section) = current.take() {
+        out.push(section);
+    }
+    // A heading-less article keeps its preamble as a single section.
+    if out.is_empty() && !preamble.is_empty() {
+        out.push(ArticleSection {
+            heading: None,
+            anchor: None,
+            heading_path: Vec::new(),
+            segments: preamble,
+        });
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Offline acceptance tests — plan.md §11
 //
 // Both criteria from issue #13:
@@ -801,6 +1090,135 @@ mod tests {
             r.heading_path.iter().any(|h| h.contains("Section One")),
             "heading_path missing 'Section One': {v:?}",
             v = r.heading_path
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // [014] semantic section grouping (`split_article_sections`)
+    // -----------------------------------------------------------------------
+
+    /// Two headings open two sections; each section's original `id` anchor and
+    /// its content (including a code example) are captured.
+    #[test]
+    fn split_sections_groups_by_heading_with_anchors() {
+        let html = r#"<!DOCTYPE html><html><body>
+          <div id="main-content">
+            <h1 id="cross">Cross-compilation</h1>
+            <p>Intro to cross.</p>
+            <pre><code class="language-rust">fn main() {}</code></pre>
+            <h2 id="targets">Target selection</h2>
+            <p>How targets work.</p>
+          </div>
+        </body></html>"#;
+        let sections = split_article_sections(html, &base()).expect("splits");
+        assert_eq!(
+            sections.len(),
+            2,
+            "two headings -> two sections: {sections:?}"
+        );
+
+        assert_eq!(sections[0].heading.as_deref(), Some("# Cross-compilation"));
+        assert_eq!(sections[0].anchor.as_deref(), Some("cross"));
+        assert!(
+            sections[0]
+                .segments
+                .iter()
+                .any(|s| s.contains("Intro to cross.")),
+            "section 0 missing its paragraph: {sections:?}"
+        );
+        assert!(
+            sections[0]
+                .segments
+                .iter()
+                .any(|s| s.contains("```rust") && s.contains("fn main()")),
+            "code example should stay with its section: {sections:?}"
+        );
+
+        assert_eq!(sections[1].heading.as_deref(), Some("## Target selection"));
+        assert_eq!(sections[1].anchor.as_deref(), Some("targets"));
+        assert!(
+            sections[1]
+                .segments
+                .iter()
+                .any(|s| s.contains("How targets work.")),
+            "section 1 missing its paragraph: {sections:?}"
+        );
+        assert!(
+            !sections[1].segments.iter().any(|s| s.contains("fn main()")),
+            "code example must not leak into the next section: {sections:?}"
+        );
+    }
+
+    /// Content before the first heading is attached to that heading's section.
+    #[test]
+    fn split_sections_attaches_preamble_to_first_section() {
+        let html = r#"<!DOCTYPE html><html><body>
+          <div id="main-content">
+            <p>A preamble sentence.</p>
+            <h1 id="intro">Introduction</h1>
+            <p>The introduction.</p>
+          </div>
+        </body></html>"#;
+        let sections = split_article_sections(html, &base()).expect("splits");
+        assert_eq!(
+            sections.len(),
+            1,
+            "one heading -> one section: {sections:?}"
+        );
+        assert_eq!(sections[0].anchor.as_deref(), Some("intro"));
+        assert!(
+            sections[0]
+                .segments
+                .iter()
+                .any(|s| s.contains("A preamble sentence.")),
+            "preamble should attach to the first section: {sections:?}"
+        );
+        assert!(
+            sections[0]
+                .segments
+                .iter()
+                .any(|s| s.contains("The introduction.")),
+            "section content should be present: {sections:?}"
+        );
+    }
+
+    /// A heading-less article keeps its content as a single section.
+    #[test]
+    fn split_sections_headingless_is_single_section() {
+        let html = r#"<!DOCTYPE html><html><body>
+          <div id="main-content">
+            <p>Just a paragraph, no heading.</p>
+          </div>
+        </body></html>"#;
+        let sections = split_article_sections(html, &base()).expect("splits");
+        assert_eq!(
+            sections.len(),
+            1,
+            "heading-less -> one section: {sections:?}"
+        );
+        assert!(sections[0].heading.is_none());
+        assert!(sections[0].anchor.is_none());
+        assert!(
+            sections[0]
+                .segments
+                .iter()
+                .any(|s| s.contains("Just a paragraph")),
+            "content should be present: {sections:?}"
+        );
+    }
+
+    /// An all-chrome page yields `EmptyArticle` (no section, no panic).
+    #[test]
+    fn split_sections_all_chrome_is_empty_article() {
+        let html = r#"<!DOCTYPE html><html><body>
+          <nav><a>Home</a></nav>
+          <script>var x = 1;</script>
+          <style>.x{color:red;}</style>
+        </body></html>"#;
+        let r = split_article_sections(html, &base());
+        assert!(
+            matches!(r, Err(ExtractionError::EmptyArticle)),
+            "all-chrome should be EmptyArticle, got {r:?}"
         );
     }
 }
