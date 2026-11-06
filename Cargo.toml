@@ -55,9 +55,10 @@ clap = { version = "4.6.7", features = ["derive"] }
 # (rust-version 1.77) derives the project's typed error layer, and
 # `tracing` + `tracing-subscriber` (both rust-version 1.65) give stderr-only,
 # configurable-verbosity diagnostics. `env-filter` is the only tracing-subscriber
-# feature needed (RUST_LOG / verbosity). The remaining heavier ingestion clients
-# `scraper`/`html2md` are still deferred to their owning tasks ([013]/[014]);
-# `reqwest` was added by task [010] (the bounded HTTP fetcher) below.
+# feature needed (RUST_LOG / verbosity). The remaining heavier ingestion client
+# `html2md` is still deferred to its owning task ([014]); `reqwest` was added by
+# task [010] (the bounded HTTP fetcher) and `scraper` by task [013] (the HTML
+# parse/select layer of the article extractor) — both are declared below.
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -92,3 +93,17 @@ tokio = { version = "1", features = [
 # drives the body-size-cap loop — reqwest does not re-export the trait.
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+# HTML → Markdown article extractor (task [013], issue #13). `docs/COMPATIBILITY.md`
+# section 3 named `scraper` the intended HTML parser for `books.rs` article extraction
+# (its `rust-version` is undeclared on the crate, i.e. MSRV UNVERIFIED there) and its
+# owner is this task. `scraper` owns the HTML parse/select half of the book/rustfmt/
+# clippy article-to-Markdown step; the chosen closure is small, offline, and MSRV-
+# friendly: the highest declared `rust-version` in its dependency graph is
+# `html5ever`/`cssparser` at 1.85, comfortably below the project's 1.88 floor, and
+# `scraper` itself declares no `rust-version`, so neither it nor its closure forces an
+# MSRV above 1.88. `default-features = false` drops the `main` (a CLI binary +
+# `getopts`) and `errors` features — the library needs only `Html`/`Selector`, so no
+# binary or optional error surface is pulled. The Markdown renderer, the callout/
+# table/list handling, and the relative-link resolution live in `ingest/html.rs`, not
+# in `scraper`; `scraper` is the DOM layer only.
+scraper = { version = "0.29.0", default-features = false }
