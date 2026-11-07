@@ -96,10 +96,10 @@ pub fn chapter_path(final_url: &Url) -> String {
     stem.strip_suffix(".html").unwrap_or(stem).to_string()
 }
 
-/// The document title of a Style Guide page: its `h1` when present, else the
-/// shared corpus title, then the chapter path as a last resort — so a
-/// heading-less or chrome-stripped page still gets a sensible, non-empty title
-/// rather than an empty one.
+/// The document title of a Style Guide page: its `h1` when present, else its
+/// `<title>`, else the chapter path, else the shared corpus title as a last
+/// resort — so a heading-less or chrome-stripped page still gets a sensible,
+/// non-empty title rather than an empty one.
 pub fn document_title(html: &str, final_url: &Url) -> String {
     let document = Html::parse_fragment(html);
     if let Some(h1) = document.select(&Selector::parse("h1").unwrap()).next() {
