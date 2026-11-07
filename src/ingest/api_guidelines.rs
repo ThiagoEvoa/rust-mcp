@@ -16,6 +16,10 @@
 //!   code inventory, one entry per `(C-…)` guideline with its title, category,
 //!   and `category#code` location.
 //!
+//!   Task `[016]` then resolves each entry's `code` to the explanatory
+//!   section(s) that carry it and **validates** the mapping is neither missing
+//!   nor ambiguous, via [`link_explanations`].
+//!
 //! No network in these tests: the chapter/checklist bodies are served from the
 //! loopback [`FixtureServer`](crate::ingest::http_fixture::FixtureServer) and
 //! `ingest_checklist` is a pure parse, so the whole stage is exercisable offline.
@@ -25,9 +29,11 @@
 // sync pipeline that ingests the corpus end-to-end.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
+
 use crate::ingest::fetch::Fetched;
 use crate::ingest::section::{SplitConfig, SplitError, split_article};
-use crate::model::{ChecklistEntry, SchemaError, Section, SourceId};
+use crate::model::{ChecklistEntry, SchemaError, Section, SectionId, SourceId};
 use reqwest::Url;
 use scraper::{ElementRef, Html, Node, Selector};
 
@@ -46,6 +52,24 @@ pub enum IngestError {
     Split(SplitError),
     /// A section's identity could not be derived (e.g. an empty chapter path).
     Schema(SchemaError),
+    /// A checklist code resolved to no explanatory section: the code is in the
+    /// checklist but no section carries it, so the mapping is incomplete.
+    MissingExplanation {
+        /// The checklist code that found no explanatory section.
+        code: String,
+    },
+    /// A checklist code resolved to more than one *distinct* explanatory section.
+    ///
+    /// The upstream checklist implies a single explanation per code, so a code
+    /// explained in two or more places is reported rather than silently
+    /// collapsed. The distinct section ids are carried for the diagnostic.
+    AmbiguousExplanations {
+        /// The checklist code that matched multiple distinct sections.
+        code: String,
+        /// The distinct section ids that claimed the code, sorted for
+        /// determinism.
+        sections: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for IngestError {
@@ -53,6 +77,16 @@ impl std::fmt::Display for IngestError {
         match self {
             IngestError::Split(e) => write!(f, "api-guidelines section split: {e}"),
             IngestError::Schema(e) => write!(f, "api-guidelines section schema: {e}"),
+            IngestError::MissingExplanation { code } => write!(
+                f,
+                "checklist code {code} has no explanatory section (missing explanation mapping)"
+            ),
+            IngestError::AmbiguousExplanations { code, sections } => write!(
+                f,
+                "checklist code {code} maps to {} distinct explanatory sections [{}] (ambiguous explanation mapping)",
+                sections.len(),
+                sections.join(", ")
+            ),
         }
     }
 }
@@ -62,6 +96,11 @@ impl std::error::Error for IngestError {
         match self {
             IngestError::Split(e) => Some(e),
             IngestError::Schema(e) => Some(e),
+            // The mapping failures carry their own context and have no deeper
+            // cause to preserve, so they expose no `source()` chain.
+            IngestError::MissingExplanation { .. } | IngestError::AmbiguousExplanations { .. } => {
+                None
+            }
         }
     }
 }
@@ -186,9 +225,10 @@ fn with_guideline_code(mut section: Section) -> Section {
 /// `title` (the recommendation wording), its `category` (the enclosing
 /// `<strong>` group heading), and a `category#code` `location`. A guideline whose
 /// link text is not a valid code, or whose enclosing group is unknown, is skipped
-/// rather than guessed. `explanation_sections` is left empty here; resolving a
-/// code to its explanatory section is a later stage (`get_api_checklist`, task
-/// `[016]`).
+/// rather than guessed. `explanation_sections` is left empty here: resolving a
+/// code to its explanatory section(s) is the separate [`link_explanations`]
+/// stage (task `[016]`), which joins each entry's `code` to the snapshot's
+/// sections and validates that the mapping is neither missing nor ambiguous.
 pub fn ingest_checklist(fetched: &Fetched) -> Vec<ChecklistEntry> {
     let html = String::from_utf8_lossy(&fetched.body).into_owned();
     parse_checklist(&html)
@@ -227,6 +267,128 @@ fn parse_checklist(html: &str) -> Vec<ChecklistEntry> {
         });
     }
     entries
+}
+
+/// The logical identity of a section for checklist-code resolution: two
+/// continuation parts of one oversized heading share `(source, chapter, anchor)`,
+/// so they group as one explanation.
+type LogicalKey = (String, String, Option<String>);
+
+/// A checklist code mapped to its distinct explanatory groups, each group
+/// holding the section ids that share that group's [`LogicalKey`]. The two
+/// `BTreeMap`s give a deterministic walk order independent of input order.
+type ExplanationGroups = BTreeMap<String, BTreeMap<LogicalKey, Vec<SectionId>>>;
+
+/// Resolve every checklist entry's `explanation_sections` to the section(s) that
+/// explain its code, and **validate** that each code maps to exactly one
+/// explanatory section — task `[016]`, issue #16.
+///
+/// This is the stage [`ingest_checklist`] defers to: that parser produces one
+/// [`ChecklistEntry`] per upstream code with `explanation_sections` left empty,
+/// because the checklist page alone carries no section bodies. This function
+/// fills that field by joining each entry's `code` to the snapshot's
+/// [`Section`]s whose [`guideline_codes`](Section::guideline_codes) carry it —
+/// the `C-…` code is the join key between a checklist entry and the section that
+/// explains it.
+///
+/// Each entry's `explanation_sections` is populated in **deterministic order**
+/// (sorted by section id), so the result is stable across runs. Two failure
+/// conditions are **validation errors, not guesses**, and are returned rather
+/// than silently recovered:
+///
+/// - **Missing** — a code with no matching section. The mapping is incomplete; the
+///   entry's `explanation_sections` is left empty and the function returns
+///   [`IngestError::MissingExplanation`] rather than publishing an entry with a
+///   fabricated or empty target.
+/// - **Ambiguous** — a code carried by more than one *distinct* explanatory
+///   section. The upstream checklist implies one explanation per code, so a code
+///   explained in two places is reported via
+///   [`IngestError::AmbiguousExplanations`] (naming the distinct section ids)
+///   rather than being collapsed.
+///
+/// The mapping is validated **atomically**: a first pass checks every entry for
+/// the two failures above *without mutating any entry*, and only if the whole
+/// mapping is valid does a second pass fill in `explanation_sections`. A broken
+/// mapping anywhere therefore leaves *every* entry's `explanation_sections` empty
+/// — there is never a partial population of the entries that happened to resolve
+/// first.
+///
+/// A section that task `[014]` split into **continuations** of one oversized
+/// heading is *not* ambiguous: every part carries the same code and the same
+/// `(source, chapter, anchor)` identity, so they group as one explanation and all
+/// of their ids are collected for the entry. This stage runs at snapshot
+/// assembly, before publication, so a broken mapping cannot reach a published
+/// corpus. It never panics on malformed input.
+pub fn link_explanations(
+    sections: &[Section],
+    checklist: &mut [ChecklistEntry],
+) -> Result<(), IngestError> {
+    // Group the sections that carry each code by their *logical* identity
+    // (source + chapter + anchor), so a split section's continuation parts fold
+    // into one explanation while genuinely distinct sections stay separate. Two
+    // `BTreeMap`s give a deterministic walk order without relying on input order.
+    let mut by_code: ExplanationGroups = BTreeMap::new();
+    for section in sections {
+        for code in &section.guideline_codes {
+            by_code
+                .entry(code.clone())
+                .or_default()
+                .entry(logical_key(section))
+                .or_default()
+                .push(section.id.clone());
+        }
+    }
+
+    // Pass 1 — validate that every mapping is neither missing nor ambiguous,
+    // WITHOUT mutating any entry. This makes the whole operation atomic: a broken
+    // mapping anywhere leaves every `explanation_sections` empty rather than a
+    // partial population of the entries that happened to resolve first.
+    for entry in checklist.iter() {
+        let Some(target) = by_code.get(&entry.code) else {
+            return Err(IngestError::MissingExplanation {
+                code: entry.code.clone(),
+            });
+        };
+        if target.len() > 1 {
+            // The code is explained in more than one distinct section: report the
+            // distinct ids (sorted) rather than guessing which one is canonical.
+            let mut ids: Vec<String> = target
+                .values()
+                .flatten()
+                .map(|id| id.as_str().to_string())
+                .collect();
+            ids.sort();
+            return Err(IngestError::AmbiguousExplanations {
+                code: entry.code.clone(),
+                sections: ids,
+            });
+        }
+    }
+
+    // Pass 2 — every mapping validated, so fill each entry's
+    // `explanation_sections`. Exactly one logical explanation per code; a split
+    // section contributes every part, collected in deterministic, sorted order.
+    for entry in checklist.iter_mut() {
+        let target = by_code
+            .get(&entry.code)
+            .expect("every mapping was validated in pass 1");
+        let mut ids: Vec<SectionId> = target.values().flatten().cloned().collect();
+        ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        entry.explanation_sections = ids;
+    }
+    Ok(())
+}
+
+/// The logical identity of a section for checklist-code resolution: two
+/// continuation parts of one oversized heading share `(source, chapter, anchor)`,
+/// so they group as a single explanation rather than an ambiguous mapping, while
+/// a code on two genuinely different headings does not.
+fn logical_key(section: &Section) -> LogicalKey {
+    (
+        section.source_id.as_str().to_string(),
+        section.chapter_path.clone(),
+        section.anchor.clone(),
+    )
 }
 
 /// Resolve the `(category, title)` for a guideline link by walking up to its
@@ -366,12 +528,15 @@ mod tests {
     #![allow(clippy::result_large_err)]
 
     use super::{
-        SOURCE, chapter_path, guideline_code_in, ingest_chapter, ingest_checklist, parse_checklist,
+        DOC_TITLE, IngestError, SOURCE, chapter_path, guideline_code_in, ingest_chapter,
+        ingest_checklist, link_explanations, parse_checklist,
     };
     use crate::ingest::books::discover_inventory;
     use crate::ingest::fetch::{BoundClient, FetchPolicy, Fetched, LoopbackGate};
     use crate::ingest::http_fixture::{Behavior, FixtureServer};
-    use crate::model::SourceId;
+    use crate::model::{
+        ChecklistEntry, Continuation, Section, SectionBuilder, SourceId, Url as ModelUrl,
+    };
     use reqwest::Url;
     use std::sync::Arc;
 
@@ -838,5 +1003,283 @@ mod tests {
         // is fabricated.
         let html = r#"<main><h1>Intro</h1><p>No guidelines here.</p></main>"#;
         assert!(parse_checklist(html).is_empty());
+    }
+
+    // -- Task [016] / issue #16: `link_explanations` resolves each checklist
+    //    entry's `code` to its explanatory section(s) and validates the mapping
+    //    is neither missing nor ambiguous. Every fixture below is an in-memory
+    //    `Section` + `ChecklistEntry` record, so these tests are fully offline
+    //    (no `FixtureServer`, no network, no project-file access). --
+
+    /// A single-code section carrying `code`, identified by
+    /// `(SOURCE, chapter, anchor)` — the fields `link_explanations` groups by.
+    fn code_section(chapter: &str, anchor: &str, code: &str) -> Section {
+        SectionBuilder::new(
+            SourceId::new(SOURCE).expect("a valid source id"),
+            DOC_TITLE,
+            chapter,
+            ModelUrl::new(format!(
+                "https://rust-lang.github.io/api-guidelines/{chapter}.html#{anchor}"
+            ))
+            .expect("a valid canonical url"),
+            format!("explanation for {code}"),
+        )
+        .anchor(anchor)
+        .guideline_codes([code])
+        .build()
+        .expect("section builds")
+    }
+
+    /// A continuation part of one oversized section: it shares
+    /// `(source, chapter, anchor)` with its sibling but is tagged `part`/`parts`,
+    /// so its id differs while its logical identity (the grouping key) does not.
+    fn continuation_section(
+        chapter: &str,
+        anchor: &str,
+        code: &str,
+        part: usize,
+        parts: usize,
+    ) -> Section {
+        SectionBuilder::new(
+            SourceId::new(SOURCE).expect("a valid source id"),
+            DOC_TITLE,
+            chapter,
+            ModelUrl::new(format!(
+                "https://rust-lang.github.io/api-guidelines/{chapter}.html#{anchor}"
+            ))
+            .expect("a valid canonical url"),
+            format!("explanation for {code}, part {part} of {parts}"),
+        )
+        .anchor(anchor)
+        .guideline_codes([code])
+        .continuation(Continuation { part, parts })
+        .build()
+        .expect("section builds")
+    }
+
+    /// A checklist entry as `ingest_checklist` produces it: `explanation_sections`
+    /// unresolved (empty) until `link_explanations` fills it in.
+    fn checklist_entry(code: &str, title: &str, category: &str, location: &str) -> ChecklistEntry {
+        ChecklistEntry {
+            code: code.to_string(),
+            title: title.to_string(),
+            category: category.to_string(),
+            location: location.to_string(),
+            explanation_sections: Vec::new(),
+        }
+    }
+
+    /// Success: one explanatory section per code, supplied out of id order to
+    /// prove the result does not depend on input order. Each entry's
+    /// `explanation_sections` is populated and the mapping is deterministic.
+    #[test]
+    fn link_explanations_populates_explanation_sections_deterministically() {
+        let s_conv = code_section("naming", "conv", "C-CONV");
+        let s_case = code_section("casing", "case", "C-CASE");
+        let s_getter = code_section("predictability", "getters", "C-GETTER");
+        // Deliberately out of id order; two BTreeMaps inside the function make
+        // the result order independent of this order.
+        let sections = vec![s_getter.clone(), s_conv.clone(), s_case.clone()];
+
+        let make_checklist = || {
+            vec![
+                checklist_entry("C-CASE", "Casing", "Naming", "Naming#C-CASE"),
+                checklist_entry("C-CONV", "Conversions", "Naming", "Naming#C-CONV"),
+                checklist_entry(
+                    "C-GETTER",
+                    "Getters",
+                    "Interoperability",
+                    "Interoperability#C-GETTER",
+                ),
+            ]
+        };
+
+        let mut checklist = make_checklist();
+        link_explanations(&sections, &mut checklist).expect("the mapping resolves");
+
+        for entry in &checklist {
+            assert_eq!(
+                entry.explanation_sections.len(),
+                1,
+                "each code must resolve to exactly one section, got {entry:?}"
+            );
+        }
+        let c_conv = checklist
+            .iter()
+            .find(|e| e.code == "C-CONV")
+            .expect("C-CONV entry");
+        assert_eq!(
+            c_conv.explanation_sections,
+            vec![s_conv.id.clone()],
+            "C-CONV must link to its own section"
+        );
+        let c_case = checklist
+            .iter()
+            .find(|e| e.code == "C-CASE")
+            .expect("C-CASE entry");
+        assert_eq!(c_case.explanation_sections, vec![s_case.id.clone()]);
+        let c_getter = checklist
+            .iter()
+            .find(|e| e.code == "C-GETTER")
+            .expect("C-GETTER entry");
+        assert_eq!(c_getter.explanation_sections, vec![s_getter.id.clone()]);
+
+        // Determinism: a fresh link of the same inputs yields the same mapping.
+        let mut again = make_checklist();
+        link_explanations(&sections, &mut again).expect("the mapping resolves again");
+        assert_eq!(
+            checklist, again,
+            "the mapping must be deterministic across runs"
+        );
+    }
+
+    /// Missing: a checklist code with no explanatory section is a validation
+    /// failure (`MissingExplanation`), never a guess. The operation is **atomic**:
+    /// a missing code anywhere leaves every entry's `explanation_sections` empty,
+    /// so the earlier resolvable `C-CONV` entry is NOT populated by a call that
+    /// ultimately fails.
+    #[test]
+    fn link_explanations_fails_validation_when_a_code_has_no_section() {
+        let sections = vec![
+            code_section("naming", "conv", "C-CONV"),
+            code_section("casing", "case", "C-CASE"),
+        ];
+        let mut checklist = vec![
+            checklist_entry("C-CONV", "Conversions", "Naming", "Naming#C-CONV"),
+            checklist_entry("C-MISSING", "Orphan", "Other", "Other#C-MISSING"),
+        ];
+
+        let err = link_explanations(&sections, &mut checklist)
+            .expect_err("a code with no section must fail validation");
+        assert!(
+            matches!(err, IngestError::MissingExplanation { ref code } if code == "C-MISSING"),
+            "the missing code must be named in the error, got {err:?}"
+        );
+
+        // Atomicity: the failure leaves NO entry populated, not just the missing
+        // one. Neither the missing entry nor the earlier resolvable `C-CONV`
+        // entry has an `explanation_sections` (nothing fabricated, nothing
+        // partially applied).
+        for entry in &checklist {
+            assert!(
+                entry.explanation_sections.is_empty(),
+                "a failed mapping must leave every entry's explanation_sections empty, got {entry:?}"
+            );
+        }
+    }
+
+    /// Ambiguous: one code carried by two *distinct* sections (different
+    /// `(source, chapter, anchor)` identities) is a validation failure
+    /// (`AmbiguousExplanations`); the distinct section ids are named, sorted. The
+    /// failure is **atomic**: a resolvable sibling entry's
+    /// `explanation_sections` is left empty too.
+    #[test]
+    fn link_explanations_fails_validation_when_a_code_maps_to_two_distinct_sections() {
+        let sec_a = code_section("naming", "conv", "C-CONV");
+        let sec_b = code_section("predictability", "conv", "C-CONV");
+        assert_ne!(
+            sec_a.id, sec_b.id,
+            "the two sections must be distinct for the mapping to be ambiguous"
+        );
+        // A resolvable sibling, present so the test proves the failure is atomic
+        // (no entry populated, not just the ambiguous one).
+        let sec_case = code_section("casing", "case", "C-CASE");
+        let sections = vec![sec_a.clone(), sec_b.clone(), sec_case.clone()];
+        let mut checklist = vec![
+            checklist_entry("C-CONV", "Conversions", "Naming", "Naming#C-CONV"),
+            checklist_entry("C-CASE", "Casing", "Other", "Other#C-CASE"),
+        ];
+
+        let err = link_explanations(&sections, &mut checklist)
+            .expect_err("a code in two distinct sections must fail validation");
+        match err {
+            IngestError::AmbiguousExplanations { code, sections } => {
+                assert_eq!(code, "C-CONV", "the ambiguous code must be named");
+                // Both distinct ids are reported, sorted for determinism.
+                let mut expected =
+                    vec![sec_a.id.as_str().to_string(), sec_b.id.as_str().to_string()];
+                expected.sort();
+                assert_eq!(
+                    sections, expected,
+                    "both distinct section ids must be reported, sorted"
+                );
+                assert_eq!(sections.len(), 2, "the ambiguity must name both sections");
+            }
+            other => panic!("expected AmbiguousExplanations, got {other:?}"),
+        }
+
+        // Atomicity: the ambiguity leaves NO entry populated — not just the
+        // ambiguous `C-CONV` entry, but the resolvable `C-CASE` sibling too.
+        for entry in &checklist {
+            assert!(
+                entry.explanation_sections.is_empty(),
+                "a failed mapping must leave every entry's explanation_sections empty, got {entry:?}"
+            );
+        }
+    }
+
+    /// Continuation grouping: two continuation parts of one oversized heading
+    /// share `(source, chapter, anchor)` and the same code, so they fold into a
+    /// *single* explanation (all part ids collected, sorted) rather than being
+    /// reported as ambiguous.
+    #[test]
+    fn continuation_parts_fold_into_one_explanation() {
+        let part1 = continuation_section("naming", "conv", "C-CONV", 1, 2);
+        let part2 = continuation_section("naming", "conv", "C-CONV", 2, 2);
+        assert_ne!(part1.id, part2.id, "continuation parts get distinct ids");
+        let sections = vec![part1.clone(), part2.clone()];
+        let mut checklist = vec![checklist_entry(
+            "C-CONV",
+            "Conversions",
+            "Naming",
+            "Naming#C-CONV",
+        )];
+
+        link_explanations(&sections, &mut checklist)
+            .expect("continuation parts are one explanation, not ambiguous");
+
+        // Both part ids are collected, in deterministic (sorted-by-id) order.
+        let mut expected = vec![part1.id.clone(), part2.id.clone()];
+        expected.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        assert_eq!(
+            checklist[0].explanation_sections, expected,
+            "both continuation ids must fold into one explanation, sorted"
+        );
+        assert_eq!(
+            checklist[0].explanation_sections.len(),
+            2,
+            "both parts of the split section must be present"
+        );
+    }
+
+    /// Acceptance criterion 1 (retention): linking must preserve each entry's
+    /// original `code`, `title`, `category`, and `location`; only
+    /// `explanation_sections` is filled in.
+    #[test]
+    fn link_explanations_retains_each_entry_code_title_category_and_location() {
+        let section = code_section("naming", "conv", "C-CONV");
+        let sections = vec![section.clone()];
+        let mut checklist = vec![checklist_entry(
+            "C-CONV",
+            "Ad-hoc conversions follow as_, to_, into_ conventions",
+            "Naming",
+            "Naming#C-CONV",
+        )];
+
+        link_explanations(&sections, &mut checklist).expect("the mapping resolves");
+
+        let entry = &checklist[0];
+        assert_eq!(entry.code, "C-CONV");
+        assert_eq!(
+            entry.title,
+            "Ad-hoc conversions follow as_, to_, into_ conventions"
+        );
+        assert_eq!(entry.category, "Naming");
+        assert_eq!(entry.location, "Naming#C-CONV");
+        assert_eq!(
+            entry.explanation_sections,
+            vec![section.id],
+            "only explanation_sections is populated, pointing at the code's section"
+        );
     }
 }
