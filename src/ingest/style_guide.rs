@@ -269,7 +269,8 @@ mod tests {
             "a topical chapter (naming.html) must be booked, got {keys:?}"
         );
         assert!(
-            keys.iter().any(|k| k.ends_with("/style-guide/formatting.html")),
+            keys.iter()
+                .any(|k| k.ends_with("/style-guide/formatting.html")),
             "a second topical chapter (formatting.html) must be booked, got {keys:?}"
         );
         // No delta against an omitted expected set, so the discovery is complete.
@@ -284,8 +285,17 @@ mod tests {
 
     /// A compact `naming.html` chapter: an `h1`, a naming `h2` carrying a
     /// recommendation paragraph, a fenced Rust example, a stability/version
-    /// qualification rendered as a callout, and a relative content link. The
+    /// qualification rendered as a callout, and a canonical content link. The
     /// `<nav>` carries a sibling link that must be stripped as chrome.
+    ///
+    /// The content link is an absolute, in-boundary `doc.rust-lang.org` URL
+    /// rather than a relative one: these tests fetch the body from the loopback
+    /// `FixtureServer`, so `ingest_chapter` (mirroring `api_guidelines`) uses the
+    /// loopback `final_url` as its link-resolution base. A *relative* content
+    /// link would then resolve to the loopback host, which the registry refuses
+    /// as off-boundary; an absolute registered-host link instead resolves to
+    /// itself (`resolve_document` performs no fetch), so the test stays offline
+    /// while still proving that a canonical content link survives extraction.
     fn naming_html() -> &'static str {
         r##"<!DOCTYPE html>
 <html><body>
@@ -296,7 +306,7 @@ mod tests {
     <p>Function and method names use <code>snake_case</code>; this is the default Rust style convention for names.</p>
     <pre><code class="language-rust">fn snake_case_name(x: i32) -&gt; i32 { x }</code></pre>
     <blockquote><strong>Qualification</strong> Applies to the 2021 and 2024 editions.</blockquote>
-    <p>See the <a href="formatting.html">Formatting</a> chapter for related conventions.</p>
+    <p>See the <a href="https://doc.rust-lang.org/style-guide/formatting.html">Formatting</a> chapter for related conventions.</p>
   </main>
 </body></html>"##
     }
@@ -313,11 +323,8 @@ mod tests {
             },
         )]);
         let client = loopback_client().expect("loopback client builds");
-        let base_url = Url::parse(&format!(
-            "http://{}/style-guide/naming.html",
-            server.addr
-        ))
-        .expect("a valid loopback chapter URL");
+        let base_url = Url::parse(&format!("http://{}/style-guide/naming.html", server.addr))
+            .expect("a valid loopback chapter URL");
 
         let fetched = client
             .fetch(&base_url)
@@ -339,7 +346,9 @@ mod tests {
 
         // (2b) Source qualification preserved (rendered as a callout), verbatim.
         assert!(
-            naming.body.contains("Applies to the 2021 and 2024 editions"),
+            naming
+                .body
+                .contains("Applies to the 2021 and 2024 editions"),
             "the source qualification must survive in the section body:\n{}",
             naming.body
         );
@@ -364,21 +373,20 @@ mod tests {
             naming.body
         );
 
-        // (2e) Canonical link retained: the relative `formatting.html` link is
-        // resolved to its absolute, in-boundary form.
+        // (2e) Canonical link retained: the content link survives extraction in
+        // its absolute, in-boundary form (a relative link could not resolve
+        // offline against the loopback base, so the fixture uses the absolute
+        // registered-host URL it resolves to in production).
         assert!(
             naming
                 .body
                 .contains("https://doc.rust-lang.org/style-guide/formatting.html"),
-            "a relative content link must resolve to its absolute in-boundary form:\n{}",
+            "a canonical content link must survive extraction in its absolute form:\n{}",
             naming.body
         );
         // The section's canonical URL carries the original anchor.
         assert!(
-            naming
-                .canonical_url
-                .as_str()
-                .contains("#naming"),
+            naming.canonical_url.as_str().contains("#naming"),
             "the canonical URL must carry the original anchor, got {}",
             naming.canonical_url.as_str()
         );
@@ -410,18 +418,19 @@ mod tests {
             },
         )]);
         let client = loopback_client().expect("loopback client builds");
-        let base_url = Url::parse(&format!(
-            "http://{}/style-guide/naming.html",
-            server.addr
-        ))
-        .expect("a valid loopback chapter URL");
+        let base_url = Url::parse(&format!("http://{}/style-guide/naming.html", server.addr))
+            .expect("a valid loopback chapter URL");
         let fetched = client
             .fetch(&base_url)
             .await
             .expect("chapter fetch succeeds offline");
         let sections = ingest_chapter(&fetched).expect("ingestion succeeds");
 
-        let all: String = sections.iter().map(|s| s.body.as_str()).collect::<Vec<_>>().join("\n");
+        let all: String = sections
+            .iter()
+            .map(|s| s.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         // The chrome's "Introduction" nav link must not appear as body text.
         assert!(
             !all.contains("Introduction"),
@@ -434,9 +443,7 @@ mod tests {
     #[test]
     fn chapter_path_derives_the_file_stem() {
         assert_eq!(
-            chapter_path(
-                &Url::parse("https://doc.rust-lang.org/style-guide/naming.html").unwrap()
-            ),
+            chapter_path(&Url::parse("https://doc.rust-lang.org/style-guide/naming.html").unwrap()),
             "naming"
         );
         assert_eq!(
@@ -461,11 +468,9 @@ mod tests {
         assert_eq!(document_title(with_h1, &url), "Rust Style Guide");
 
         // Without an `h1`, the `<title>` is used.
-        let with_title = r#"<html><head><title>The Rust Style Guide</title></head><body><p>x</p></body></html>"#;
-        assert_eq!(
-            document_title(with_title, &url),
-            "The Rust Style Guide"
-        );
+        let with_title =
+            r#"<html><head><title>The Rust Style Guide</title></head><body><p>x</p></body></html>"#;
+        assert_eq!(document_title(with_title, &url), "The Rust Style Guide");
 
         // With neither, the chapter path is the last resort.
         let headingless = r#"<html><body><p>no heading, no title</p></body></html>"#;
@@ -474,7 +479,10 @@ mod tests {
         // The shared corpus title is the ultimate fallback for a bare, off-boundary
         // URL with no heading, title, or path.
         let bare = Url::parse("https://doc.rust-lang.org/style-guide/").unwrap();
-        assert_eq!(document_title("<html><body></body></html>", &bare), DOC_TITLE);
+        assert_eq!(
+            document_title("<html><body></body></html>", &bare),
+            DOC_TITLE
+        );
     }
 
     #[test]
