@@ -19,6 +19,10 @@
 //!   the shared book discovery and ingests its chapters, retaining each
 //!   guideline's `C-…` code, examples, wording, and anchor, plus the checklist
 //!   entries (task `[015]`).
+//! - [`style_guide`] — the `style-guide` adapter: books the Style Guide via the
+//!   shared book discovery and splits its chapters into sections, retaining each
+//!   section's examples, qualifications, and anchor — the source carries no
+//!   checklist or `C-…` codes, so no code enrichment (task `[017]`).
 
 mod api_guidelines;
 mod books;
@@ -28,6 +32,7 @@ mod html;
 mod resolve;
 mod rustfmt;
 mod section;
+mod style_guide;
 
 #[cfg(test)]
 mod http_fixture;
