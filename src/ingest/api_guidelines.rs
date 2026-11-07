@@ -306,6 +306,13 @@ type ExplanationGroups = BTreeMap<String, BTreeMap<LogicalKey, Vec<SectionId>>>;
 ///   [`IngestError::AmbiguousExplanations`] (naming the distinct section ids)
 ///   rather than being collapsed.
 ///
+/// The mapping is validated **atomically**: a first pass checks every entry for
+/// the two failures above *without mutating any entry*, and only if the whole
+/// mapping is valid does a second pass fill in `explanation_sections`. A broken
+/// mapping anywhere therefore leaves *every* entry's `explanation_sections` empty
+/// — there is never a partial population of the entries that happened to resolve
+/// first.
+///
 /// A section that task `[014]` split into **continuations** of one oversized
 /// heading is *not* ambiguous: every part carries the same code and the same
 /// `(source, chapter, anchor)` identity, so they group as one explanation and all
@@ -332,7 +339,11 @@ pub fn link_explanations(
         }
     }
 
-    for entry in checklist.iter_mut() {
+    // Pass 1 — validate that every mapping is neither missing nor ambiguous,
+    // WITHOUT mutating any entry. This makes the whole operation atomic: a broken
+    // mapping anywhere leaves every `explanation_sections` empty rather than a
+    // partial population of the entries that happened to resolve first.
+    for entry in checklist.iter() {
         let Some(target) = by_code.get(&entry.code) else {
             return Err(IngestError::MissingExplanation {
                 code: entry.code.clone(),
@@ -352,8 +363,15 @@ pub fn link_explanations(
                 sections: ids,
             });
         }
-        // Exactly one logical explanation: collect its section ids (a split
-        // section contributes every part) in deterministic, sorted order.
+    }
+
+    // Pass 2 — every mapping validated, so fill each entry's
+    // `explanation_sections`. Exactly one logical explanation per code; a split
+    // section contributes every part, collected in deterministic, sorted order.
+    for entry in checklist.iter_mut() {
+        let target = by_code
+            .get(&entry.code)
+            .expect("every mapping was validated in pass 1");
         let mut ids: Vec<SectionId> = target.values().flatten().cloned().collect();
         ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         entry.explanation_sections = ids;
@@ -1116,9 +1134,10 @@ mod tests {
     }
 
     /// Missing: a checklist code with no explanatory section is a validation
-    /// failure (`MissingExplanation`), never a guess. The mapping is processed
-    /// in order, so an earlier resolvable entry is still populated, but the
-    /// missing entry's `explanation_sections` stays empty (nothing fabricated).
+    /// failure (`MissingExplanation`), never a guess. The operation is **atomic**:
+    /// a missing code anywhere leaves every entry's `explanation_sections` empty,
+    /// so the earlier resolvable `C-CONV` entry is NOT populated by a call that
+    /// ultimately fails.
     #[test]
     fn link_explanations_fails_validation_when_a_code_has_no_section() {
         let sections = vec![
@@ -1137,27 +1156,23 @@ mod tests {
             "the missing code must be named in the error, got {err:?}"
         );
 
-        let missing = checklist
-            .iter()
-            .find(|e| e.code == "C-MISSING")
-            .expect("the missing entry still exists");
-        assert!(
-            missing.explanation_sections.is_empty(),
-            "a missing mapping must not fabricate an explanation, got {missing:?}"
-        );
-        let resolved = checklist
-            .iter()
-            .find(|e| e.code == "C-CONV")
-            .expect("the resolvable entry exists");
-        assert!(
-            !resolved.explanation_sections.is_empty(),
-            "an earlier resolvable entry must still be populated before the failure"
-        );
+        // Atomicity: the failure leaves NO entry populated, not just the missing
+        // one. Neither the missing entry nor the earlier resolvable `C-CONV`
+        // entry has an `explanation_sections` (nothing fabricated, nothing
+        // partially applied).
+        for entry in &checklist {
+            assert!(
+                entry.explanation_sections.is_empty(),
+                "a failed mapping must leave every entry's explanation_sections empty, got {entry:?}"
+            );
+        }
     }
 
     /// Ambiguous: one code carried by two *distinct* sections (different
     /// `(source, chapter, anchor)` identities) is a validation failure
-    /// (`AmbiguousExplanations`); the distinct section ids are named, sorted.
+    /// (`AmbiguousExplanations`); the distinct section ids are named, sorted. The
+    /// failure is **atomic**: a resolvable sibling entry's
+    /// `explanation_sections` is left empty too.
     #[test]
     fn link_explanations_fails_validation_when_a_code_maps_to_two_distinct_sections() {
         let sec_a = code_section("naming", "conv", "C-CONV");
@@ -1166,13 +1181,14 @@ mod tests {
             sec_a.id, sec_b.id,
             "the two sections must be distinct for the mapping to be ambiguous"
         );
-        let sections = vec![sec_a.clone(), sec_b.clone()];
-        let mut checklist = vec![checklist_entry(
-            "C-CONV",
-            "Conversions",
-            "Naming",
-            "Naming#C-CONV",
-        )];
+        // A resolvable sibling, present so the test proves the failure is atomic
+        // (no entry populated, not just the ambiguous one).
+        let sec_case = code_section("casing", "case", "C-CASE");
+        let sections = vec![sec_a.clone(), sec_b.clone(), sec_case.clone()];
+        let mut checklist = vec![
+            checklist_entry("C-CONV", "Conversions", "Naming", "Naming#C-CONV"),
+            checklist_entry("C-CASE", "Casing", "Other", "Other#C-CASE"),
+        ];
 
         let err = link_explanations(&sections, &mut checklist)
             .expect_err("a code in two distinct sections must fail validation");
@@ -1190,6 +1206,15 @@ mod tests {
                 assert_eq!(sections.len(), 2, "the ambiguity must name both sections");
             }
             other => panic!("expected AmbiguousExplanations, got {other:?}"),
+        }
+
+        // Atomicity: the ambiguity leaves NO entry populated — not just the
+        // ambiguous `C-CONV` entry, but the resolvable `C-CASE` sibling too.
+        for entry in &checklist {
+            assert!(
+                entry.explanation_sections.is_empty(),
+                "a failed mapping must leave every entry's explanation_sections empty, got {entry:?}"
+            );
         }
     }
 
