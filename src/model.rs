@@ -829,6 +829,22 @@ pub struct Section {
     pub continuation: Option<Continuation>,
 }
 
+impl Section {
+    /// Recompute this section's [`content_hash`](Section::content_hash) over its
+    /// current content fields.
+    ///
+    /// [`SectionBuilder::build`] fixes the hash over the content *as built*. A
+    /// field set after `build` — the API-guidelines stage tags each section with
+    /// the `(C-…)` code its heading carries, via `guideline_codes` — would
+    /// otherwise leave the hash describing the *pre-tag* content, so two
+    /// sections that differ only by `guideline_codes` would be indistinguishable
+    /// by hash. Call this once after such a mutation so the hash describes the
+    /// section's final content (the hash is the identity of the captured bytes).
+    pub fn recompute_content_hash(&mut self) {
+        self.content_hash = CorpusHash::compute(section_content(self));
+    }
+}
+
 /// A fluent builder for [`Section`], deriving the section's [`SectionId`] and
 /// [`CorpusHash`] from the supplied components.
 ///
