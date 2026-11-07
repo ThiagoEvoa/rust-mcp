@@ -147,21 +147,34 @@ pub fn ingest_chapter(fetched: &Fetched) -> Result<Vec<Section>, IngestError> {
     Ok(enriched)
 }
 
-/// Tag a split section with the guideline code its heading carries, when any.
+/// Tag a split section with the guideline code that scopes it, when any.
 ///
-/// The code lives in the section's most-specific heading (the last
-/// `heading_path` element, e.g. `"Ad-hoc conversions … (C-CONV)"`). A section
-/// without a code — the chapter's `h1` or a non-guideline heading — keeps its
-/// code list empty. The code is attached as a public-field mutation rather than a
-/// rebuild, so the section's already-derived id / canonical anchor are preserved
-/// exactly.
+/// A `(C-…)` code lives in a heading the section descends from, so the
+/// breadcrumb is walked **most-specific first**: the section's own heading is the
+/// normal carrier (e.g. `"Ad-hoc conversions … (C-CONV)"`), but a code opened by
+/// a coarser ancestor heading (a guideline's sub-section) is captured too, so a
+/// code that scopes the section is never swallowed. The *nearest* such heading
+/// wins — a deeper heading's code is preferred over an ancestor's. A section
+/// whose whole breadcrumb carries no well-formed marker (the chapter's `h1` and
+/// any guideline-less subtree) keeps its code list empty.
+///
+/// The code is attached as a public-field mutation rather than a rebuild, so the
+/// section's already-derived id / canonical anchor are preserved exactly; the
+/// [`content_hash`](crate::model::Section::content_hash) is then recomputed so it
+/// describes the tagged content — two sections that differ only by code differ in
+/// hash.
 fn with_guideline_code(mut section: Section) -> Section {
-    if let Some(code) = section
+    // Most-specific first (`rev()`), so the nearest ancestor that carries a code
+    // is taken. Computed before the mutation to avoid aliasing `heading_path`
+    // and `guideline_codes` at once.
+    let code = section
         .heading_path
-        .last()
-        .and_then(|h| guideline_code_in(h))
-    {
+        .iter()
+        .rev()
+        .find_map(|h| guideline_code_in(h));
+    if let Some(code) = code {
         section.guideline_codes = vec![code];
+        section.recompute_content_hash();
     }
     section
 }
@@ -272,9 +285,11 @@ fn guideline_title(li: &ElementRef) -> String {
             _ => {}
         }
     }
-    // The upstream renders the code as a trailing `(C-…)`; drop that trailing
-    // parenthesis so the title is the recommendation wording alone.
-    collapse_ws(buf.trim_end_matches('('))
+    // The upstream checklist renders the code as a trailing "(C-…)" group whose
+    // opening parenthesis sits in the text node preceding the link (e.g.
+    // "… conventions ("). Strip only that sentinel — a space-prefixed open
+    // paren — so a legitimate trailing "(" is never over-trimmed, then collapse.
+    collapse_ws(buf.trim_end_matches(" ("))
 }
 
 /// Extract the upstream guideline code (`C-CONV`, `C-ITER-TY`, …) from a heading
@@ -547,6 +562,141 @@ mod tests {
                 .iter()
                 .map(|s| (&s.guideline_codes, &s.body))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// F-01 regression: a section's `content_hash` reflects its *final* content,
+    /// including the `guideline_codes` the enrichment tags on. Before the fix the
+    /// hash was fixed at `SectionBuilder::build` time over an empty code list, so
+    /// a tagged section hashed its pre-tag content and two sections that differ
+    /// only by code were indistinguishable by hash.
+    #[tokio::test]
+    async fn content_hash_reflects_enriched_guideline_code() {
+        let server = FixtureServer::start(vec![(
+            "/api-guidelines/naming.html".to_string(),
+            Behavior::Text {
+                body: naming_html().as_bytes().to_vec(),
+                etag: Some("\"naming-1\"".to_string()),
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+            },
+        )]);
+        let client = loopback_client().expect("loopback client builds");
+        let base_url = Url::parse(&format!(
+            "http://{}/api-guidelines/naming.html",
+            server.addr
+        ))
+        .expect("a valid loopback chapter URL");
+        let fetched = client
+            .fetch(&base_url)
+            .await
+            .expect("chapter fetch succeeds offline");
+        let sections = ingest_chapter(&fetched).expect("ingestion succeeds");
+
+        let c_conv = sections
+            .iter()
+            .find(|s| s.guideline_codes == vec!["C-CONV".to_string()])
+            .expect("a C-CONV section exists");
+
+        // (a) Stability: recomputing over the section's own fields is idempotent
+        // — the stored hash already reflects the final (tagged) content.
+        let mut probe = c_conv.clone();
+        probe.recompute_content_hash();
+        assert_eq!(
+            probe.content_hash, c_conv.content_hash,
+            "the stored hash must already reflect the final content (idempotent recompute)"
+        );
+
+        // (b) Sensitivity: the same section *without* its code hashes
+        // differently, so the code is part of the hashed content — not a
+        // post-hoc, hash-excluded tag. Two sections that differ only by code
+        // now differ in content_hash.
+        let mut without_code = c_conv.clone();
+        without_code.guideline_codes.clear();
+        without_code.recompute_content_hash();
+        assert_ne!(
+            without_code.content_hash, c_conv.content_hash,
+            "dropping the code must change the content hash (the code is hashed)"
+        );
+    }
+
+    /// F-02 regression: the code is read from the section's *nearest* heading that
+    /// carries one, most-specific first — so a code opened by an ancestor heading
+    /// is captured for a codeless leaf (never swallowed) and a deeper heading's
+    /// code beats an ancestor's. A breadcrumb with no code anywhere keeps an empty
+    /// list. The upstream places each `(C-…)` on its own heading, so the normal
+    /// case (the leaf carries the code) still holds; this pins the robustness.
+    #[tokio::test]
+    async fn guideline_code_is_read_from_the_nearest_heading() {
+        let html = r##"<!DOCTYPE html>
+<html><body>
+  <main>
+    <h1>Chapter</h1>
+    <h2 id="conv">Ad-hoc conversions (C-CONV)</h2>
+    <p>leaf heading carries the code</p>
+    <h2 id="g">Guideline (C-FOO)</h2>
+    <h3 id="sub">Sub-section</h3>
+    <p>the code lives on the ancestor, not this leaf</p>
+    <h2 id="plain">Plain heading</h2>
+    <p>no code anywhere in this breadcrumb</p>
+  </main>
+</body></html>"##;
+        let server = FixtureServer::start(vec![(
+            "/api-guidelines/precedence.html".to_string(),
+            Behavior::Text {
+                body: html.as_bytes().to_vec(),
+                etag: Some("\"precedence-1\"".to_string()),
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+            },
+        )]);
+        let client = loopback_client().expect("loopback client builds");
+        let base_url = Url::parse(&format!(
+            "http://{}/api-guidelines/precedence.html",
+            server.addr
+        ))
+        .expect("a valid loopback chapter URL");
+        let fetched = client
+            .fetch(&base_url)
+            .await
+            .expect("chapter fetch succeeds offline");
+        let sections = ingest_chapter(&fetched).expect("ingestion succeeds");
+
+        let by_anchor = |a: &str| sections.iter().find(|s| s.anchor.as_deref() == Some(a));
+
+        // The leaf heading's own code is captured (the normal case).
+        assert_eq!(
+            by_anchor("conv").expect("conv section").guideline_codes,
+            vec!["C-CONV".to_string()],
+            "a leaf heading's own code is captured"
+        );
+
+        // A code opened by an ANCESTOR heading is captured for a leaf that carries
+        // none itself — it is not swallowed.
+        let sub = by_anchor("sub").expect("sub-section exists");
+        assert_eq!(
+            sub.guideline_codes,
+            vec!["C-FOO".to_string()],
+            "an ancestor heading's code is captured for a codeless leaf"
+        );
+        // That capture is reflected in the hash (F-01 + F-02 together): the
+        // sub-section hashes as if tagged, so it is not a hash-excluded tag.
+        let mut untagged = sub.clone();
+        untagged.guideline_codes.clear();
+        untagged.recompute_content_hash();
+        assert_ne!(
+            untagged.content_hash, sub.content_hash,
+            "the ancestor code must be part of the sub-section's content hash"
+        );
+
+        // A breadcrumb with no code anywhere keeps an empty list — nothing is
+        // fabricated.
+        assert!(
+            by_anchor("plain")
+                .expect("plain section")
+                .guideline_codes
+                .is_empty(),
+            "a codeless breadcrumb must not fabricate a code"
         );
     }
 
