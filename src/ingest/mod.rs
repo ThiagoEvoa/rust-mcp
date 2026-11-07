@@ -15,7 +15,12 @@
 //! - [`section`] — semantic section splitting: turns a page's heading-delimited
 //!   articles into bounded `model::Section`s, attaching original anchors and
 //!   splitting oversized sections into tagged continuations (task `[014]`).
+//! - [`api_guidelines`] — the `api-guidelines` adapter: books the mdBook site via
+//!   the shared book discovery and ingests its chapters, retaining each
+//!   guideline's `C-…` code, examples, wording, and anchor, plus the checklist
+//!   entries (task `[015]`).
 
+mod api_guidelines;
 mod books;
 mod clippy;
 mod fetch;
