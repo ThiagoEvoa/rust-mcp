@@ -33,6 +33,15 @@
 //!   codegen options, the test harness, lints, and stability/version
 //!   qualifications land as sections, with no checklist or `C-…` codes) —
 //!   task `[019]`.
+//! - [`rustup`] — the `rustup` adapter: books The rustup Book via the shared
+//!   book discovery (installation, toolchains, overrides, components, targets,
+//!   and the toolchain-file behavior → sections, with their `rustup …` command
+//!   examples and `rust-toolchain.toml` example preserved verbatim, and no
+//!   checklist or `C-…` codes). It stamps every section the `rustup` source /
+//!   "The rustup Book" — a distinct host (`rust-lang.github.io/rustup/`) from
+//!   the rustc compiler's (`doc.rust-lang.org/rustc/`) — so the source's
+//!   independent provenance is never mislabeled as a Rust compiler release —
+//!   task `[020]`.
 
 mod api_guidelines;
 mod books;
@@ -43,6 +52,7 @@ mod html;
 mod resolve;
 mod rustc;
 mod rustfmt;
+mod rustup;
 mod section;
 mod style_guide;
 
