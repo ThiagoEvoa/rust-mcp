@@ -28,6 +28,11 @@
 //!   topics land as sections) and extracts each command-manual page's synopsis,
 //!   option/argument groups, examples, and the `--` argument-forwarding boundary
 //!   (task `[018]`).
+//! - [`rustc`] — the `rustc` adapter: books The rustc Book via the shared book
+//!   discovery (the `toc.html` navigation → sections, so the compiler options,
+//!   codegen options, the test harness, lints, and stability/version
+//!   qualifications land as sections, with no checklist or `C-…` codes) —
+//!   task `[019]`.
 
 mod api_guidelines;
 mod books;
@@ -36,6 +41,7 @@ mod clippy;
 mod fetch;
 mod html;
 mod resolve;
+mod rustc;
 mod rustfmt;
 mod section;
 mod style_guide;
