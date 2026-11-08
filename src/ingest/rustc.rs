@@ -468,6 +468,12 @@ fn it_works() {
             "the `writing-tests` section's canonical URL must carry its anchor, got {}",
             writing.canonical_url
         );
+        // AC1: the content hash for THIS asserted section too — mirroring the
+        // compiler-options test, so every asserted section carries its citation.
+        assert!(
+            !writing.content_hash.as_str().is_empty(),
+            "the `writing-tests` section must carry a non-empty content hash"
+        );
     }
 
     // -- AC2: a nightly-only / unstable stability qualification stays VISIBLE
@@ -521,6 +527,14 @@ fn it_works() {
         assert!(
             opt.body.contains("nightly") && opt.body.contains("may change without notice"),
             "the nightly-only qualification must stay visible in the body:\n{}",
+            opt.body
+        );
+        // AC2 also names the literal `Stability:` label the qualification is
+        // rendered under; pin it too, so the visible callout label is asserted
+        // alongside its substance.
+        assert!(
+            opt.body.contains("Stability:"),
+            "the section body must carry the `Stability:` label AC2 names:\n{}",
             opt.body
         );
 
