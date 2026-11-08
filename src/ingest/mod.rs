@@ -23,9 +23,15 @@
 //!   shared book discovery and splits its chapters into sections, retaining each
 //!   section's examples, qualifications, and anchor — the source carries no
 //!   checklist or `C-…` codes, so no code enrichment (task `[017]`).
+//! - [`cargo`] — the `cargo` adapter: books The Cargo Book via the shared book
+//!   discovery (guide/reference/appendix chapters → sections, so the reference
+//!   topics land as sections) and extracts each command-manual page's synopsis,
+//!   option/argument groups, examples, and the `--` argument-forwarding boundary
+//!   (task `[018]`).
 
 mod api_guidelines;
 mod books;
+mod cargo;
 mod clippy;
 mod fetch;
 mod html;
