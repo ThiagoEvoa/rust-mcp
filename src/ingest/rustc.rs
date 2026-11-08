@@ -208,10 +208,12 @@ mod tests {
     //! `FetchError::Bound` is large, mirroring `ingest::fetch`'s suppression.
     #![allow(clippy::result_large_err)]
 
+    use super::{SOURCE, ingest_chapter};
     use crate::ingest::books::discover_inventory;
-    use crate::ingest::fetch::{BoundClient, FetchPolicy, LoopbackGate};
+    use crate::ingest::fetch::{BoundClient, FetchPolicy, Fetched, LoopbackGate};
     use crate::ingest::http_fixture::{Behavior, FixtureServer};
-    use reqwest::Url;
+    use crate::model::SourceId;
+    use reqwest::{StatusCode, Url};
     use std::sync::Arc;
 
     /// A loopback fetch policy with no retries so an unreachable probe fast-fails.
@@ -294,5 +296,287 @@ mod tests {
             diff.is_complete(),
             "with no expected set the diff must be complete, got {diff:?}"
         );
+    }
+
+    // -- AC1: compiler-option and argument syntax is preserved verbatim, with its
+    //    citation (source tag + canonical anchor + content hash). The
+    //    `command-line-arguments` chapter documents options like `--cfg`, `-L`,
+    //    and `--check-cfg`; the exact syntax must survive in the section bodies. --
+
+    /// A `command-line-arguments`-style chapter: compiler options and arguments
+    /// documented with their exact syntax, in inline `<code>` and fenced blocks.
+    const COMMAND_LINE_ARGUMENTS_HTML: &str = r#"<!DOCTYPE html>
+<html><body>
+  <nav id="sidebar"><ol class="chapter"><li><a href="https://doc.rust-lang.org/rustc/index.html">Introduction</a></li></ol></nav>
+  <main>
+    <h1 id="top">Command-line arguments</h1>
+    <h2 id="cfg">--cfg</h2>
+    <p>Configure a custom configuration value, e.g. <code>--cfg 'feature="serde"'</code> or <code>--cfg 'verbose'</code>.</p>
+    <pre><code class="language-bash">rustc --cfg 'verbose' main.rs</code></pre>
+    <h2 id="L">-L</h2>
+    <p>Add a directory to the library search path: <code>-L KIND=PATH</code> where KIND is one of <code>dependency</code>, <code>crate</code>, <code>native</code>, <code>framework</code>, or <code>all</code>.</p>
+    <pre><code class="language-bash">rustc -L dependency=/path/to/libs foo.rs</code></pre>
+    <h2 id="check-cfg">--check-cfg</h2>
+    <p>Emit a warning for a malformed <code>--check-cfg 'cfg(feature, values("serde"))'</code> entry.</p>
+  </main>
+</body></html>"#;
+
+    #[tokio::test]
+    async fn compiler_options_fixture_preserves_documented_syntax() {
+        let server = FixtureServer::start(vec![(
+            "/rustc/command-line-arguments.html".to_string(),
+            Behavior::Text {
+                body: COMMAND_LINE_ARGUMENTS_HTML.as_bytes().to_vec(),
+                etag: Some("\"clargs-1\"".to_string()),
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+            },
+        )]);
+        let client = loopback_client().expect("loopback client builds");
+        let base_url = Url::parse(&format!(
+            "http://{}/rustc/command-line-arguments.html",
+            server.addr
+        ))
+        .expect("a valid loopback chapter URL");
+
+        let fetched = client
+            .fetch(&base_url)
+            .await
+            .expect("chapter fetch succeeds offline");
+        let sections = ingest_chapter(&fetched).expect("ingestion succeeds");
+
+        // AC1a: every documented option/argument syntax survives verbatim in the
+        // section bodies (inline `<code>` and fenced blocks are preserved).
+        let all: String = sections
+            .iter()
+            .map(|s| s.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all.contains(r#"--cfg 'feature="serde""#),
+            "the --cfg syntax with its value must survive verbatim:\n{all}"
+        );
+        assert!(
+            all.contains("-L KIND=PATH"),
+            "the -L KIND=PATH syntax must survive verbatim:\n{all}"
+        );
+        assert!(
+            all.contains("-L dependency=/path/to/libs"),
+            "the -L usage example must survive verbatim:\n{all}"
+        );
+        assert!(
+            all.contains(r#"--check-cfg 'cfg(feature, values("serde"))'"#),
+            "the --check-cfg syntax must survive verbatim:\n{all}"
+        );
+
+        // The syntax is retained WITH its citation: the `cfg` section is tagged
+        // for the `rustc` source, its canonical URL carries the original anchor,
+        // and it carries a content hash.
+        let cfg = sections
+            .iter()
+            .find(|s| s.anchor.as_deref() == Some("cfg"))
+            .expect("a section carrying the `cfg` anchor must exist");
+        assert_eq!(
+            cfg.source_id,
+            SourceId::new(SOURCE).expect("a valid source id")
+        );
+        assert!(
+            cfg.canonical_url.as_str().contains("#cfg"),
+            "the `cfg` section's canonical URL must carry its anchor, got {}",
+            cfg.canonical_url
+        );
+        assert!(
+            !cfg.content_hash.as_str().is_empty(),
+            "the section must carry a non-empty content hash"
+        );
+    }
+
+    // -- AC1: the test-harness documented syntax is preserved verbatim, with its
+    //    citation. The "Tests" chapter documents how to write and run tests. --
+
+    /// A "Tests"/test-harness chapter: the documented attributes and the
+    /// `rustc --test` harness invocation, in inline `<code>` and fenced blocks.
+    const TESTS_HTML: &str = r#"<!DOCTYPE html>
+<html><body>
+  <nav id="sidebar"><ol class="chapter"><li><a href="https://doc.rust-lang.org/rustc/index.html">Introduction</a></li></ol></nav>
+  <main>
+    <h1 id="top">Tests</h1>
+    <h2 id="writing-tests">Writing tests</h2>
+    <p>Tests are ordinary functions marked <code>#[test]</code>. A test that is expected to fail is marked <code>#[should_panic]</code>.</p>
+    <pre><code class="language-rust">
+#[test]
+fn it_works() {
+    assert_eq!(2 + 2, 4);
+}
+</code></pre>
+    <p>Compile and run a binary's tests through the harness:</p>
+    <pre><code class="language-bash">rustc --test foo.rs</code></pre>
+  </main>
+</body></html>"#;
+
+    #[tokio::test]
+    async fn test_harness_fixture_preserves_documented_syntax() {
+        let server = FixtureServer::start(vec![(
+            "/rustc/tests/index.html".to_string(),
+            Behavior::Text {
+                body: TESTS_HTML.as_bytes().to_vec(),
+                etag: Some("\"tests-1\"".to_string()),
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+            },
+        )]);
+        let client = loopback_client().expect("loopback client builds");
+        let base_url = Url::parse(&format!("http://{}/rustc/tests/index.html", server.addr))
+            .expect("a valid loopback chapter URL");
+
+        let fetched = client
+            .fetch(&base_url)
+            .await
+            .expect("chapter fetch succeeds offline");
+        let sections = ingest_chapter(&fetched).expect("ingestion succeeds");
+
+        // AC1b: the test-harness documented syntax survives verbatim.
+        let all: String = sections
+            .iter()
+            .map(|s| s.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all.contains("#[test]"),
+            "the #[test] attribute must survive verbatim:\n{all}"
+        );
+        assert!(
+            all.contains("#[should_panic]"),
+            "the #[should_panic] attribute must survive verbatim:\n{all}"
+        );
+        assert!(
+            all.contains("rustc --test"),
+            "the `rustc --test` harness invocation must survive verbatim:\n{all}"
+        );
+
+        // The harness section carries its citation.
+        let writing = sections
+            .iter()
+            .find(|s| s.anchor.as_deref() == Some("writing-tests"))
+            .expect("a section carrying the `writing-tests` anchor must exist");
+        assert_eq!(
+            writing.source_id,
+            SourceId::new(SOURCE).expect("a valid source id")
+        );
+        assert!(
+            writing.canonical_url.as_str().contains("#writing-tests"),
+            "the `writing-tests` section's canonical URL must carry its anchor, got {}",
+            writing.canonical_url
+        );
+    }
+
+    // -- AC2: a nightly-only / unstable stability qualification stays VISIBLE
+    //    (it survives verbatim in the section body as a callout) WITH its
+    //    citation (source tag + canonical anchor + content hash) — so the
+    //    qualification is provably upstream, not server-authored. --
+
+    /// A chapter whose option carries a nightly-only stability qualification
+    /// rendered as a `<blockquote>` callout.
+    const STABILITY_HTML: &str = r#"<!DOCTYPE html>
+<html><body>
+  <nav id="sidebar"><ol class="chapter"><li><a href="https://doc.rust-lang.org/rustc/index.html">Introduction</a></li></ol></nav>
+  <main>
+    <h1 id="top">Some option</h1>
+    <h2 id="opt-x">--opt-x</h2>
+    <p>Do a thing.</p>
+    <blockquote><strong>Stability:</strong> This option is <code>nightly</code>-only and may change without notice.</blockquote>
+  </main>
+</body></html>"#;
+
+    #[tokio::test]
+    async fn stability_qualification_remains_visible_with_citation() {
+        let server = FixtureServer::start(vec![(
+            "/rustc/command-line-arguments.html".to_string(),
+            Behavior::Text {
+                body: STABILITY_HTML.as_bytes().to_vec(),
+                etag: Some("\"stability-1\"".to_string()),
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+            },
+        )]);
+        let client = loopback_client().expect("loopback client builds");
+        let base_url = Url::parse(&format!(
+            "http://{}/rustc/command-line-arguments.html",
+            server.addr
+        ))
+        .expect("a valid loopback chapter URL");
+
+        let fetched = client
+            .fetch(&base_url)
+            .await
+            .expect("chapter fetch succeeds offline");
+        let sections = ingest_chapter(&fetched).expect("ingestion succeeds");
+
+        // AC2: the nightly-only qualification stays visible — it survives
+        // verbatim in the section body (rendered as a callout).
+        let opt = sections
+            .iter()
+            .find(|s| s.anchor.as_deref() == Some("opt-x"))
+            .expect("a section carrying the `opt-x` anchor must exist");
+        assert!(
+            opt.body.contains("nightly") && opt.body.contains("may change without notice"),
+            "the nightly-only qualification must stay visible in the body:\n{}",
+            opt.body
+        );
+
+        // ... WITH its citation: the section is attributable to the `rustc`
+        // source, its canonical URL carries the original anchor, and it carries
+        // a content hash — so the qualification is provably upstream.
+        assert_eq!(
+            opt.source_id,
+            SourceId::new(SOURCE).expect("a valid source id")
+        );
+        assert!(
+            opt.canonical_url.as_str().contains("#opt-x"),
+            "the qualification's section must carry its canonical anchor, got {}",
+            opt.canonical_url
+        );
+        assert!(
+            !opt.content_hash.as_str().is_empty(),
+            "the qualification's section must carry a non-empty content hash"
+        );
+    }
+
+    // -- No-panic posture on external input: a non-200 body or a chrome-only
+    //    page degrades to a typed error rather than panicking. --
+
+    #[tokio::test]
+    async fn best_effort_ingest_chapter_never_panics_on_hostile_input() {
+        // A non-200 response (a plain-text body, no HTML article) must not
+        // panic: `ingest_chapter` does not gate on status, so it simply yields
+        // no sections for a body-less page. The call returns without panicking.
+        let missing = Fetched {
+            requested: Url::parse("https://doc.rust-lang.org/rustc/does-not-exist.html").unwrap(),
+            final_url: Url::parse("https://doc.rust-lang.org/rustc/does-not-exist.html").unwrap(),
+            status: StatusCode::NOT_FOUND,
+            body: b"not found".to_vec(),
+            content_type: None,
+            etag: None,
+            last_modified: None,
+            content_length: None,
+        };
+        let _ = ingest_chapter(&missing); // returns Ok(empty) or an error; never panics
+
+        // A chrome-only page (no article body) fails with a typed error rather
+        // than panicking — the posture the `cargo` adapter's equivalent test
+        // locks in.
+        let chrome = Fetched {
+            requested: Url::parse("https://doc.rust-lang.org/rustc/index.html").unwrap(),
+            final_url: Url::parse("https://doc.rust-lang.org/rustc/index.html").unwrap(),
+            status: StatusCode::OK,
+            body: r#"<html><body><nav><a>Home</a></nav><script>x</script></body></html>"#
+                .as_bytes()
+                .to_vec(),
+            content_type: Some("text/html".to_string()),
+            etag: None,
+            last_modified: None,
+            content_length: None,
+        };
+        assert!(ingest_chapter(&chrome).is_err());
     }
 }
