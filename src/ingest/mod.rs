@@ -68,5 +68,7 @@ mod rustup;
 mod section;
 mod style_guide;
 
+pub mod pipeline;
+
 #[cfg(test)]
 mod http_fixture;
