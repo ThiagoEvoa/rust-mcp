@@ -42,6 +42,15 @@
 //!   the rustc compiler's (`doc.rust-lang.org/rustc/`) — so the source's
 //!   independent provenance is never mislabeled as a Rust compiler release —
 //!   task `[020]`.
+//! - [`rustdoc`] — the `rustdoc` adapter: books The rustdoc Book via the shared
+//!   book discovery (the commands reference, the Cargo integration, the
+//!   documentation-test guidance, links, and configuration → sections, with the
+//!   documented options table, the `rustdoc`/`cargo doc` examples, and the
+//!   stability qualifications preserved verbatim, and no checklist or `C-…`
+//!   codes). The shared HTML converter already renders an options table
+//!   (```<table>``` in the source HTML) to GFM and a ```<pre>``` to a fenced
+//!   block, so — like the `rustc`/`rustup` adapters — no dedicated extractor is
+//!   needed — task `[021]`.
 
 mod api_guidelines;
 mod books;
@@ -51,6 +60,7 @@ mod fetch;
 mod html;
 mod resolve;
 mod rustc;
+mod rustdoc;
 mod rustfmt;
 mod rustup;
 mod section;
