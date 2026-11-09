@@ -211,7 +211,12 @@ pub(crate) fn split_markdown_sections(
                     heading_stack.push((level, text.clone()));
                     open = Open {
                         heading: Some(heading_line(level, &text)),
-                        anchor: Some(github_slug(&text)),
+                        // An empty slug (a bare `# ` or a punctuation-only
+                        // heading) means "no anchor", like the heading-less
+                        // preamble, not `Some("")` — a bare-`#` id / a dropped
+                        // URL fragment. The heading text is still preserved in
+                        // `heading` / `heading_path` for the breadcrumb.
+                        anchor: Some(github_slug(&text)).filter(|s| !s.is_empty()),
                         heading_path: heading_stack.iter().map(|(_, t)| t.clone()).collect(),
                         segments: Vec::new(),
                     };
@@ -640,6 +645,48 @@ A documented option.
             edition.heading_path.iter().any(|h| h == "Stable options"),
             "the `edition` section's breadcrumb includes its parent: {:?}",
             edition.heading_path
+        );
+    }
+
+    /// A heading whose text slugs to nothing (a punctuation-only `# ***` or a bare
+    /// `# `) yields a section with `anchor == None` — like a heading-less
+    /// preamble — rather than `Some("")` (a bare-`#` id / a dropped URL fragment),
+    /// while the heading text is still preserved in `heading` / `heading_path` for
+    /// the breadcrumb.
+    #[test]
+    fn an_empty_slug_is_no_anchor_but_keeps_the_heading_text() {
+        // A punctuation-only heading: `***` slugs to nothing, but the text is
+        // preserved for the breadcrumb.
+        let md = "\
+# ***
+
+A section whose heading text slugs to nothing.
+";
+        let sections = split_markdown_sections(md).unwrap();
+        let starred = sections
+            .iter()
+            .find(|s| s.heading.as_deref() == Some("# ***"))
+            .expect("the `# ***` section must exist");
+        assert!(
+            starred.anchor.is_none(),
+            "an empty slug must become no anchor, not Some(\"\"): {:?}",
+            starred.anchor
+        );
+        // The heading text is still preserved for the breadcrumb.
+        assert_eq!(starred.heading.as_deref(), Some("# ***"));
+        assert_eq!(starred.heading_path.as_slice(), &["***"]);
+
+        // The degenerate case: a bare `# ` heading (empty text) is likewise
+        // anchor-less, never `Some("")`.
+        let bare = split_markdown_sections("# \ncontent\n").unwrap();
+        let bare_section = bare
+            .iter()
+            .find(|s| s.heading.as_deref() == Some("# "))
+            .expect("the bare `# ` section must exist");
+        assert!(
+            bare_section.anchor.is_none(),
+            "a bare `# ` heading must have no anchor: {:?}",
+            bare_section.anchor
         );
     }
 }
