@@ -581,6 +581,22 @@ mod tests {
         );
         assert!(unwrap.body.contains("unwrap()"), "body keeps the example");
         assert!(!unwrap.body.is_empty(), "non-empty body");
+        // AC1 "known issues retained" at the materialized-Section level: the
+        // section body is the full `.lint-doc-md` conversion, so the
+        // "Known false positives" heading and its content survive there (a
+        // `Section` carries no dedicated known-issues field; retention is via
+        // the body). The `expect_used` lint below has none, exercising the
+        // "when present" branch.
+        assert!(
+            unwrap.body.contains("Known false positives"),
+            "known-issues heading survives in the section body: {body}",
+            body = unwrap.body
+        );
+        assert!(
+            unwrap.body.contains("None are known at present."),
+            "known-issues content survives in the section body: {body}",
+            body = unwrap.body
+        );
 
         // The second lint has no version/applicability, so its qualifications
         // omit them.
@@ -591,6 +607,14 @@ mod tests {
             !expect.qualifications.iter().any(|q| q.contains("added in")),
             "no added-in when absent: {:?}",
             expect.qualifications
+        );
+        // The absent known-issues block is likewise absent from the body — the
+        // Section-level retention is non-vacuous (the `unwrap_used` lint above
+        // keeps it; this one does not).
+        assert!(
+            !expect.body.contains("Known false positives"),
+            "no known-issues content when absent: {body}",
+            body = expect.body
         );
     }
 
