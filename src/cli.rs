@@ -146,25 +146,74 @@ impl Cli {
             // never query text on stdout.
             Command::Serve => crate::mcp::serve(),
 
-            // `sync` and `status` are still [003] placeholders whose bodies land in
-            // M2/M4. We *emit* the diagnostic through the stderr-only tracer rather
-            // than `eprintln!` so diagnostics flow through the gated subscriber and
-            // stdout stays MCP-exclusive (plan.md §8/§9 / task [004]).
-            Command::Sync | Command::Status => {
-                // `data_dir` is resolved for every command (above) so the uniform
-                // path contract holds, even though M1's `serve` doesn't read corpus
-                // contents yet; it's shown here so the diagnostic is concrete.
-                let message = match &self.command {
-                    Command::Serve => unreachable!("`serve` is handled above"),
-                    Command::Sync => format!(
-                        "sync: bounded network ingestion is not wired yet (ingestion lands \
-                         in M2). Data directory: {data_dir:?}.",
-                    ),
-                    Command::Status => format!(
-                        "status: snapshot reporting is not wired yet (reporting lands in \
-                         M2/M4). Data directory: {data_dir:?}.",
-                    ),
+            // `sync` (task [027]): wire the explicit refresh command to the
+            // bounded ingestion pipeline — discovery → fetch → extract →
+            // validate → atomic publish — against the production registry gate.
+            // A per-source report and any failure are *diagnostics* that go to
+            // **stderr**, so `sync` (like `serve`) never writes query text to
+            // stdout (plan.md §8/§9 / task [004]).
+            Command::Sync => {
+                let config = crate::ingest::pipeline::SyncConfig::production();
+                // Build the bounded fetch client synchronously (registry gate,
+                // default policy). A constructor failure is a typed, actionable
+                // diagnostic — no runtime is needed to build the client, so it
+                // is reported here rather than inside the async pipeline.
+                let client = match crate::ingest::pipeline::production_client() {
+                    Ok(client) => client,
+                    Err(err) => {
+                        tracing::error!(
+                            "rust-docs-mcp: sync failed: the fetch client could not start: {err}"
+                        );
+                        return Ok(ExitCode::FAILURE);
+                    }
                 };
+                let data_dir = data_dir.clone();
+                let future =
+                    async move { crate::ingest::pipeline::sync(&config, &data_dir, &client).await };
+
+                // Drive the async pipeline on a dedicated multi-threaded runtime
+                // with network IO enabled, mirroring the `serve` runtime
+                // construction so the client's HTTP transport is supported.
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|err| {
+                        crate::error::AppError::runtime_start(
+                            "the sync runtime failed to start",
+                            Some(Box::new(err)),
+                        )
+                    })?;
+
+                match runtime.block_on(future) {
+                    // A successful run reports the per-source inventory changes
+                    // and the new snapshot identity on stderr, then exits 0.
+                    Ok(report) => {
+                        // The report is the success output: emit it on stderr
+                        // through the gated subscriber (`info` shows by default),
+                        // keeping stdout exclusive to MCP messages (plan §8/§9).
+                        tracing::info!("rust-docs-mcp: {}", report.to_stderr());
+                        Ok(ExitCode::SUCCESS)
+                    }
+                    // AC2: a fetch/parser/validation failure aborts the run and
+                    // leaves the last valid corpus intact. Report it on stderr
+                    // and exit non-zero so a partial corpus is never presented as
+                    // a successful refresh.
+                    Err(sync_err) => {
+                        tracing::error!("rust-docs-mcp: sync failed: {sync_err}");
+                        Ok(ExitCode::FAILURE)
+                    }
+                }
+            }
+
+            // `status` remains an [003] placeholder whose body lands in M4. We
+            // *emit* the diagnostic through the stderr-only tracer rather than
+            // `eprintln!` so diagnostics flow through the gated subscriber and
+            // stdout stays MCP-exclusive (plan.md §8/§9 / task [004]).
+            Command::Status => {
+                let message = format!(
+                    "status: snapshot reporting is not wired yet (reporting lands in \
+                     M4). Data directory: {data_dir:?}.",
+                );
                 tracing::warn!("rust-docs-mcp: {message}");
                 // Non-zero: the work is deliberately not implemented, so we must
                 // not present a clean exit as if the command had run successfully.
