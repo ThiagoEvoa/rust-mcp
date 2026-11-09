@@ -68,8 +68,15 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::fs;
+use std::io;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::model::{ManifestBody, SectionId, SnapshotManifest, ValidationSummary};
+use crate::model::{ManifestBody, SchemaError, SectionId, SnapshotManifest, ValidationSummary};
 use crate::registry::SourceCollection;
 
 // ---------------------------------------------------------------------------
@@ -444,6 +451,361 @@ fn duplicate_ids(counts: HashMap<&str, usize>) -> Vec<(&str, usize)> {
     let mut dups: Vec<(&str, usize)> = counts.into_iter().filter(|(_, count)| *count > 1).collect();
     dups.sort_by(|a, b| a.0.cmp(b.0));
     dups
+}
+
+// ---------------------------------------------------------------------------
+// Atomic publication — task [026]
+// ---------------------------------------------------------------------------
+//
+// On-disk layout (decided for this task). The active snapshot is a **single,
+// self-contained manifest file** — `corpus/manifest.json` — written as the
+// compact, deterministic JSON of a whole [`SnapshotManifest`]
+// ([`SnapshotManifest::to_json_string`]) and read back with
+// ([`SnapshotManifest::from_json_str`]).
+//
+// `SnapshotManifest` already carries the entire corpus *inline* (every
+// `Source`, `Section`, checklist, and command entry), so a
+// manifest-plus-side-cars split would only add a partition/assemble round-trip
+// with no benefit for the offline, one-snapshot-per-process MVP (`plan.md` §5
+// "runtime behavior": the snapshot is fixed for the process lifetime). A single
+// file is what makes the atomic swap a one-step [`std::fs::rename`].
+//
+// Layout inside the configured application data directory:
+//
+// ```text
+// <data_dir>/corpus/
+//   manifest.json                     the active, published, immutable snapshot
+//   snapshot-<pid>-<n>-<nanos>.tmp    a transient candidate during a publish
+// ```
+//
+// The published file has a **fixed name** the loader reads; a transient file
+// always carries a *different*, process/counter-stamped name, so a leftover from
+// an interrupted run can never be mistaken for a published snapshot.
+//
+// Atomic publication: the candidate is validated in memory
+// ([`validate_snapshot`] / [`ValidationReport::require_valid`]) **first**, then
+// serialized to the transient file, flushed, and `sync_all`-ed for durability,
+// and **only then** atomically `rename`-d over `manifest.json`. A failed
+// validation, a failed write, or an interrupted run therefore leaves the
+// previous valid snapshot untouched — the rename never happens, or happens
+// atomically over a fully-written candidate. Every transient and published path
+// is built under the *canonicalized* corpus directory, so a `..` or symlink
+// component in the data directory cannot carry a write outside it, and a
+// `rename` replaces a symlink node rather than following it.
+
+/// The application-data sub-directory that holds the published corpus and its
+/// transient publication files.
+const CORPUS_SUBDIR: &str = "corpus";
+
+/// The fixed file name of the active snapshot. The loader reads *only* this
+/// name, so a transient publication file (which carries a different name) can
+/// never be mistaken for a published snapshot.
+const PUBLISHED_NAME: &str = "manifest.json";
+
+/// The name prefix of a transient publication file.
+const TEMP_PREFIX: &str = "snapshot-";
+/// The name suffix of a transient publication file.
+const TEMP_SUFFIX: &str = ".tmp";
+
+/// A hard upper bound on a published snapshot's on-disk size (bytes), per
+/// `plan.md` §9 ("bounded … sizes"). The loader rejects a file above it rather
+/// than reading it into memory.
+pub const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
+
+/// A monotonic, process-local counter that makes each transient publication file
+/// name unique within a process.
+static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// The result of a successful, validated atomic publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Publication {
+    /// The path of the active snapshot after publication (the fixed published
+    /// file inside the configured data directory).
+    pub path: PathBuf,
+    /// The validation summary the candidate cleared on its way in.
+    pub summary: ValidationSummary,
+}
+
+/// A failure to publish or load a snapshot, each variant carrying enough context
+/// to be actionable rather than a bare `io::Error` (`plan.md` §9).
+#[derive(Debug)]
+pub enum PublishError {
+    /// The candidate failed complete-corpus validation; the previously published
+    /// snapshot is preserved untouched.
+    Invalid(ValidationReport),
+    /// The candidate (or a published file) failed the schema-version or
+    /// (de)serialization gate.
+    Schema(SchemaError),
+    /// A snapshot file exceeded the on-disk size bound ([`MAX_SNAPSHOT_BYTES`]).
+    TooLarge {
+        /// The file's size in bytes.
+        bytes: usize,
+        /// The on-disk size bound that was exceeded.
+        limit: usize,
+    },
+    /// A filesystem failure during write, flush, or atomic promotion, tagged with
+    /// where it happened.
+    Io {
+        /// Short, human description of the operation that failed.
+        context: String,
+        /// The underlying I/O cause, preserved for the error chain.
+        source: io::Error,
+    },
+}
+
+impl PublishError {
+    /// Build an [`PublishError::Io`] that records *where* a filesystem failure
+    /// happened.
+    pub fn io(context: impl Into<String>, source: io::Error) -> Self {
+        Self::Io {
+            context: context.into(),
+            source,
+        }
+    }
+
+    /// Build an [`PublishError::TooLarge`] against the current size bound.
+    pub fn too_large(bytes: usize) -> Self {
+        Self::TooLarge {
+            bytes,
+            limit: MAX_SNAPSHOT_BYTES,
+        }
+    }
+}
+
+impl fmt::Display for PublishError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid(report) => {
+                write!(
+                    f,
+                    "candidate snapshot is not publishable: {} problem(s)",
+                    report.problem_count()
+                )?;
+                for problem in &report.problems {
+                    writeln!(f, "  - {problem}")?;
+                }
+                Ok(())
+            }
+            Self::Schema(error) => write!(f, "schema or serialization error: {error}"),
+            Self::TooLarge { bytes, limit } => write!(
+                f,
+                "snapshot is {bytes} bytes, exceeding the {limit}-byte on-disk limit"
+            ),
+            Self::Io { context, source } => write!(f, "{context}: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for PublishError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl From<SchemaError> for PublishError {
+    fn from(error: SchemaError) -> Self {
+        Self::Schema(error)
+    }
+}
+
+impl From<ValidationReport> for PublishError {
+    fn from(report: ValidationReport) -> Self {
+        Self::Invalid(report)
+    }
+}
+
+impl From<io::Error> for PublishError {
+    fn from(error: io::Error) -> Self {
+        Self::io("io operation failed", error)
+    }
+}
+
+/// Resolve the corpus sub-directory under `data_dir`, creating it and
+/// canonicalizing it so a candidate can never escape the configured data
+/// directory.
+///
+/// `create_dir_all` makes the data directory and the `corpus` sub-directory if
+/// they are absent, and `canonicalize` resolves any `..` or symlink components
+/// in the *data-directory prefix* to their real location. Every path this module
+/// builds is then joined under the returned canonical directory, so a write can
+/// never land outside the data directory the caller configured.
+fn corpus_dir(data_dir: &Path) -> Result<PathBuf, PublishError> {
+    fs::create_dir_all(data_dir)?;
+    let parent = data_dir.join(CORPUS_SUBDIR);
+    fs::create_dir_all(&parent)?;
+    let canonical = parent
+        .canonicalize()
+        .map_err(|e| PublishError::io("resolving corpus directory", e))?;
+    Ok(canonical)
+}
+
+/// The fixed path of the active snapshot under `data_dir` (the un-canonicalized
+/// form; use [`corpus_dir`] when a containment-safe location is required).
+fn published_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(CORPUS_SUBDIR).join(PUBLISHED_NAME)
+}
+
+/// Build the next unique transient publication path *inside* `corpus_dir`.
+///
+/// The name is stamped with the process id, a process-local counter, and the
+/// current nanosecond timestamp, so two publications in the same process never
+/// collide on a temp file and a stale leftover from a different run is never
+/// reused by mistake.
+fn next_temp_path(corpus_dir: &Path) -> PathBuf {
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name = format!(
+        "{TEMP_PREFIX}{}-{counter}-{nanos}{TEMP_SUFFIX}",
+        std::process::id(),
+    );
+    corpus_dir.join(name)
+}
+
+/// Whether a snapshot of `bytes` bytes clears the on-disk size bound.
+fn within_size_limit(bytes: usize) -> bool {
+    bytes <= MAX_SNAPSHOT_BYTES
+}
+
+/// Write `bytes` to `path` and flush them to the underlying storage, so the
+/// candidate is durable *before* it is ever renamed into place.
+///
+/// On any write/flush failure the partially written file (if any) is removed, so
+/// no partial artifact escapes the data directory. A `sync_all` failure is
+/// tolerated — the bytes were still fully written, so promotion over a complete
+/// file is correct — it only means cross-crash durability is unguaranteed.
+fn write_candidate(path: &Path, bytes: &[u8]) -> Result<(), PublishError> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|e| PublishError::io("opening candidate file", e))?;
+    if let Err(e) = file.write_all(bytes) {
+        let _ = fs::remove_file(path);
+        return Err(PublishError::io("writing candidate file", e));
+    }
+    if let Err(e) = file.flush() {
+        let _ = fs::remove_file(path);
+        return Err(PublishError::io("flushing candidate file", e));
+    }
+    let _ = file.sync_all();
+    Ok(())
+}
+
+/// Remove any transient publication files left by an interrupted prior run, so a
+/// crash does not leave a partial candidate lying in the data directory.
+///
+/// Only files carrying the transient prefix *and* suffix are removed — never the
+/// published [`PUBLISHED_NAME`] or any other file — and removal is best-effort:
+/// a concurrent writer's in-progress file or a transient OS error must not abort
+/// a publication. This is the "recover cleanly after an interrupted sync" step.
+fn cleanup_stale_temps(corpus_dir: &Path) -> Result<(), PublishError> {
+    let entries = match fs::read_dir(corpus_dir) {
+        Ok(entries) => entries,
+        // A missing directory is not an error for a cleanup pass: the caller
+        // just created it.
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX) && name != PUBLISHED_NAME {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
+}
+
+/// Publish `manifest` as the active snapshot under `data_dir`, atomically.
+///
+/// The candidate is validated **first** (the [025] complete-corpus gate), then
+/// written to a transient file *inside* the corpus directory, flushed, and
+/// `sync_all`-ed for durability, and **only then** atomically `rename`-d over
+/// the fixed published file. The guarantees, each exercised by the tests below:
+///
+/// - **A successful publish is loadable** ([`load_published_snapshot`]) — the
+///   published file is the exact bytes the loader parses back into an equal
+///   [`SnapshotManifest`].
+/// - **A failed or interrupted publish preserves the previous valid snapshot** —
+///   validation runs before any write, and promotion is a single atomic rename
+///   over a fully-written candidate, so the old file is never partially
+///   overwritten.
+/// - **Nothing escapes the data directory** — the transient and published paths
+///   are built under the canonical corpus directory, and a leftover temp is
+///   cleaned up, never promoted.
+///
+/// Returns the [`Publication`] (the published path and the cleared
+/// [`ValidationSummary`]).
+pub fn publish_snapshot(
+    data_dir: &Path,
+    manifest: &SnapshotManifest,
+) -> Result<Publication, PublishError> {
+    // 1. Gate on the complete-corpus validation in memory, before touching the
+    //    filesystem. An invalid candidate is rejected here so the previously
+    //    published snapshot is not even read or rewritten.
+    let summary = validate_snapshot(manifest).require_valid()?;
+
+    // 2. Serialize the validated candidate deterministically, then bound its
+    //    size before writing it anywhere.
+    let bytes = manifest.to_json_string()?.into_bytes();
+    if !within_size_limit(bytes.len()) {
+        return Err(PublishError::too_large(bytes.len()));
+    }
+
+    // 3. Resolve the containment-safe corpus directory and recover from any
+    //    earlier interrupted run.
+    let corpus = corpus_dir(data_dir)?;
+    cleanup_stale_temps(&corpus)?;
+
+    // 4. Write the candidate to a transient file inside the corpus directory and
+    //    flush it durably, without yet promoting it.
+    let temp = next_temp_path(&corpus);
+    write_candidate(&temp, &bytes)?;
+
+    // 5. Only now — candidate fully written, validated, and durable — promote it
+    //    atomically over the active snapshot. `rename` within the same directory
+    //    is atomic, so a reader never observes a half-written snapshot; a failure
+    //    here leaves the previous valid snapshot in place and the temp removed.
+    let target = corpus.join(PUBLISHED_NAME);
+    fs::rename(&temp, &target).map_err(|e| {
+        let _ = fs::remove_file(&temp);
+        PublishError::io("promoting candidate snapshot", e)
+    })?;
+
+    Ok(Publication {
+        path: target,
+        summary,
+    })
+}
+
+/// Load the active snapshot published under `data_dir` back into a
+/// [`SnapshotManifest`], gated on the schema version, the on-disk size bound, and
+/// JSON/UTF-8 integrity.
+///
+/// A corrupt, truncated, non-UTF-8, oversized, or unsupported-version published
+/// file fails here (never a panic, never a mistaken load). Only the fixed
+/// [`PUBLISHED_NAME`] is read: a transient candidate file is never loaded, so a
+/// leftover from an interrupted run cannot masquerade as a published snapshot.
+pub fn load_published_snapshot(data_dir: &Path) -> Result<SnapshotManifest, PublishError> {
+    let path = published_path(data_dir);
+    let bytes = fs::read(&path).map_err(|e| PublishError::io("reading published snapshot", e))?;
+    if !within_size_limit(bytes.len()) {
+        return Err(PublishError::too_large(bytes.len()));
+    }
+    let json = String::from_utf8(bytes).map_err(|e| {
+        PublishError::Schema(SchemaError::Json(format!(
+            "published snapshot is not valid UTF-8: {e}"
+        )))
+    })?;
+    SnapshotManifest::from_json_str(&json).map_err(PublishError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -958,5 +1320,290 @@ mod tests {
             Url::new(collection.entry_url())
                 .unwrap_or_else(|e| panic!("entry url for {} must be valid: {e}", collection.id()));
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Atomic publication — task [026]
+    // -------------------------------------------------------------------
+
+    /// A process-local counter so each test gets a unique data directory even
+    /// when cargo runs tests in parallel.
+    static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// A RAII guard that removes its data directory on drop, so a test's temp
+    /// files never leak into the shared temp location and no real user data
+    /// directory is ever touched.
+    struct TempDataDir(PathBuf);
+
+    impl Drop for TempDataDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Create a fresh, unique, and existing data directory under the OS temp dir.
+    fn temp_data_dir() -> TempDataDir {
+        let n = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "rust-docs-mcp-pub-{}-{nanos}-{n}",
+            std::process::id(),
+        ));
+        fs::create_dir_all(&path).expect("create the temp data dir");
+        TempDataDir(path)
+    }
+
+    /// Assert the corpus directory carries no leftover transient publication
+    /// files (only the fixed published file may remain, if any).
+    fn assert_no_stale_temps(data_dir: &Path) {
+        let corpus = data_dir.join(CORPUS_SUBDIR);
+        let stale: Vec<PathBuf> = fs::read_dir(&corpus)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_str()
+                            .map(|name| {
+                                name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX)
+                            })
+                            .unwrap_or(false)
+                    })
+                    .map(|entry| entry.path())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            stale.is_empty(),
+            "no transient publication files should remain: {stale:?}",
+        );
+    }
+
+    /// **AC1**: a successful publish produces a loadable, immutable manifest —
+    /// the published file lives at the fixed path inside the data directory and
+    /// loads back into an equal [`SnapshotManifest`].
+    #[test]
+    fn a_successful_publish_produces_a_loadable_snapshot() {
+        let dir = temp_data_dir();
+        let manifest = complete_snapshot();
+
+        let publication =
+            publish_snapshot(&dir.0, &manifest).expect("a valid snapshot must publish");
+
+        // The published file is at the fixed name, contained within the data
+        // directory (canonicalized, so it holds on platforms whose temp dir is a
+        // symlink).
+        let canonical_root = dir.0.canonicalize().expect("the data dir exists");
+        assert!(
+            publication.path.starts_with(&canonical_root),
+            "the published path must be within the data directory: {:?}",
+            publication.path,
+        );
+        // The fixed published file exists under the data directory.
+        let published = dir.0.join(CORPUS_SUBDIR).join(PUBLISHED_NAME);
+        assert!(published.exists(), "the fixed published file must exist");
+        // It loads back into a snapshot equal to the one published.
+        let loaded = load_published_snapshot(&dir.0).expect("the published snapshot must load");
+        assert_eq!(
+            loaded, manifest,
+            "the loaded snapshot must equal the published one"
+        );
+        // The cleared validation summary carried through to the result.
+        assert_eq!(publication.summary.sections, 2);
+        assert_eq!(publication.summary.checklist_entries, 1);
+        assert_eq!(publication.summary.command_entries, 1);
+        // A successful publish leaves no transient file behind.
+        assert_no_stale_temps(&dir.0);
+    }
+
+    /// **AC2a**: a failed (invalid) publish preserves the previously published
+    /// valid snapshot byte-for-byte and leaves no partial artifact behind.
+    #[test]
+    fn a_failed_publish_preserves_the_previous_valid_snapshot() {
+        let dir = temp_data_dir();
+        let good = complete_snapshot();
+        publish_snapshot(&dir.0, &good).expect("the first publish must succeed");
+
+        let published = published_path(&dir.0);
+        let before_bytes = fs::read(&published).expect("the published file exists");
+        let before = load_published_snapshot(&dir.0).expect("the published snapshot loads");
+
+        // Attempt to publish an *invalid* candidate (an empty section body). It
+        // must fail and must not touch the previous snapshot.
+        let mut bad = complete_snapshot();
+        bad.body.sections[0].body = "   \n".to_string();
+        let err = publish_snapshot(&dir.0, &bad).expect_err("an invalid candidate must fail");
+        assert!(
+            matches!(err, PublishError::Invalid(_)),
+            "an invalid candidate must surface as `Invalid`, got {err:?}",
+        );
+
+        // The previous valid snapshot is byte-for-byte unchanged and still
+        // loadable, and no transient artifact was left by the failed attempt.
+        let after_bytes = fs::read(&published).expect("the published file is still present");
+        assert_eq!(
+            before_bytes, after_bytes,
+            "a failed publish must not modify the published file",
+        );
+        let after = load_published_snapshot(&dir.0).expect("the previous snapshot still loads");
+        assert_eq!(before, after, "the previous snapshot must be unchanged");
+        assert_no_stale_temps(&dir.0);
+    }
+
+    /// **AC2b**: a transient candidate left by an interrupted run is never
+    /// mistaken for a published snapshot, and a clean publish recovers it.
+    #[test]
+    fn a_leftover_temp_is_not_mistaken_for_a_published_snapshot() {
+        let dir = temp_data_dir();
+        let good = complete_snapshot();
+        publish_snapshot(&dir.0, &good).expect("publish a valid snapshot");
+
+        // Simulate an interrupted prior run that left a partial candidate in the
+        // corpus directory, under a name distinct from the published file.
+        let corpus = dir.0.join(CORPUS_SUBDIR);
+        let stale = corpus.join("snapshot-4242-0-0.tmp");
+        fs::write(&stale, b"{ a partial, unfinished candidate ...").expect("write the stale temp");
+        assert!(stale.exists(), "the stale temp exists before load");
+
+        // Loading reads the *published* snapshot, never the leftover temp, and
+        // returns the originally published manifest.
+        let loaded = load_published_snapshot(&dir.0).expect("the published snapshot loads");
+        assert_eq!(
+            loaded, good,
+            "a stale temp must not be loaded as a snapshot"
+        );
+
+        // A clean publish recovers: the stale temp is removed, and the published
+        // snapshot is intact.
+        publish_snapshot(&dir.0, &good).expect("re-publish");
+        assert!(
+            !stale.exists(),
+            "the stale temp must be cleaned up on a clean publish"
+        );
+        assert_eq!(
+            load_published_snapshot(&dir.0).expect("re-loads"),
+            good,
+            "the published snapshot must remain intact after cleanup",
+        );
+    }
+
+    /// **AC2b / containment**: a candidate is always written *inside* the data
+    /// directory, even when the data directory is expressed with a `..` segment
+    /// — it can never escape to a sibling or absolute path outside it.
+    #[test]
+    fn a_candidate_stays_within_the_data_directory() {
+        let dir = temp_data_dir();
+        let real = dir.0.canonicalize().expect("the data dir exists");
+
+        // Express the data directory with a `..` segment that still resolves to
+        // the real location: `dir/../<name>` canonicalizes back to `dir` itself,
+        // so the corpus directory must remain under the *real* data dir, not a
+        // sibling reached by climbing to the parent first.
+        let name = dir.0.file_name().expect("the data dir has a name");
+        let dotted = dir.0.join("..").join(name);
+
+        let corpus = corpus_dir(&dotted).expect("the corpus dir resolves");
+        let temp = next_temp_path(&corpus);
+
+        // The transient path is inside the corpus directory, and the corpus
+        // directory is inside the *canonical* data directory — never a sibling.
+        assert!(
+            temp.starts_with(&corpus),
+            "the temp must be inside the corpus dir: {temp:?}",
+        );
+        assert!(
+            corpus.starts_with(&real),
+            "the corpus dir must be under the data dir: corpus={corpus:?} real={real:?}",
+        );
+        // The `..`-expressed data directory resolves to the real location, not
+        // outside it.
+        assert_eq!(
+            corpus.canonicalize().expect("the corpus dir exists"),
+            real.join(CORPUS_SUBDIR),
+        );
+
+        // A publish through the `..`-expressed path still lands inside the data
+        // directory and is loadable from it.
+        publish_snapshot(&dotted, &complete_snapshot()).expect("publish through a `..` dir");
+        assert!(
+            load_published_snapshot(&dir.0).is_ok(),
+            "loads from the data dir"
+        );
+        assert_no_stale_temps(&dir.0);
+    }
+
+    /// **AC2a**: a second valid publish atomically replaces the previous one, so
+    /// the active snapshot is the latest published one and the old file is not
+    /// left dangling.
+    #[test]
+    fn a_second_valid_publish_replaces_the_previous() {
+        let dir = temp_data_dir();
+        let first = complete_snapshot();
+        publish_snapshot(&dir.0, &first).expect("first publish");
+
+        let mut second = complete_snapshot();
+        second.body.snapshot_id =
+            SnapshotId::new("rust-docs-2026-11-01").expect("a valid snapshot id");
+        publish_snapshot(&dir.0, &second).expect("second publish");
+
+        let loaded = load_published_snapshot(&dir.0).expect("the latest snapshot loads");
+        assert_eq!(
+            loaded.body.snapshot_id.as_str(),
+            "rust-docs-2026-11-01",
+            "the active snapshot must be the latest published one",
+        );
+        // The single fixed published file remains, with no versioned leftovers.
+        assert_no_stale_temps(&dir.0);
+    }
+
+    /// **AC4**: a truncated (partial) published file is detected by the loader's
+    /// schema/JSON gate rather than loaded or panicking.
+    #[test]
+    fn a_truncated_published_file_fails_to_load() {
+        let dir = temp_data_dir();
+        publish_snapshot(&dir.0, &complete_snapshot()).expect("publish a valid snapshot");
+
+        // Overwrite the published file with truncated JSON.
+        fs::write(published_path(&dir.0), b"{\"schema_version\":1,\"snap")
+            .expect("overwrite the published file");
+
+        let err = load_published_snapshot(&dir.0).expect_err("a truncated file must not load");
+        assert!(
+            matches!(err, PublishError::Schema(_)),
+            "a truncated file must surface as a schema error, got {err:?}",
+        );
+    }
+
+    /// **AC4**: a non-UTF-8 published file is detected by the loader rather than
+    /// panicking or misloading.
+    #[test]
+    fn a_non_utf8_published_file_fails_to_load() {
+        let dir = temp_data_dir();
+        publish_snapshot(&dir.0, &complete_snapshot()).expect("publish a valid snapshot");
+
+        fs::write(published_path(&dir.0), [0xff_u8, 0xfe, 0x00, 0x01])
+            .expect("overwrite with non-UTF-8 bytes");
+
+        let err = load_published_snapshot(&dir.0).expect_err("a non-UTF-8 file must not load");
+        assert!(
+            matches!(err, PublishError::Schema(_)),
+            "a non-UTF-8 file must surface as a schema error, got {err:?}",
+        );
+    }
+
+    /// **AC4**: the on-disk size bound is enforced by the loader's predicate.
+    #[test]
+    fn the_on_disk_size_bound_is_enforced() {
+        assert!(
+            within_size_limit(MAX_SNAPSHOT_BYTES),
+            "a file at the limit is within it"
+        );
+        assert!(
+            !within_size_limit(MAX_SNAPSHOT_BYTES + 1),
+            "a file one byte over the limit is rejected",
+        );
     }
 }
