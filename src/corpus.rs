@@ -454,8 +454,8 @@ fn duplicate_ids(counts: HashMap<&str, usize>) -> Vec<(&str, usize)> {
 mod tests {
     use super::*;
     use crate::model::{
-        Channel, ChecklistEntry, CommandEntry, CorpusHash, EffectKind, EffectNote, Release,
-        SectionBuilder, SnapshotId, Source, SourceId, Timestamp, Url,
+        Channel, ChecklistEntry, CommandEntry, Continuation, CorpusHash, EffectKind, EffectNote,
+        Release, SectionBuilder, SnapshotId, Source, SourceId, Timestamp, Url,
     };
 
     /// One `Source` per required collection, with a single recorded document URL.
@@ -786,7 +786,10 @@ mod tests {
         let mut snap = complete_snapshot();
         // Replace the stored id with one derived from a *different* anchor, so it
         // no longer matches the section's own fields. The content hash (which
-        // ignores the id) stays consistent, isolating the id check.
+        // ignores the id) stays consistent, isolating the id-vs-fields check.
+        // Swapping the id also orphans the checklist and command entries that
+        // still reference the section's original id, so the report additionally
+        // carries unresolved cross-reference problems; those are asserted below.
         let wrong = SectionId::derive(
             &SourceId::new("cargo").unwrap(),
             "commands/index",
@@ -811,6 +814,80 @@ mod tests {
             panic!("expected a SectionIdMismatch");
         };
         assert_eq!(section_id, &wrong.as_str().to_string());
+        // Swapping the id orphans the checklist and command entries that still
+        // reference the section's original id, so both surface as unresolved.
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| matches!(p, ValidationProblem::UnresolvedChecklistReference { .. })),
+            "the swapped id orphans the checklist reference: {:#?}",
+            report.problems
+        );
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| matches!(p, ValidationProblem::UnresolvedCommandReference { .. })),
+            "the swapped id orphans the command reference: {:#?}",
+            report.problems
+        );
+        assert!(!report.is_valid());
+    }
+
+    // -- Acceptance criterion 2, dimension: un-derivable ids. --
+
+    /// A section whose fields cannot form a valid id at all — an empty chapter
+    /// path, as a corrupt or deserialized corpus may carry — is reported with a
+    /// `derived` note, because `SectionId::derive` returns `Err` for it.
+    #[test]
+    fn a_section_with_an_empty_chapter_path_reports_a_no_id_derivable_mismatch() {
+        let mut snap = complete_snapshot();
+        // An empty chapter path cannot form a section id, so `SectionId::derive`
+        // returns `Err`. Recompute the hash so the content check stays green,
+        // isolating the failure to the un-derivable id itself.
+        snap.body.sections[0].chapter_path = String::new();
+        snap.body.sections[0].recompute_content_hash();
+        let report = validate_snapshot(&snap);
+        let ValidationProblem::SectionIdMismatch { derived, .. } = report
+            .problems
+            .iter()
+            .find(|p| matches!(p, ValidationProblem::SectionIdMismatch { .. }))
+            .expect("an empty chapter path must yield a SectionIdMismatch")
+        else {
+            panic!("expected a SectionIdMismatch");
+        };
+        // The un-derivable id is surfaced as a note rather than a concrete id.
+        assert!(
+            derived.contains("no valid id derivable"),
+            "the derived note must explain the un-derivable id, got {derived:?}"
+        );
+        assert!(!report.is_valid());
+    }
+
+    /// A section whose continuation is structurally invalid — as a corrupt or
+    /// deserialized corpus may carry — is likewise reported with a `derived`
+    /// note, because `SectionId::derive` rejects the continuation.
+    #[test]
+    fn a_section_with_an_invalid_continuation_reports_a_no_id_derivable_mismatch() {
+        let mut snap = complete_snapshot();
+        // `SectionBuilder` validates the continuation, so an invalid one is
+        // injected directly: part 0 is outside the 1-based range `derive`
+        // allows. The content hash ignores the continuation, so it stays green.
+        snap.body.sections[0].continuation = Some(Continuation { part: 0, parts: 1 });
+        let report = validate_snapshot(&snap);
+        let ValidationProblem::SectionIdMismatch { derived, .. } = report
+            .problems
+            .iter()
+            .find(|p| matches!(p, ValidationProblem::SectionIdMismatch { .. }))
+            .expect("an invalid continuation must yield a SectionIdMismatch")
+        else {
+            panic!("expected a SectionIdMismatch");
+        };
+        assert!(
+            derived.contains("no valid id derivable"),
+            "the derived note must explain the un-derivable id, got {derived:?}"
+        );
         assert!(!report.is_valid());
     }
 
