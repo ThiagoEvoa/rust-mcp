@@ -110,6 +110,11 @@ impl std::error::Error for SplitError {
 /// Returns [`SplitError::Extraction`] when the article cannot be converted
 /// (refused link / empty article) and [`SplitError::Schema`] when a section's
 /// identity cannot be derived. Never panics on external input.
+///
+/// This is the HTML *entry*: it converts the page to heading-delimited
+/// [`ArticleSection`]s ([`split_article_sections`]) and then hands them to the
+/// shared [`sections_from_article_sections`] continuation-splitting entry that
+/// the rustfmt Markdown path calls in as well.
 pub fn split_article(
     html: &str,
     base_url: &Url,
@@ -120,7 +125,46 @@ pub fn split_article(
 ) -> Result<Vec<Section>, SplitError> {
     let article_sections =
         split_article_sections(html, base_url).map_err(SplitError::Extraction)?;
+    sections_from_article_sections(
+        article_sections,
+        base_url,
+        source,
+        chapter_path,
+        doc_title,
+        config.max_section_bytes,
+    )
+}
 
+/// The shared continuation-splitting entry both ingestion paths call in.
+///
+/// The HTML article path ([`split_article`]) and the rustfmt Markdown path
+/// ([`crate::ingest::rustfmt`]) differ only in *how they reach* a page's
+/// heading-delimited [`ArticleSection`]s (a DOM walk vs. a Markdown line walk).
+/// Everything downstream of that — attaching each section's original anchor
+/// (uniquified within the document so a repeated anchor never collides) and
+/// splitting an oversized section into explicitly tagged continuations — is
+/// identical, and factoring it here keeps that single, subtle, bug-prone logic in
+/// one place both paths share rather than duplicated across two adapters.
+///
+/// `article_sections` are already heading-grouped; `base_url` is the page's
+/// canonical URL each section's `canonical_url` (and `#anchor`) is built from;
+/// `source`, `chapter_path`, and `doc_title` are the section's provenance
+/// context; `max` is the per-section body bound. The returned sections are in
+/// document order, each carrying a distinct
+/// [`SectionId`](crate::model::SectionId) and a non-empty content hash.
+///
+/// # Errors
+///
+/// Returns [`SplitError::Schema`] when a section's identity cannot be derived
+/// (e.g. an empty chapter path or an invalid continuation). Never panics.
+pub(crate) fn sections_from_article_sections(
+    article_sections: Vec<ArticleSection>,
+    base_url: &Url,
+    source: &SourceId,
+    chapter_path: &str,
+    doc_title: &str,
+    max: usize,
+) -> Result<Vec<Section>, SplitError> {
     let mut out: Vec<Section> = Vec::new();
     // A document can carry duplicate heading text — and, for hostile input, even
     // duplicate `id` anchors. A section id is derived from its original anchor, so
@@ -136,7 +180,7 @@ pub fn split_article(
             chapter_path,
             doc_title,
             base_url,
-            config.max_section_bytes,
+            max,
         )?);
     }
     Ok(out)
