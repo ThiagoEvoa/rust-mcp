@@ -716,11 +716,11 @@ impl TryFrom<String> for CorpusHash {
                 reason: "must be non-empty".to_string(),
             });
         }
-        // `TODO([025])`: [007] only requires a non-empty hash; the
-        // `c128-` prefix that `compute` emits (and a recomputation against the
-        // captured bytes) are integrity checks deferred to task [025]. Until
-        // then any non-empty string loads, which is why the recorded fixtures
-        // carry decorative hashes rather than `compute` output.
+        // Task `[025]` tightens this: the corpus validator (`crate::corpus`)
+        // recomputes the `c128-` hash over the captured bytes and rejects a
+        // section whose stored hash does not match. This non-empty gate stays
+        // the type-level floor; the recorded fixtures carry decorative hashes
+        // that clear it but are not recomputed here.
         Ok(Self(value))
     }
 }
@@ -777,14 +777,18 @@ pub struct Source {
 /// URL including original anchor, Markdown body, guideline codes/command
 /// keys/lint IDs when present, stability/version qualifications, and content
 /// hash."
-// `TODO([025])`: on load, `Section` deserializes `id`, `source_id`,
-// `chapter_path`, `anchor`, and `continuation` independently, so a corrupt
-// corpus could carry an `id` that does not match
-// `SectionId::derive(source_id, chapter_path, anchor, continuation)`. Likewise
-// a deserialized `content_hash` is accepted without recomputation. Both
-// cross-checks (id-vs-fields and hash-vs-content) are deferred to task [025],
-// which validates a complete corpus; until then the recorded fixtures carry
-// hand-written, decorative content hashes that only clear the non-empty gate.
+// Task `[025]` closes this gap: on load, `Section` deserializes `id`,
+// `source_id`, `chapter_path`, `anchor`, and `continuation` independently, so a
+// corrupt corpus *could* carry an `id` that does not match
+// `SectionId::derive(source_id, chapter_path, anchor, continuation)`, and a
+// deserialized `content_hash` *could* be accepted without recomputation. The
+// corpus validator (`crate::corpus`) now performs both cross-checks
+// (id-vs-fields and hash-vs-content) when it validates a complete snapshot; the
+// type layer still deserializes each field independently so the validator can
+// detect the inconsistency rather than the loader masking it. The recorded
+// fixtures carry hand-written, decorative content hashes that only clear the
+// non-empty gate, which is why the integrity check lives in the validator, not
+// the deserializer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Section {
@@ -841,7 +845,22 @@ impl Section {
     /// by hash. Call this once after such a mutation so the hash describes the
     /// section's final content (the hash is the identity of the captured bytes).
     pub fn recompute_content_hash(&mut self) {
-        self.content_hash = CorpusHash::compute(section_content(self));
+        self.content_hash = self.expected_content_hash();
+    }
+
+    /// The content hash this section *should* carry, recomputed over its current
+    /// content fields.
+    ///
+    /// The non-mutating mirror of [`Section::recompute_content_hash`]: it returns
+    /// the hash a valid section must carry **without altering the section**, so a
+    /// validator can compare a section's *stored* [`content_hash`](Section::content_hash)
+    /// against the hash recomputed from its content and detect a hash that no
+    /// longer describes the bytes. Task `[025]` uses this to reject a section
+    /// whose `content_hash` is stale, decorative, or otherwise inconsistent with
+    /// its content — the integrity cross-check that `[007]`'s non-empty-only
+    /// [`CorpusHash`] gate defers to the corpus validator.
+    pub fn expected_content_hash(&self) -> CorpusHash {
+        CorpusHash::compute(section_content(self))
     }
 }
 
