@@ -25,9 +25,12 @@
 //! ([036]), and the command catalog ([039]+). The index produces the ranked
 //! identities those consumers refine.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use thiserror::Error;
 
 use crate::model::{Section, SectionId, SnapshotManifest};
+use crate::registry::SourceCollection;
 
 /// A single lexical token produced by [`tokenize`].
 ///
@@ -275,6 +278,144 @@ impl Hit {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Task [035]: source filtering + exact-match boosts
+//
+// The [034] ranking above returns the *retrievable section identities* in a
+// deterministic BM25 order. This task layers two things onto that same seam
+// without changing it: (1) **source filtering** — restrict the ranked hits to
+// the requested source(s), with an *unknown source value* as a clear
+// [`SearchError`] rather than a silent empty result; and (2) **exact-match
+// boosts** — an exact guideline-code / command-name / lint-id match lifts a
+// section above weaker body matches (and a command-usage section above the
+// individual lint entries a large catalog would otherwise crowd it under).
+// ---------------------------------------------------------------------------
+
+/// The eight canonical source ids as a single comma-joined list, used in
+/// [`SearchError::UnsupportedSource`] messages so a mistyped source names the
+/// valid alternatives. Guarded by `supported_sources_match_registry` so it can
+/// never drift from the [`SourceCollection`] registry.
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([037])
+const SUPPORTED_SOURCES: &str =
+    "api-guidelines, style-guide, cargo, rustc, rustup, rustfmt, clippy, rustdoc";
+
+/// A query-time search error.
+///
+/// Distinct from the corpus/schema errors: these are *query* validation
+/// failures — chiefly an unsupported source value — that must surface as a
+/// clear, typed error rather than a silent empty result. `plan.md` §6: "Unknown
+/// … and unsupported source values produce clear validation errors"; §11:
+/// "Source filters, … unknown IDs, invalid cursors, and oversized inputs behave
+/// predictably."
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([037])
+pub enum SearchError {
+    /// The requested source value is not one of the eight canonical source ids
+    /// (`api-guidelines`, `style-guide`, `cargo`, `rustc`, `rustup`, `rustfmt`,
+    /// `clippy`, `rustdoc`).
+    ///
+    /// The message lists the valid ids as *discoverable alternatives*
+    /// (`plan.md` §6 "Reject unsupported keys with discoverable alternatives"),
+    /// so a caller that mistyped a source can correct it from the error alone —
+    /// the caller distinguishes this from a successful zero-hit search.
+    #[error("unsupported source `{0}`: expected one of {SUPPORTED_SOURCES}")]
+    UnsupportedSource(String),
+}
+
+/// A source restriction for [`SectionIndex::search_in`] / [`search_source`].
+///
+/// `plan.md` §6 defines `search_docs`'s optional `source` as "one of the eight
+/// canonical ids …; omission searches all sources." This type is that
+/// restriction, **validated at construction** so an unknown/unsupported value is
+/// a clear [`SearchError`] (from [`SourceFilter::source`] / [`sources`]) rather
+/// than a silent empty result:
+///
+/// - [`SourceFilter::all`] (the default / an omitted source) imposes no
+///   restriction;
+/// - a non-empty set of canonical source ids (the [`SourceCollection`] ids) restricts hits to
+///   those source(s) — the filter supports one *or many*; the MVP tool passes at most
+///   one, but the seam is written for the general case.
+///
+/// A `SourceFilter` is *always valid*: it is built only through the fallible
+/// [`source`](Self::source) / [`sources`](Self::sources) constructors, which
+/// reject any id outside the eight canonical ids before a filter is returned, so
+/// a consumer that already holds a `SourceFilter` never needs to re-check it.
+/// `is_all` / [`contains`](Self::contains) are infallible.
+///
+/// The set is a `BTreeSet` so membership and iteration are deterministic (AC2),
+/// and duplicate ids collapse to one restriction.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([037])
+pub struct SourceFilter(Option<BTreeSet<&'static str>>);
+
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([037])
+impl SourceFilter {
+    /// No restriction — search every source (`plan.md` §6 "omission searches all
+    /// sources"). The default for the omitted `source` parameter.
+    pub fn all() -> Self {
+        SourceFilter(None)
+    }
+
+    /// Restrict to the single source whose canonical id is `id`.
+    ///
+    /// Fails with [`SearchError::UnsupportedSource`] if `id` is not one of the
+    /// eight canonical ids — a clear error, never a silent empty result.
+    pub fn source(id: impl AsRef<str>) -> Result<Self, SearchError> {
+        let canonical = resolve_source(id.as_ref())?;
+        Ok(SourceFilter(Some(BTreeSet::from([canonical]))))
+    }
+
+    /// Restrict to a set of sources, each identified by its canonical id.
+    ///
+    /// Duplicates collapse (the restriction is a set) and order is irrelevant.
+    /// Any id outside the eight canonical ids fails with
+    /// [`SearchError::UnsupportedSource`] *before* a filter is returned. An
+    /// empty iterable yields [`all`](Self::all) — the natural reading of "no
+    /// sources named" — rather than a vacuous "no sources" filter.
+    pub fn sources(ids: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Self, SearchError> {
+        let mut set = BTreeSet::new();
+        for id in ids {
+            set.insert(resolve_source(id.as_ref())?);
+        }
+        Ok(SourceFilter(Some(set)))
+    }
+
+    /// Whether this filter restricts to a *subset* of sources.
+    ///
+    /// `false` means [`all`](Self::all): every source is searched.
+    pub fn is_all(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// Whether the source with canonical id `source_id` is within this filter.
+    ///
+    /// An [`all`](Self::all) filter contains every source; a restricted filter
+    /// contains only its named collections. This is the membership test
+    /// [`SectionIndex::search_in`] uses to drop out-of-filter hits.
+    pub fn contains(&self, source_id: &str) -> bool {
+        match &self.0 {
+            None => true,
+            Some(set) => set.contains(source_id),
+        }
+    }
+}
+
+/// Resolve a source id string to its canonical [`SourceCollection`], failing
+/// clearly on a value outside the eight registry ids.
+///
+/// The match is by exact, case-sensitive id against the [`SourceCollection`]
+/// registry (`plan.md` §2/§6): no aliasing or case-folding, so a value like
+/// `cargo-book` or `CARGO` is *not* silently accepted — it is an
+/// [`UnsupportedSource`](SearchError::UnsupportedSource).
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([037])
+fn resolve_source(id: &str) -> Result<&'static str, SearchError> {
+    SourceCollection::ALL
+        .iter()
+        .find(|c| c.id() == id)
+        .map(|c| c.id())
+        .ok_or_else(|| SearchError::UnsupportedSource(id.to_string()))
+}
+
 /// The in-memory, deterministic BM25 index over an immutable corpus
 /// ([`SnapshotManifest`]'s sections).
 ///
@@ -390,15 +531,38 @@ impl SectionIndex {
         self.n_docs
     }
 
-    /// Rank the sections that contain any token of `query`, in descending
-    /// deterministic BM25 order.
+    /// Rank the sections that contain any token of `query` across **every**
+    /// source, in descending deterministic order.
     ///
-    /// Empty query, empty index, or no matches all return `Vec::new()` — a
-    /// successful search with zero hits (`plan.md` §6 "Empty results are a
-    /// successful search with zero hits"), never a panic. The ranking is a pure
-    /// function of the index and the query string, so repeated calls are
-    /// identical (AC2).
+    /// This is the all-sources convenience entry (`plan.md` §6: "omission
+    /// searches all sources"); it is [`search_in`](Self::search_in) with no
+    /// source restriction. Empty query, empty index, or no matches all return
+    /// `Vec::new()` — a successful search with zero hits (`plan.md` §6 "Empty
+    /// results are a successful search with zero hits"), never a panic. The
+    /// ranking is a pure function of the index and the query string, so repeated
+    /// calls are identical (AC2).
     pub fn search(&self, query: &str) -> Vec<Hit> {
+        self.search_in(query, &SourceFilter::all())
+    }
+
+    /// Rank the sections that contain any token of `query` and belong to the
+    /// sources named by `filter`, in descending deterministic order.
+    ///
+    /// This is the filtered entry point that the `search_docs` handler will map
+    /// its optional `source` onto ([037]). The filter is validated at
+    /// construction ([`SourceFilter::source`] / [`SourceFilter::sources`]), so a
+    /// value that is *not* one of the eight canonical source ids fails there
+    /// with a [`SearchError`] — never as a silent empty result here. A *valid*
+    /// filter that matches no section yields an empty `Vec` (a successful search
+    /// with zero hits), which is distinct from that construction error.
+    ///
+    /// The ranking is a pure function of the index, the query, and the filter,
+    /// so repeated calls are identical (AC2). Filtering is a post-ranking
+    /// restriction: the BM25 statistics (idf, average length) are computed over
+    /// the whole corpus, and the filter only drops hits outside the requested
+    /// source(s) — the source filter never reshapes the ranking, only which of
+    /// the ranked hits are returned.
+    pub fn search_in(&self, query: &str, filter: &SourceFilter) -> Vec<Hit> {
         // A query with no tokens cannot match; return the empty (successful)
         // result up front. This also covers an empty/whitespace-only query.
         let query_tokens = tokenize(query);
@@ -424,11 +588,14 @@ impl SectionIndex {
             }
         }
 
-        // Collect and sort by (score desc, section id asc). Section ids are
-        // unique, so `section id asc` alone yields a total, deterministic
-        // order; no additional tie-break is needed.
+        // Restrict the ranked hits to the requested source(s) *after* ranking, so
+        // the ranking signal is computed over the whole corpus and the filter
+        // only decides which hits are returned. Section ids are unique, so the
+        // `section id asc` term alone yields a total, deterministic order; no
+        // additional tie-break is needed.
         let mut hits: Vec<Hit> = scored
             .into_iter()
+            .filter(|(doc, _)| filter.contains(self.sections[*doc].source_id.as_str()))
             .map(|(doc, score)| Hit {
                 section_id: self.sections[doc].id.clone(),
                 score,
@@ -441,6 +608,22 @@ impl SectionIndex {
                 .then_with(|| a.section_id.as_str().cmp(b.section_id.as_str()))
         });
         hits
+    }
+
+    /// Rank the sections that contain any token of `query` within a single
+    /// source named by `source` (its canonical id), in descending deterministic
+    /// order.
+    ///
+    /// This is the fallible, single-source entry the `search_docs` handler's
+    /// optional `source` maps onto: a `source` value that is **not** one of the
+    /// eight canonical source ids fails with [`SearchError::UnsupportedSource`]
+    /// (a clear, typed error with the valid ids as discoverable alternatives —
+    /// `plan.md` §6 "unsupported source values produce clear validation
+    /// errors"), **not** a silent empty result. A valid source that matches no
+    /// section returns `Ok` of an empty `Vec` (a successful zero-hit search).
+    pub fn search_source(&self, query: &str, source: &str) -> Result<Vec<Hit>, SearchError> {
+        let filter = SourceFilter::source(source)?;
+        Ok(self.search_in(query, &filter))
     }
 
     /// The corpus-wide inverse-document-frequency factor for a term seen in
