@@ -38,6 +38,7 @@ pub mod bundled;
 mod cli;
 mod commands;
 mod corpus;
+mod coverage;
 mod error;
 mod ingest;
 mod logging;

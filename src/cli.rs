@@ -106,6 +106,14 @@ pub enum Command {
         #[arg(long = "stale-days", value_name = "DAYS")]
         stale_days: Option<u64>,
     },
+
+    /// Inspect corpus coverage and extraction fidelity — the M2 operator view.
+    /// Records source/document/section counts per registered collection, any
+    /// coverage gap, and which content types the extractors retain (nested
+    /// headings, anchors, lists, tables, command syntax, stability callouts,
+    /// relative links, lint "known issues", fenced examples) while navigation
+    /// chrome and scripts are stripped. Degrades gracefully; always exits `0`.
+    Inspect,
 }
 
 impl Cli {
@@ -267,6 +275,43 @@ impl Cli {
                 tracing::info!("rust-docs-mcp: {}", report.to_stderr());
                 Ok(ExitCode::SUCCESS)
             }
+            Command::Inspect => {
+                let snapshot = match crate::runtime::load_snapshot_embedded(
+                    &data_dir,
+                    crate::bundled::JSON.as_bytes(),
+                ) {
+                    Ok(snapshot) => snapshot,
+                    Err(err) => {
+                        tracing::error!("rust-docs-mcp: inspect failed: {err}");
+                        return Ok(ExitCode::FAILURE);
+                    }
+                };
+
+                // Coverage of the corpus the operator currently has, and
+                // extraction fidelity over the representative fixtures: an
+                // offline proof that the content types agents rely on survive
+                // extraction while navigation chrome and scripts are stripped
+                // (task [032] / plan.md section 11). Both are diagnostics on
+                // stderr, keeping stdout exclusive to MCP messages.
+                let coverage = crate::coverage::record_coverage(&snapshot.manifest);
+                let fidelity = crate::coverage::inspect_fidelity(
+                    &crate::coverage::representative_fidelity_sections(),
+                );
+                // A one-line operator verdict: the corpus the operator has is
+                // coverage-complete, and every content type the extractors must
+                // retain survives in the representative fixtures.
+                tracing::info!(
+                    "rust-docs-mcp: coverage_complete={}",
+                    coverage.is_complete()
+                );
+                tracing::info!(
+                    "rust-docs-mcp: fidelity_complete={}",
+                    fidelity.all_types_present()
+                );
+                tracing::info!("rust-docs-mcp: {}", coverage.render());
+                tracing::info!("rust-docs-mcp: {}", fidelity.render());
+                Ok(ExitCode::SUCCESS)
+            }
         }
     }
 }
@@ -361,6 +406,11 @@ mod tests {
     fn each_subcommand_parses() {
         assert_eq!(parse(&["rust-docs-mcp", "serve"]).command, Command::Serve);
         assert_eq!(parse(&["rust-docs-mcp", "sync"]).command, Command::Sync);
+        // `inspect` parses as a read-only diagnostic subcommand.
+        assert_eq!(
+            parse(&["rust-docs-mcp", "inspect"]).command,
+            Command::Inspect
+        );
         // `status` parses with no threshold flag (the default is applied later).
         assert_eq!(
             parse(&["rust-docs-mcp", "status"]).command,
@@ -399,6 +449,20 @@ mod tests {
         assert!(Cli::try_parse_from(["rust-docs-mcp", "status", "--stale-days"]).is_err());
         // A negative value is rejected: the window is a non-negative integer.
         assert!(Cli::try_parse_from(["rust-docs-mcp", "status", "--stale-days", "-3"]).is_err());
+    }
+
+    #[test]
+    fn inspect_takes_no_flags() {
+        // `inspect` is a read-only diagnostic: it accepts no per-subcommand flags,
+        // so a stray flag is an actionable parse error.
+        assert_eq!(
+            parse(&["rust-docs-mcp", "inspect"]).command,
+            Command::Inspect
+        );
+        assert!(
+            Cli::try_parse_from(["rust-docs-mcp", "inspect", "--stale-days", "3"]).is_err(),
+            "inspect has no `--stale-days` flag",
+        );
     }
 
     #[test]
@@ -479,6 +543,7 @@ mod tests {
         assert!(help.contains("serve"), "help must mention `serve`");
         assert!(help.contains("sync"), "help must mention `sync`");
         assert!(help.contains("status"), "help must mention `status`");
+        assert!(help.contains("inspect"), "help must mention `inspect`");
         assert!(
             help.contains("--data-dir"),
             "help must document `--data-dir`"
