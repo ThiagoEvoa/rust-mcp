@@ -34,6 +34,7 @@
 //! via the `cli` module) needs to resolve and use a data directory without
 //! reaching into the module tree.
 
+pub mod bundled;
 mod cli;
 mod commands;
 mod corpus;

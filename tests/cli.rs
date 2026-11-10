@@ -2,15 +2,18 @@
 //!
 //! These exercise the *compiled* `rust-docs-mcp` binary via
 //! [`CARGO_BIN_EXE_rust-docs-mcp`]. They pin the product boundary from
-//! `plan.md` §8/§9 that the `serve` command keeps **stdout exclusive to MCP
-//! protocol traffic** — every diagnostic in the current stubs goes to **stderr** —
-//! and that invalid arguments produce **actionable, non-zero** errors rather than
-//! silently succeeding or polluting stdout.
+//! `plan.md` §8/§9 that a subcommand keeps **stdout exclusive to MCP protocol
+//! traffic** — every diagnostic (including a successful human report) goes to
+//! **stderr** — and that invalid arguments produce **actionable, non-zero**
+//! errors rather than silently succeeding or polluting stdout.
 //!
-//! The stub subcommands are intentionally not wired yet (their real behaviour
-//! lands in M2/M4), so a run of `serve`/`sync`/`status` returns a non-zero exit
-//! with an explanatory stderr message. These tests assert that contract and the
-//! stdout cleanliness that later milestones must preserve.
+//! As of task `[031]` the `status` subcommand is wired: with no local snapshot
+//! it loads the snapshot **embedded in the binary** and reports it on stderr,
+//! exiting 0 — so a fresh install works offline (`plan.md` §5 / `docs/LICENSING.md`
+//! §5). `serve`/`sync` remain not offline-functional (a `serve` run needs a real
+//! stdio client; a `sync` run needs the network), so their non-zero exit in this
+//! harness is incidental. The stdout cleanliness every subcommand must preserve
+//! is what these tests pin.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -104,28 +107,48 @@ fn unknown_subcommand_and_malformed_args_are_actionable_errors() {
     }
 }
 
-/// The core invariant: a subcommand run that is not yet wired must not write to
-/// stdout (kept exclusive for MCP traffic) and must exit non-zero with a
-/// diagnostic on stderr.
+/// The core invariant: a subcommand run keeps **stdout** exclusive to MCP
+/// protocol traffic — every diagnostic (including a successful human report) is
+/// routed to **stderr**. This must hold for every subcommand, wired or not, so
+/// it is asserted across `serve`/`sync`/`status` regardless of their exit codes.
 #[test]
 fn subcommand_runs_keep_stdout_clean() {
     let dir = temp_data_dir("clean-stdout");
     for sub in ["serve", "sync", "status"] {
         let args = [sub, "--data-dir", dir.as_str()];
-        let (code, stdout, stderr) = run(&args);
-        assert_ne!(
-            code, 0,
-            "stub subcommand `{sub}` should exit non-zero until wired (M2/M4)"
-        );
+        let (_code, stdout, stderr) = run(&args);
         assert!(
             stdout.is_empty(),
             "subcommand `{sub}` must keep stdout exclusive to MCP traffic, not {stdout:?}"
         );
         assert!(
             !stderr.trim().is_empty(),
-            "subcommand `{sub}` should route its diagnostic to stderr:\n{stderr}"
+            "subcommand `{sub}` should route its diagnostics/report to stderr:\n{stderr}"
         );
     }
+}
+
+/// Task `[031]` acceptance criterion 1, driven **through the compiled binary**:
+/// with **no** local snapshot, `status` loads the snapshot **embedded in the
+/// binary** and reports it on **stderr**, exiting 0 — a fresh install works
+/// offline, with no network and no `sync`. The human report must never reach
+/// stdout (the MCP-exclusive channel), so stdout stays empty even on success.
+#[test]
+fn status_serves_the_embedded_bundle_offline() {
+    let dir = temp_data_dir("status-embedded-offline");
+    let (code, stdout, stderr) = run(&["status", "--data-dir", dir.as_str()]);
+    assert_eq!(
+        code, 0,
+        "status must succeed offline by loading the embedded bundle:\n{stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "status must keep stdout exclusive to MCP traffic even on success, not {stdout:?}"
+    );
+    assert!(
+        stderr.contains("rust-docs-bundled-seed"),
+        "status must report the embedded seed snapshot on stderr:\n{stderr}"
+    );
 }
 
 /// Task [004] acceptance #2: diagnostics are routed to stderr even when the
