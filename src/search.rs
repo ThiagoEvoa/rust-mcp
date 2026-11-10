@@ -408,7 +408,17 @@ impl SourceFilter {
         for id in ids {
             set.insert(resolve_source(id.as_ref())?);
         }
-        Ok(SourceFilter(Some(set)))
+        // An empty iterable means "no sources named": the unrestricted, all-sources
+        // filter (`all()`), not a vacuous "no sources" filter that would match
+        // nothing. This keeps the empty case in lock-step with the constructor's
+        // documented intent (F-035-3) and with `all()`. A blank/unknown id never
+        // collapses to empty here — it fails with `UnsupportedSource` above — so
+        // only a genuinely empty input yields the unrestricted filter.
+        Ok(if set.is_empty() {
+            SourceFilter::all()
+        } else {
+            SourceFilter(Some(set))
+        })
     }
 
     /// Whether this filter restricts to a *subset* of sources.
@@ -1792,6 +1802,53 @@ mod tests {
         assert_eq!(hits.len(), 2, "only the two requested sources are returned");
         assert!(ids.iter().any(|id| *id == cargo.id.as_str()));
         assert!(ids.iter().any(|id| *id == clippy.id.as_str()));
+    }
+
+    /// F-035-3: an *empty* iterable passed to [`SourceFilter::sources`] means
+    /// "no sources named": it yields the unrestricted [`all`](SourceFilter::all)
+    /// filter — matching every source — rather than a vacuous "no sources" filter
+    /// that would match nothing. This pins the constructor's documented intent so
+    /// the empty case cannot silently regress to a matching-nothing filter.
+    #[test]
+    fn source_filter_empty_iterable_means_all_sources() {
+        // A genuinely empty input is the unrestricted filter, not "no sources".
+        let empty = SourceFilter::sources(Vec::<&str>::new()).expect("an empty iterable is valid");
+        assert!(
+            empty.is_all(),
+            "an empty iterable must yield the all-sources filter"
+        );
+        assert_eq!(
+            empty,
+            SourceFilter::all(),
+            "an empty iterable must equal `all()`"
+        );
+        // It therefore contains every source, verified through `contains`.
+        for id in [
+            "api-guidelines",
+            "style-guide",
+            "cargo",
+            "rustc",
+            "rustup",
+            "rustfmt",
+            "clippy",
+            "rustdoc",
+        ] {
+            assert!(
+                empty.contains(id),
+                "the all-sources filter must contain {id}"
+            );
+        }
+        // End-to-end: an empty-iterable filter spans the whole corpus, exactly
+        // like the public `search` and an explicit `all()` filter.
+        let cargo = section("cargo", "a", "p1", "the common term here", &[], &[], &[]);
+        let rustc = section("rustc", "b", "p2", "the common term here", &[], &[], &[]);
+        let clippy = section("clippy", "c", "p3", "the common term here", &[], &[], &[]);
+        let index = SectionIndex::build(&snapshot(vec![cargo, rustc, clippy]));
+        assert_eq!(
+            index.search_in("common", &empty).len(),
+            3,
+            "an empty-iterable filter spans every source"
+        );
     }
 
     /// AC2: an *unsupported* source is a typed error that names the bad value
