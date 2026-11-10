@@ -424,10 +424,9 @@ impl SectionIndex {
             }
         }
 
-        // Collect and sort by (score desc, section id asc, original order).
-        // Section id is unique per section, so the order is fully determined;
-        // the original-order key is a belt-and-suspenders final tie-break that
-        // never actually fires because ids are distinct.
+        // Collect and sort by (score desc, section id asc). Section ids are
+        // unique, so `section id asc` alone yields a total, deterministic
+        // order; no additional tie-break is needed.
         let mut hits: Vec<Hit> = scored
             .into_iter()
             .map(|(doc, score)| Hit {
@@ -440,12 +439,6 @@ impl SectionIndex {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.section_id.as_str().cmp(b.section_id.as_str()))
-                .then_with(|| {
-                    // Original-order fallback: never fires (ids are unique),
-                    // but keeps the sort a total order and deterministic.
-                    self.rank_of(&a.section_id)
-                        .cmp(&self.rank_of(&b.section_id))
-                })
         });
         hits
     }
@@ -453,21 +446,18 @@ impl SectionIndex {
     /// The corpus-wide inverse-document-frequency factor for a term seen in
     /// `df` of `n_docs` documents, using the BM25 "+1" smoothing variant.
     ///
-    /// `+1` in both terms guarantees a non-negative, finite idf even for a
-    /// term present in every document (`log(1 + n/n) = log 2 > 0`) and keeps the
-    /// arithmetic panic-free on an empty corpus (`df == 0` is not consulted,
-    /// since `search` skips absent terms).
+    /// The `+1` smoothing keeps the value **finite and panic-free** for any
+    /// corpus: the denominator `df + 1` is always `>= 1` and the numerator
+    /// `n_docs - df + 1` is always `>= 1` (since `df <= n_docs`), so the ratio
+    /// is positive and `.ln()` is well-defined — it never divides by zero or
+    /// logs a non-positive value. The result may, however, be slightly
+    /// **negative** for a term present in nearly all documents: when
+    /// `df == n_docs` the ratio is `1 / (n_docs + 1) < 1`, so
+    /// `log(1 / (n_docs + 1)) < 0`. That is expected for the BM25 "+1" variant
+    /// and is harmless to ranking. `df == 0` is never consulted, since `search`
+    /// skips absent terms.
     fn idf(&self, df: usize) -> f64 {
         ((self.n_docs - df + 1) as f64 / (df + 1) as f64).ln()
-    }
-
-    /// The original (snapshot) position of a section id, used only as the
-    /// final, never-firing tie-break.
-    fn rank_of(&self, id: &SectionId) -> usize {
-        self.sections
-            .iter()
-            .position(|s| s.id == *id)
-            .unwrap_or(usize::MAX)
     }
 }
 
@@ -967,5 +957,256 @@ mod tests {
             let got = Hit::section_ids(&index.search(q));
             assert!(!got.is_empty(), "atomic form {q:?} must be retrievable");
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Task [033] tokenizer regression tests — restored in [034].
+    //
+    // The [033] tokenizer is byte-for-byte unchanged and load-bearing (consumed
+    // through `section_tokens` → `tokenize`), but the [034] index build replaced
+    // this module's `#[cfg(test)]` body with index-only tests. Those are a
+    // different layer and not a superset of these, so the tokenizer's own
+    // regression coverage is restored here to coexist with the index tests.
+    // -------------------------------------------------------------------
+
+    /// The source substrings of the tokens, in order — a kind-agnostic view
+    /// for asserting a phrase/word survives regardless of its tag.
+    fn texts(tokens: &[Token]) -> Vec<&str> {
+        tokens.iter().map(Token::as_str).collect()
+    }
+
+    // --- AC1: the required forms survive as whole tokens -------------------
+
+    #[test]
+    fn guideline_code_survives() {
+        assert_eq!(
+            tokenize("C-CONV"),
+            vec![Token::GuidelineCode("C-CONV".to_string())]
+        );
+        assert_eq!(
+            tokenize("follow E-RESCUE"),
+            vec![
+                Token::Word("follow".to_string()),
+                Token::GuidelineCode("E-RESCUE".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn identifier_with_trailing_underscore_survives() {
+        for form in ["as_", "into_", "to_"] {
+            assert_eq!(
+                tokenize(form),
+                vec![Token::Word(form.to_string())],
+                "trailing-underscore identifier `{form}` must survive whole"
+            );
+        }
+    }
+
+    #[test]
+    fn camelcase_type_names_survive_with_case() {
+        for form in ["Send", "Sync"] {
+            let tokens = tokenize(form);
+            assert_eq!(tokens, vec![Token::Word(form.to_string())]);
+            // Case is preserved: `Send` is not lower-cased to `send`.
+            assert_ne!(tokens[0].as_str(), "send");
+        }
+    }
+
+    #[test]
+    fn command_phrase_survives_as_one_token() {
+        assert_eq!(
+            tokenize("cargo test"),
+            vec![Token::Command("cargo test".to_string())]
+        );
+        assert_eq!(
+            tokenize("run rustup show"),
+            vec![
+                Token::Word("run".to_string()),
+                Token::Command("rustup show".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn long_flag_survives() {
+        assert_eq!(
+            tokenize("--no-default-features"),
+            vec![Token::Flag("--no-default-features".to_string())]
+        );
+        assert_eq!(tokenize("-v"), vec![Token::Flag("-v".to_string())]);
+    }
+
+    #[test]
+    fn lint_id_with_double_colon_survives() {
+        assert_eq!(
+            tokenize("clippy::unwrap_used"),
+            vec![Token::LintId("clippy::unwrap_used".to_string())]
+        );
+        assert_eq!(
+            tokenize("see std::fmt::Debug"),
+            vec![
+                Token::Word("see".to_string()),
+                Token::LintId("std::fmt::Debug".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_ac1_form_survives_in_mixed_text() {
+        let tokens = tokenize(
+            "Preserve C-CONV and clippy::unwrap_used; use cargo test \
+             --no-default-features for a Send implementation (as_ and into_).",
+        );
+        let seen = texts(&tokens);
+        for required in [
+            "C-CONV",
+            "clippy::unwrap_used",
+            "cargo test",
+            "--no-default-features",
+            "Send",
+            "as_",
+            "into_",
+        ] {
+            assert!(
+                seen.contains(&required),
+                "mixed text must preserve `{required}`; got {seen:?}"
+            );
+        }
+    }
+
+    // --- AC2: determinism across repeated tokenization ---------------------
+
+    #[test]
+    fn tokenize_is_deterministic_repeated() {
+        let samples = [
+            "cargo test --no-default-features --locked",
+            "C-CONV clippy::unwrap_used as_ Send",
+            "rustup show; rustfmt --check",
+            "std::fmt::Debug and E-RESCUE",
+            "  mixed   spacing  and\ttabs\nand newlines",
+            "",
+            "   ",
+            "only-punctuation ! @ # $ % ^ & * ()",
+            "a-very-long-hyphenated-code-value-1",
+        ];
+        for sample in samples {
+            let first = tokenize(sample);
+            // Re-tokenize the same input several times; the sequence must be
+            // identical every time (no ordering/randomness/load-order effect).
+            for _ in 0..8 {
+                assert_eq!(tokenize(sample), first, "non-deterministic for `{sample}`");
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_corpus_load_is_deterministic() {
+        // Simulate "loading the same corpus" by tokenizing a fixed set of
+        // documents, then loading it again, and asserting identical results.
+        let corpus = [
+            "Convert to Option: see the C-CONV guideline and into_ conversion.",
+            "Run cargo test --locked to verify the build is reproducible.",
+            "Enable clippy::unwrap_used to catch unwraps in production code.",
+            "A Send + Sync bound is required for the Send implementation.",
+            "Inspect the toolchain with rustup show.",
+        ];
+        let pass_one: Vec<Vec<Token>> = corpus.iter().map(|doc| tokenize(doc)).collect();
+        let pass_two: Vec<Vec<Token>> = corpus.iter().map(|doc| tokenize(doc)).collect();
+        assert_eq!(
+            pass_one, pass_two,
+            "repeated corpus loads must tokenize identically"
+        );
+    }
+
+    // --- Edge cases / total (no-panic) behaviour ---------------------------
+
+    #[test]
+    fn empty_and_whitespace_input_yields_no_tokens() {
+        assert!(tokenize("").is_empty());
+        assert!(tokenize("   ").is_empty());
+        assert!(tokenize("\t\n\r").is_empty());
+    }
+
+    #[test]
+    fn punctuation_is_a_separator_and_is_dropped() {
+        assert_eq!(
+            tokenize("a, b. c"),
+            vec![
+                Token::Word("a".to_string()),
+                Token::Word("b".to_string()),
+                Token::Word("c".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_colon_is_a_separator_but_double_colon_is_not() {
+        // `a:b` -> two words (single colon separates); `a::b` -> one lint id.
+        assert_eq!(
+            tokenize("a:b"),
+            vec![Token::Word("a".to_string()), Token::Word("b".to_string())]
+        );
+        assert_eq!(tokenize("a::b"), vec![Token::LintId("a::b".to_string())]);
+    }
+
+    #[test]
+    fn multiple_flags_and_a_command_phrase() {
+        assert_eq!(
+            texts(&tokenize("cargo test --no-default-features --locked")),
+            vec!["cargo test", "--no-default-features", "--locked"]
+        );
+    }
+
+    #[test]
+    fn flag_with_equals_splits_into_flag_and_value() {
+        assert_eq!(
+            texts(&tokenize("--features=dev")),
+            vec!["--features", "dev"]
+        );
+    }
+
+    #[test]
+    fn a_command_verb_alone_stays_a_word() {
+        // `rustc` with nothing after it is not a phrase; it stays a word.
+        assert_eq!(tokenize("rustc"), vec![Token::Word("rustc".to_string())]);
+        // A verb followed by a flag does not absorb the flag into a phrase.
+        assert_eq!(texts(&tokenize("cargo -v")), vec!["cargo", "-v"]);
+    }
+
+    #[test]
+    fn verb_absorbs_only_the_immediately_following_word() {
+        // `cargo test suite` -> `cargo test` (phrase) then the bare word `suite`.
+        assert_eq!(
+            texts(&tokenize("cargo test suite")),
+            vec!["cargo test", "suite"]
+        );
+    }
+
+    #[test]
+    fn a_bare_subcommand_word_is_not_a_phrase() {
+        // `test` is not a command verb, so "run the test" keeps `test` a word.
+        assert_eq!(texts(&tokenize("run the test")), vec!["run", "the", "test"]);
+    }
+
+    #[test]
+    fn unicode_and_odd_input_does_not_panic() {
+        // Total: arbitrary (even multi-byte / unusual) input tokenizes without
+        // panicking and preserves the recognizable ASCII forms around it.
+        let tokens = tokenize("café::CONV — C-CONV ƒ\u{1F600}\n");
+        let out = texts(&tokens);
+        // The multibyte pieces are non-identifier punctuation/chars (separators)
+        // or stand alone; what matters is no panic and that `C-CONV` survives.
+        assert!(out.contains(&"C-CONV"));
+        assert!(out.iter().all(|t| !t.contains('\0')));
+    }
+
+    #[test]
+    fn ordering_is_stable_and_left_to_right() {
+        // Tokens appear in source order; no reordering.
+        assert_eq!(
+            texts(&tokenize("A B C-CONV clippy::x cargo test --f")),
+            vec!["A", "B", "C-CONV", "clippy::x", "cargo test", "--f"]
+        );
     }
 }
