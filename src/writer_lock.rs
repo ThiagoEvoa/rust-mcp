@@ -229,25 +229,30 @@ pub(crate) fn acquire_with_clock(
             .write(true)
             .open(&lock_path)
         {
-            // We won the exclusive create: stamp our record and return the guard.
-            Ok(mut file) => match file.write_all(&ours.encode()) {
-                Ok(()) => {
-                    // Best-effort durability of the stamp. A failure here does
-                    // not corrupt the lock (the create already won the race); it
-                    // only means the stamp might not survive a crash.
-                    let _ = file.sync_all();
-                    return Ok(WriterGuard {
-                        lock_path: lock_path.clone(),
-                        record: ours,
-                    });
+            // We won the exclusive create: the (empty) lock file is ours. Now
+            // install the full record *atomically* via a holder-unique temp file
+            // and a `rename`, so a concurrent reader never observes a partial
+            // stamp. `rename` within the directory is atomic, so the lock is
+            // either absent, empty (mid-stamp), or carries a complete record —
+            // never a truncated one.
+            Ok(_claimed) => {
+                let stamp = stamp_path(corpus_dir, &ours);
+                match atomic_stamp(&stamp, &ours, &lock_path) {
+                    Ok(()) => {
+                        return Ok(WriterGuard {
+                            lock_path: lock_path.clone(),
+                            record: ours,
+                        });
+                    }
+                    Err(e) => {
+                        // We own the lock but could not install the stamp; remove
+                        // it so a later writer is not blocked by a half-stamped
+                        // lock. The temp is cleaned up inside `atomic_stamp`.
+                        let _ = fs::remove_file(&lock_path);
+                        return Err(LockError::io("stamping the sync writer lock", e));
+                    }
                 }
-                Err(e) => {
-                    // We own the lock but could not stamp it; remove it so a later
-                    // writer is not blocked by a half-stamped lock.
-                    let _ = fs::remove_file(&lock_path);
-                    return Err(LockError::io("stamping the sync writer lock", e));
-                }
-            },
+            }
             // The lock exists. Decide whether its holder is live.
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 let existing = read_record(&lock_path);
@@ -257,12 +262,43 @@ pub(crate) fn acquire_with_clock(
                     Some(record) if !is_stale(&record, now, ttl) => {
                         return Err(LockError::WriterBusy(record));
                     }
-                    // Stale (dead pid, past the TTL) or unreadable/corrupt:
-                    // reclaim and retry. The next exclusive create either wins or,
-                    // if a reclaimer created a fresh lock in the meantime, the next
-                    // iteration reports it busy. This converges: after the remove,
-                    // a create on a free path succeeds.
-                    _ => {
+                    // A parsed but *stale* holder (dead pid, or past the TTL): the
+                    // holder is gone or stuck, so reclaim and retry. The next
+                    // exclusive create either wins or, if a reclaimer created a
+                    // fresh lock in the meantime, the next iteration reports it
+                    // busy. This converges: after the remove, a create on a free
+                    // path succeeds.
+                    Some(_stale) => {
+                        let _ = fs::remove_file(&lock_path);
+                    }
+                    // No parseable record. Two distinct cases must not be
+                    // conflated:
+                    //
+                    //  * A *fresh, empty* file is a writer that won the
+                    //    `create_new` race and is *mid-stamp* (between creating
+                    //    the file and writing its record). Reclaiming it would
+                    //    let two writers enter the critical section at once, so
+                    //    an empty file is treated as *busy* — the claimer backs
+                    //    off and retries rather than clobbering a live stamp.
+                    //  * A *non-empty but unparseable* file is a corrupt leftover
+                    //    (a crashed writer left a partial record). It is stale and
+                    //    reclaimable, which is the "recover after an interrupted
+                    //    write" path.
+                    None => {
+                        let empty = matches!(
+                            fs::metadata(&lock_path),
+                            Ok(meta) if meta.len() == 0
+                        );
+                        if empty {
+                            // A writer is mid-stamp; back off and retry instead of
+                            // reclaiming a lock it still owns. `now`/`ttl` are
+                            // irrelevant here because a fresh empty file carries no
+                            // timestamp, so the liveness judgment is "assume alive".
+                            return Err(LockError::WriterBusy(LockRecord {
+                                pid: 0,
+                                acquired_at_ns: 0,
+                            }));
+                        }
                         let _ = fs::remove_file(&lock_path);
                     }
                 }
@@ -309,6 +345,53 @@ fn now_ns() -> u64 {
 /// The current process id, recorded in the lock for the liveness judgment.
 fn process_id() -> u32 {
     std::process::id()
+}
+
+/// A process-local counter so two concurrent claims — even two sync threads in
+/// the *same* process, which share a pid — never collide on a stamp temp file.
+static STAMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The holder-unique temp path for a stamp inside `corpus_dir`.
+///
+/// The name carries the holder pid, the claim timestamp, and a process-local
+/// counter, so two writers never write the same temp file and a stale leftover
+/// from a different run is never reused.
+fn stamp_path(corpus_dir: &Path, record: &LockRecord) -> PathBuf {
+    let n = STAMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    corpus_dir.join(format!(
+        "{LOCK_NAME}.stamp-{}-{}-{n}",
+        record.pid, record.acquired_at_ns
+    ))
+}
+
+/// Atomically install `record`'s bytes as the lock at `lock_path`.
+///
+/// The full record is written to the holder-unique `stamp` temp file, flushed
+/// durably, and then `rename`-d over `lock_path`. Because `rename` within the
+/// same directory is atomic, a concurrent reader of `lock_path` observes the
+/// lock as *absent, empty (mid-stamp), or carrying a complete record* — never a
+/// truncated one. This is what makes the empty-file check in the reclaim path
+/// sound: a non-empty, unparseable `lock_path` can only come from a genuine
+/// crash, not from a concurrent writer mid-stamp. The temp is removed on any
+/// failure so it never leaks.
+fn atomic_stamp(stamp: &Path, record: &LockRecord, lock_path: &Path) -> Result<(), io::Error> {
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(stamp)?;
+        file.write_all(&record.encode())?;
+        file.sync_all()?;
+        // `rename` replaces `lock_path` atomically (it may be our just-created
+        // empty claim or a stale file we are reclaiming); it overwrites the
+        // node rather than following a symlink.
+        fs::rename(stamp, lock_path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(stamp);
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
