@@ -480,7 +480,9 @@ fn duplicate_ids(counts: HashMap<&str, usize>) -> Vec<(&str, usize)> {
 //
 // The published file has a **fixed name** the loader reads; a transient file
 // always carries a *different*, process/counter-stamped name, so a leftover from
-// an interrupted run can never be mistaken for a published snapshot.
+// an interrupted run can never be mistaken for a published snapshot. The writer
+// lock ([`crate::writer_lock`], task `[028]`) lives at a *third*, distinct name
+// (`sync.lock`) in the same directory.
 //
 // Atomic publication: the candidate is validated in memory
 // ([`validate_snapshot`] / [`ValidationReport::require_valid`]) **first**, then
@@ -492,6 +494,14 @@ fn duplicate_ids(counts: HashMap<&str, usize>) -> Vec<(&str, usize)> {
 // is built under the *canonicalized* corpus directory, so a `..` or symlink
 // component in the data directory cannot carry a write outside it, and a
 // `rename` replaces a symlink node rather than following it.
+//
+// **Serialization (task `[028]`).** The filesystem-mutating half of a publish
+// (stale-temp cleanup, candidate write, and atomic promotion) runs under the
+// `crate::writer_lock` writer lock, held for its duration by an RAII guard, so
+// two syncs cannot promote concurrently or interleave a write+rename. A stale
+// lock left by a crashed or interrupted sync is reclaimed by the next sync, so
+// publication recovers cleanly. See `crate::writer_lock` for the design and its
+// documented, best-effort, std-only staleness boundary.
 
 /// The application-data sub-directory that holds the published corpus and its
 /// transient publication files.
@@ -551,6 +561,10 @@ pub enum PublishError {
         /// The underlying I/O cause, preserved for the error chain.
         source: io::Error,
     },
+    /// The sync writer lock could not be acquired because another sync holds a
+    /// live, unstale lock ([`crate::writer_lock`]); this publish did not run, so
+    /// the previously published snapshot is untouched. The caller may retry.
+    Lock(crate::writer_lock::LockError),
 }
 
 impl PublishError {
@@ -592,6 +606,7 @@ impl fmt::Display for PublishError {
                 "snapshot is {bytes} bytes, exceeding the {limit}-byte on-disk limit"
             ),
             Self::Io { context, source } => write!(f, "{context}: {source}"),
+            Self::Lock(err) => write!(f, "could not acquire the sync writer lock: {err}"),
         }
     }
 }
@@ -600,6 +615,7 @@ impl std::error::Error for PublishError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            Self::Lock(err) => Some(err),
             _ => None,
         }
     }
@@ -620,6 +636,12 @@ impl From<ValidationReport> for PublishError {
 impl From<io::Error> for PublishError {
     fn from(error: io::Error) -> Self {
         Self::io("io operation failed", error)
+    }
+}
+
+impl From<crate::writer_lock::LockError> for PublishError {
+    fn from(error: crate::writer_lock::LockError) -> Self {
+        Self::Lock(error)
     }
 }
 
@@ -717,7 +739,15 @@ fn cleanup_stale_temps(corpus_dir: &Path) -> Result<(), PublishError> {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX) && name != PUBLISHED_NAME {
+        // Two transient families are swept: the candidate temps
+        // (`snapshot-<pid>-<n>-<nanos>.tmp`) and the writer-lock stamp temps
+        // (`sync.lock.stamp-<pid>-<ns>-<n>`), the latter left by a process
+        // killed mid-stamp (task `[028]`). Both are safe to remove here because
+        // this pass runs *inside the held writer lock*, so no live writer is
+        // stamping; any temp present is an orphan from an earlier interrupted run.
+        if (name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX) && name != PUBLISHED_NAME)
+            || crate::writer_lock::is_stamp_temp(name)
+        {
             let _ = fs::remove_file(entry.path());
         }
     }
@@ -741,9 +771,14 @@ fn cleanup_stale_temps(corpus_dir: &Path) -> Result<(), PublishError> {
 /// - **Nothing escapes the data directory** — the transient and published paths
 ///   are built under the canonical corpus directory, and a leftover temp is
 ///   cleaned up, never promoted.
+/// - **Concurrent syncs are serialized** (task `[028]`) — the write+rename runs
+///   under the `crate::writer_lock` writer lock held for its duration, so two
+///   syncs cannot promote concurrently; a stale lock from a crashed or
+///   interrupted sync is reclaimed by the next sync.
 ///
 /// Returns the [`Publication`] (the published path and the cleared
-/// [`ValidationSummary`]).
+/// [`ValidationSummary`]). A live, unstale lock held by another sync surfaces as
+/// [`PublishError::Lock`] and leaves the previously published snapshot untouched.
 pub fn publish_snapshot(
     data_dir: &Path,
     manifest: &SnapshotManifest,
@@ -763,14 +798,27 @@ pub fn publish_snapshot(
     // 3. Resolve the containment-safe corpus directory and recover from any
     //    earlier interrupted run.
     let corpus = corpus_dir(data_dir)?;
+
+    // 4. Acquire the sync writer lock (reclaiming a stale one left by a crashed
+    //    or interrupted sync) and hold it, via an RAII guard, through the
+    //    write+rename below. This serializes concurrent writers (task `[028]`):
+    //    two syncs cannot promote concurrently or interleave a write+rename. The
+    //    lock is released when `_guard` drops at the end of this function, on
+    //    every exit path (success or error). A live, unstale lock held by another
+    //    sync surfaces as `PublishError::Lock` and leaves the previous snapshot
+    //    untouched.
+    let _guard = crate::writer_lock::acquire(&corpus).map_err(PublishError::from)?;
+
+    // 5. Clean up transient candidates left by an interrupted run, so a crash does
+    //    not leave a partial artifact lying in the data directory.
     cleanup_stale_temps(&corpus)?;
 
-    // 4. Write the candidate to a transient file inside the corpus directory and
+    // 6. Write the candidate to a transient file inside the corpus directory and
     //    flush it durably, without yet promoting it.
     let temp = next_temp_path(&corpus);
     write_candidate(&temp, &bytes)?;
 
-    // 5. Only now — candidate fully written, validated, and durable — promote it
+    // 7. Only now — candidate fully written, validated, and durable — promote it
     //    atomically over the active snapshot. `rename` within the same directory
     //    is atomic, so a reader never observes a half-written snapshot; a failure
     //    here leaves the previous valid snapshot in place and the temp removed.
@@ -1604,6 +1652,203 @@ mod tests {
         assert!(
             !within_size_limit(MAX_SNAPSHOT_BYTES + 1),
             "a file one byte over the limit is rejected",
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Writer-lock serialization — task [028]
+    // -------------------------------------------------------------------
+
+    /// **AC1 (publish level):** two syncs publishing to the *same* data directory
+    /// are serialized by the writer lock, so neither overwrites the other's
+    /// candidate and the published snapshot is always a complete, loadable
+    /// manifest. The two publishes run on two threads that start together (a
+    /// barrier); after both finish, the active snapshot is exactly one of the two
+    /// candidates — never a torn, interleaved write.
+    #[test]
+    fn concurrent_publishes_serialize_without_corrupting_the_corpus() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = temp_data_dir();
+        let data = Arc::new(dir.0.clone());
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Two distinct, valid candidates, each a complete corpus.
+        let first = Arc::new({
+            let mut m = complete_snapshot();
+            m.body.snapshot_id =
+                SnapshotId::new("rust-docs-concurrent-a").expect("a valid snapshot id");
+            m
+        });
+        let second = Arc::new({
+            let mut m = complete_snapshot();
+            m.body.snapshot_id =
+                SnapshotId::new("rust-docs-concurrent-b").expect("a valid snapshot id");
+            m
+        });
+
+        let join_a = {
+            let data = Arc::clone(&data);
+            let first = Arc::clone(&first);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                publish_until_ok(&data, &first)
+            })
+        };
+        let join_b = {
+            let data = Arc::clone(&data);
+            let second = Arc::clone(&second);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                publish_until_ok(&data, &second)
+            })
+        };
+        let a = join_a.join().expect("writer A finishes");
+        let b = join_b.join().expect("writer B finishes");
+
+        // Both writers eventually published — serialized by the lock — and
+        // neither panicked or left an error. (Each `Publication` names the active
+        // file, which is the shared output, so identity is checked via the load
+        // below.)
+        let _ = (a, b);
+
+        // The active snapshot is exactly one of the two candidates: a complete,
+        // loadable manifest, never a torn/interleaved write.
+        let loaded = load_published_snapshot(&dir.0).expect("the published snapshot loads");
+        assert!(
+            loaded.body.snapshot_id.as_str() == "rust-docs-concurrent-a"
+                || loaded.body.snapshot_id.as_str() == "rust-docs-concurrent-b",
+            "the active snapshot must be one of the two published candidates, got {}",
+            loaded.body.snapshot_id.as_str()
+        );
+        // No transient candidate was left behind and none is mistaken for the
+        // published snapshot.
+        assert_no_stale_temps(&dir.0);
+    }
+
+    /// Publish `candidate`, retrying on a clean `WriterBusy` refusal (a live writer
+    /// holds the lock) until it succeeds. Used by the concurrency test so both
+    /// writers eventually publish — the lock serializes them rather than letting
+    /// their writes interleave.
+    fn publish_until_ok(data: &Path, candidate: &SnapshotManifest) -> Publication {
+        use crate::writer_lock::LockError;
+        for _ in 0..500 {
+            match publish_snapshot(data, candidate) {
+                Ok(pubn) => return pubn,
+                Err(PublishError::Lock(LockError::WriterBusy(_))) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(other) => panic!("unexpected publish error: {other:?}"),
+            }
+        }
+        panic!("publish did not succeed within the retry bound");
+    }
+
+    /// **AC1 (busy path through publish):** while a live writer holds the lock, a
+    /// publish to the same data directory is refused with
+    /// [`PublishError::Lock`]/`WriterBusy` and leaves the last valid snapshot
+    /// untouched — the refused publish writes no candidate and corrupts nothing.
+    #[test]
+    fn a_publish_is_refused_while_the_writer_lock_is_held() {
+        use crate::writer_lock::{LockError, acquire};
+
+        let dir = temp_data_dir();
+        let good = complete_snapshot();
+        publish_snapshot(&dir.0, &good).expect("publish a last valid snapshot");
+        let good_id = good.body.snapshot_id.clone();
+        let before = load_published_snapshot(&dir.0).expect("load the last valid snapshot");
+
+        // A live writer holds the lock for the duration of this test.
+        let corpus = corpus_dir(&dir.0).expect("resolve the corpus dir");
+        let guard = acquire(&corpus).expect("a live writer acquires the lock");
+
+        // A second publish is refused while the lock is held.
+        let mut next = complete_snapshot();
+        next.body.snapshot_id = SnapshotId::new("rust-docs-busy").expect("a valid snapshot id");
+        let err = publish_snapshot(&dir.0, &next)
+            .expect_err("a publish must be refused while the lock is held");
+        assert!(
+            matches!(err, PublishError::Lock(LockError::WriterBusy(_))),
+            "a held lock must refuse the publish with WriterBusy, got {err:?}"
+        );
+
+        // The last valid snapshot is untouched, and the refused publish wrote no
+        // candidate.
+        drop(guard);
+        let after = load_published_snapshot(&dir.0).expect("the last valid snapshot still loads");
+        assert_eq!(
+            after.body.snapshot_id, good_id,
+            "a refused publish must not overwrite the last valid snapshot"
+        );
+        assert_eq!(
+            before, after,
+            "the last valid snapshot is byte-for-byte unchanged"
+        );
+        assert_no_stale_temps(&dir.0);
+    }
+
+    /// **AC2 (publish level):** a later sync recovers after an interrupted write —
+    /// a stale writer lock and a partial candidate left by a crashed sync are
+    /// reclaimed and cleaned up, a new valid snapshot is published, and the last
+    /// valid corpus is never corrupted or blocked by the stale lock.
+    #[test]
+    fn a_later_publish_recovers_after_an_interrupted_write() {
+        use crate::writer_lock::{LOCK_NAME, dead_lock_bytes};
+
+        let dir = temp_data_dir();
+
+        // 1. Establish a last-valid snapshot.
+        let first = complete_snapshot();
+        publish_snapshot(&dir.0, &first).expect("the first sync publishes");
+        let last_valid = load_published_snapshot(&dir.0).expect("load the last valid snapshot");
+
+        // 2. Simulate an interrupted write: a stale writer lock (a dead holder)
+        //    and a partial candidate left in the corpus directory.
+        let corpus = corpus_dir(&dir.0).expect("resolve the corpus dir");
+        let lock = corpus.join(LOCK_NAME);
+        let partial = corpus.join("snapshot-4242-0-0.tmp");
+        std::fs::write(&lock, dead_lock_bytes()).expect("leave a stale lock");
+        std::fs::write(&partial, b"{ a partial, unfinished candidate")
+            .expect("leave a partial candidate");
+        assert!(
+            lock.exists() && partial.exists(),
+            "the stale artifacts exist"
+        );
+
+        // A stale lock must not prevent reading the last valid corpus.
+        let still = load_published_snapshot(&dir.0)
+            .expect("the last valid snapshot loads through a stale lock");
+        assert_eq!(
+            still, last_valid,
+            "a stale lock must not corrupt or block the last valid corpus"
+        );
+
+        // 3. A later sync reclaims the stale lock, cleans the partial candidate,
+        //    and publishes a new valid snapshot.
+        let mut next = complete_snapshot();
+        next.body.snapshot_id =
+            SnapshotId::new("rust-docs-recovered").expect("a valid snapshot id");
+        publish_snapshot(&dir.0, &next).expect("the later sync recovers and publishes");
+
+        // The new snapshot is the active, loadable corpus.
+        let recovered = load_published_snapshot(&dir.0).expect("the recovered snapshot loads");
+        assert_eq!(
+            recovered.body.snapshot_id.as_str(),
+            "rust-docs-recovered",
+            "the recovered sync must publish the new snapshot"
+        );
+        // The partial candidate is gone, no transient file remains, and the lock
+        // was released after the publish.
+        assert!(
+            !partial.exists(),
+            "the partial candidate must be cleaned up"
+        );
+        assert_no_stale_temps(&dir.0);
+        assert!(
+            !lock.exists(),
+            "the writer lock must be released after a publish"
         );
     }
 }

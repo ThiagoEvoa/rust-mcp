@@ -39,6 +39,7 @@ mod model;
 mod provenance;
 mod registry;
 mod search;
+mod writer_lock;
 
 pub use cli::{Cli, Command, DataDirError, apply_override, default_data_dir, resolve_data_dir};
 pub use error::{AppError, AppResult};
