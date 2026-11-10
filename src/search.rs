@@ -1532,9 +1532,18 @@ mod tests {
 
     /// AC1: an exact guideline-code match ranks its canonical section first,
     /// above a body-only mention of the same code — even when the body-only
-    /// section mentions the code far more often. The exact match's *tier* (the
-    /// primary sort key), not the additive boost magnitude, is what guarantees
-    /// the order.
+    /// section mentions the code far more often.
+    ///
+    /// The corpus is built so the queried code is *rare*: it appears in only
+    /// two of the many sections, so its BM25 idf is **positive** and raw
+    /// frequency decides the plain ranking — the high-frequency body-only
+    /// section wins on raw score. The exact match is lifted to first by its
+    /// *tier* (the primary sort key), not by raw frequency, so this assertion
+    /// **fails if the tier logic is removed**: with no tier the higher-frequency
+    /// body-only section would rank first. This is the discriminating case the
+    /// plain two-document version was not: under a negative idf the
+    /// higher-frequency body-only section already ranked last without any tier.
+    /// The large lint-catalog test below keeps the crowding case.
     #[test]
     fn exact_guideline_code_ranks_above_body_only_mention() {
         // Carries "C-CONV" as a structured guideline code; its body does not
@@ -1549,7 +1558,8 @@ mod tests {
             &[],
         );
         // Mentions "C-CONV" many times in prose, with no structured field: a
-        // stronger frequency match that a plain BM25 ranking would put first.
+        // stronger frequency match that a plain (tier-free) ranking puts first,
+        // because the code is rare enough for a positive idf.
         let body_only = section(
             "api-guidelines",
             "style",
@@ -1559,20 +1569,47 @@ mod tests {
             &[],
             &[],
         );
-        let index = SectionIndex::build(&snapshot(vec![body_only.clone(), exact.clone()]));
+        // Noise sections that share no term with the query: they keep "C-CONV"
+        // rare (df < n_docs / 2, a positive idf) so raw frequency — not the
+        // tier — decides the plain ranking, and frequency favors body_only.
+        let mut corpus = vec![body_only.clone(), exact.clone()];
+        for i in 0..10 {
+            corpus.push(section(
+                "style-guide",
+                &format!("noise/{i}"),
+                &format!("noise{i}"),
+                "general whitespace and comment style notes",
+                &[],
+                &[],
+                &[],
+            ));
+        }
+        let index = SectionIndex::build(&snapshot(corpus));
         let hits = index.search("C-CONV");
-        assert_eq!(hits.len(), 2, "both sections mention the code");
+        assert_eq!(
+            hits.len(),
+            2,
+            "only the two sections that mention the code match"
+        );
         assert_eq!(
             hits[0].section_id, exact.id,
-            "the exact-code section must rank first despite the higher-frequency mention"
+            "the exact-code section must rank first above the higher-frequency body mention (via its tier)"
         );
         assert_eq!(hits[1].section_id, body_only.id);
     }
 
     /// AC1: an exact lint-id match ranks its canonical entry first, above a
-    /// body-only mention of the same lint id.
+    /// body-only mention of the same lint id. As with the guideline-code case,
+    /// the corpus is built so the lint id is *rare* (it appears in only two of
+    /// the many sections), giving it a **positive** idf so raw frequency decides
+    /// the plain ranking and favors the high-frequency body-only section. The
+    /// exact match is lifted to first by its *tier*; the assertion **fails if the
+    /// tier logic is removed** (the higher-frequency body-only section would then
+    /// rank first).
     #[test]
     fn exact_lint_id_ranks_above_body_only_mention() {
+        // Carries "clippy::unwrap_used" as a structured lint id; its body uses
+        // the bare word `unwrap_used` but not the qualified id as a field.
         let exact = section(
             "clippy",
             "lints/unwrap-used",
@@ -1582,6 +1619,9 @@ mod tests {
             &[],
             &["clippy::unwrap_used".to_string()],
         );
+        // Mentions "clippy::unwrap_used" many times in prose as a qualified
+        // lint id, with no structured field: a stronger frequency match that a
+        // plain (tier-free) ranking puts first.
         let body_only = section(
             "clippy",
             "style",
@@ -1591,12 +1631,31 @@ mod tests {
             &[],
             &[],
         );
-        let index = SectionIndex::build(&snapshot(vec![body_only.clone(), exact.clone()]));
+        // Noise sections that share no term with the query: they keep the lint id
+        // rare (df < n_docs / 2, a positive idf) so raw frequency — not the tier
+        // — decides the plain ranking, and frequency favors body_only.
+        let mut corpus = vec![body_only.clone(), exact.clone()];
+        for i in 0..10 {
+            corpus.push(section(
+                "clippy",
+                &format!("noise/{i}"),
+                &format!("noise{i}"),
+                "general whitespace and comment style notes",
+                &[],
+                &[],
+                &[],
+            ));
+        }
+        let index = SectionIndex::build(&snapshot(corpus));
         let hits = index.search("clippy::unwrap_used");
-        assert_eq!(hits.len(), 2, "both sections mention the lint id");
+        assert_eq!(
+            hits.len(),
+            2,
+            "only the two sections that mention the lint id match"
+        );
         assert_eq!(
             hits[0].section_id, exact.id,
-            "the exact lint-id entry must rank first"
+            "the exact lint-id entry must rank first above the higher-frequency body mention (via its tier)"
         );
         assert_eq!(hits[1].section_id, body_only.id);
     }
@@ -1781,6 +1840,47 @@ mod tests {
         assert!(
             hits.is_empty(),
             "a valid source with no match is an empty, successful result"
+        );
+    }
+
+    /// Drift guard for [`SUPPORTED_SOURCES`]: the eight ids the
+    /// [`SearchError::UnsupportedSource`] message advertises as the valid
+    /// alternatives must equal the eight canonical ids of the
+    /// [`SourceCollection`] registry, each via [`SourceCollection::id`]. If the
+    /// constant and the registry ever disagree — an added, removed, renamed, or
+    /// duplicated id, or a stray/blank token in the list — this fails, so the
+    /// error message can never silently fall out of sync with the registry.
+    #[test]
+    fn supported_sources_match_registry() {
+        // Parse the advertised, comma-joined list into its constituent ids.
+        let advertised: Vec<&'static str> = SUPPORTED_SOURCES
+            .split(", ")
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .collect();
+        // The registry's canonical ids.
+        let registry: Vec<&'static str> = SourceCollection::ALL
+            .iter()
+            .map(SourceCollection::id)
+            .collect();
+
+        // The same set of ids, no more and no fewer (catches an added/removed/
+        // renamed source and any stray or blank token in the list).
+        let advertised_set: BTreeSet<&'static str> = advertised.iter().copied().collect();
+        let registry_set: BTreeSet<&'static str> = registry.iter().copied().collect();
+        assert_eq!(
+            advertised_set, registry_set,
+            "the advertised source list must equal the registry's ids"
+        );
+        assert_eq!(
+            advertised.len(),
+            registry.len(),
+            "the advertised list must list exactly the registry's sources, no duplicates"
+        );
+        assert_eq!(
+            registry_set.len(),
+            8,
+            "the registry has exactly the eight approved sources"
         );
     }
 }
