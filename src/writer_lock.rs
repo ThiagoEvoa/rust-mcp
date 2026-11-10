@@ -707,8 +707,14 @@ mod tests {
             "STAMP_PREFIX must be `...{LOCK_NAME}.stamp-`"
         );
         assert!(is_stamp_temp("sync.lock.stamp-123-456-0"));
-        assert!(!is_stamp_temp("sync.lock"), "the lock itself is not a stamp temp");
-        assert!(!is_stamp_temp("snapshot-1-0-0.tmp"), "a candidate temp is not a stamp temp");
+        assert!(
+            !is_stamp_temp("sync.lock"),
+            "the lock itself is not a stamp temp"
+        );
+        assert!(
+            !is_stamp_temp("snapshot-1-0-0.tmp"),
+            "a candidate temp is not a stamp temp"
+        );
         assert!(!is_stamp_temp("manifest.json"));
     }
 
