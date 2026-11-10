@@ -21,6 +21,9 @@
 //!   validation, IDs, bounded reads, and atomic publication (`[025]`-`[028]`),
 //! - [`runtime`] — the *read* side of snapshot selection: the fixed, immutable
 //!   startup snapshot with a bundled fallback (`[029]`),
+//! - [`status`] — corpus status and freshness reporting: the snapshot identity,
+//!   source/section counts, and per-source staleness over a configurable
+//!   threshold (`[030]`),
 //! - [`search`] — tokenization, ranking, pagination (`[033]`-`[047]`),
 //! - [`commands`] — source-backed command catalog/guidance (`[039]`-`[044]`),
 //! - [`mcp`] — tool/resource handlers and protocol errors (`[048]`-`[059]`).
@@ -43,6 +46,7 @@ mod provenance;
 mod registry;
 mod runtime;
 mod search;
+mod status;
 mod writer_lock;
 
 pub use cli::{Cli, Command, DataDirError, apply_override, default_data_dir, resolve_data_dir};

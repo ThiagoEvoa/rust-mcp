@@ -137,6 +137,28 @@ impl Instant {
     pub fn exceeds_by(self, other: Instant, secs: i64) -> bool {
         self.duration_secs(other) > secs
     }
+
+    /// Build an [`Instant`] from a [`std::time::SystemTime`], truncated to whole
+    /// seconds since the Unix epoch.
+    ///
+    /// This is the CLI's "now": the model deliberately has no `now`-style
+    /// constructor because reading the wall clock is a side-effecting concern
+    /// that belongs at the process boundary (task [030] builds "now" from
+    /// `SystemTime::now()` and passes it here), not inside the pure provenance
+    /// model. Construction goes through the private `secs` field so no unvalidated
+    /// epoch can be spliced in, mirroring [`Instant::parse`]. A pre-epoch clock
+    /// (effectively never on real systems) or a value past `i64::MAX` saturates
+    /// to epoch `0` rather than panicking, so no external input can unwind.
+    pub fn from_system_time(now: std::time::SystemTime) -> Self {
+        let secs = match now.duration_since(std::time::UNIX_EPOCH) {
+            // A real wall clock is post-epoch; a pre-epoch clock saturates to
+            // epoch 0 rather than panicking, and a value past `i64::MAX`
+            // saturates to `i64::MAX` rather than wrapping.
+            Ok(elapsed) => i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX),
+            Err(_) => 0,
+        };
+        Self { secs }
+    }
 }
 
 /// Tighten a [007] [`Timestamp`] into a comparable instant.
@@ -179,8 +201,18 @@ impl StaleThreshold {
     }
 
     /// The configured window in seconds.
+    ///
+    /// Saturates on overflow so an absurd threshold — a `--stale-days` value so
+    /// large that `days * 86_400` overflows `i64`, or so negative — can never
+    /// panic or wrap: a huge *positive* window means "effectively never stale" and
+    /// saturates to `i64::MAX`, a huge *negative* one "effectively always stale"
+    /// and saturates to `i64::MIN`. A non-overflowing value (including `0`, the
+    /// plan's seven-day default, and every realistic window) is returned exactly,
+    /// so no realistic caller observes any change. F-030-1.
     pub fn seconds(self) -> i64 {
-        self.days * 86_400
+        self.days
+            .checked_mul(86_400)
+            .unwrap_or(if self.days > 0 { i64::MAX } else { i64::MIN })
     }
 
     /// The window in days.
@@ -866,6 +898,25 @@ mod tests {
     fn stale_threshold_defaults_to_seven_days() {
         assert_eq!(StaleThreshold::default().as_days(), 7);
         assert_eq!(StaleThreshold::default().seconds(), 7 * 86_400);
+    }
+
+    #[test]
+    fn seconds_saturates_on_overflow_not_panic() {
+        // F-030-1: an absurd `--stale-days` must not overflow `seconds()`. A huge
+        // positive window saturates to `i64::MAX` ("effectively never stale"), a
+        // huge negative one to `i64::MIN` ("effectively always stale"), and no
+        // realistic value changes.
+        assert_eq!(StaleThreshold::days(i64::MAX).seconds(), i64::MAX);
+        assert_eq!(StaleThreshold::days(i64::MIN).seconds(), i64::MIN);
+        // A value just past the overflow boundary still saturates, not wraps.
+        assert_eq!(
+            StaleThreshold::days(i64::MAX / 86_400 + 1).seconds(),
+            i64::MAX
+        );
+        // A normal value (and 0) is returned exactly — no realistic caller changes.
+        assert_eq!(StaleThreshold::days(7).seconds(), 7 * 86_400);
+        assert_eq!(StaleThreshold::days(0).seconds(), 0);
+        assert_eq!(StaleThreshold::days(365).seconds(), 365 * 86_400);
     }
 
     #[test]
