@@ -14,8 +14,11 @@
 //!    validation ([`crate::corpus::validate_snapshot`]).
 //! 2. **Otherwise fall back to the bundled snapshot** — a validated snapshot
 //!    shipped with the binary (`plan.md` §5 "Initial availability: bundle a
-//!    validated snapshot … First launch can work without network access"), read
-//!    from a fixed path the caller supplies.
+//!    validated snapshot … First launch can work without network access"). The
+//!    path-based [`load_snapshot`] reads a bundle file; [`load_snapshot_embedded`]
+//!    reads the bundle **embedded in the binary** (`crate::bundled::JSON`, the
+//!    first-sync fallback `docs/LICENSING.md` §5 makes a fresh install work
+//!    offline).
 //! 3. **Otherwise fail actionably** — when *neither* source yields a valid
 //!    corpus, return [`LoadError::NoValidCorpus`] rather than starting an
 //!    apparently-healthy, empty server (`plan.md` §5: "When no valid snapshot
@@ -73,10 +76,21 @@ pub enum SnapshotSource {
         path: PathBuf,
     },
     /// The bundled fallback snapshot shipped with the binary, at `path`.
+    ///
+    /// Used when the bundle is a separate file on disk (the path-based
+    /// [`load_snapshot`] fallback). The binary-shipped bundle is embedded via
+    /// `include_str!` and has no on-disk path, so it is reported as
+    /// [`SnapshotSource::Embedded`] instead.
     Bundle {
         /// The on-disk path of the bundled snapshot.
         path: PathBuf,
     },
+    /// The bundled fallback snapshot **embedded in the binary** (shipped via
+    /// `include_str!`, `plan.md` §5 "Initial availability: bundle a validated
+    /// snapshot … First launch can work without network access"). It has no
+    /// on-disk path — it is part of the compiled artifact — so it carries none.
+    /// Consulted by [`load_snapshot_embedded`] when no local snapshot exists.
+    Embedded,
 }
 
 /// The one snapshot a process serves for its entire lifetime.
@@ -268,11 +282,8 @@ fn load_local(data_dir: &Path) -> Result<SnapshotManifest, LoadError> {
 /// Read and validate the bundled snapshot at `path`.
 ///
 /// The bundled snapshot is the same compact-JSON format as a published snapshot,
-/// so the same gates apply: read it, bound its on-disk size, check UTF-8
-/// integrity, parse it through the schema-version gate
-/// ([`SnapshotManifest::from_json_str`]), and run the complete-corpus
-/// validation. The bundle is only *read*, so a corrupt or absent bundle never
-/// mutates the local corpus.
+/// so the same gates apply (see [`load_validated_json`]). The bundle is only
+/// *read*, so a corrupt or absent bundle never mutates the local corpus.
 fn load_bundle(path: &Path) -> Result<SnapshotManifest, LoadError> {
     let bytes = fs::read(path).map_err(|cause| {
         LoadError::source(
@@ -280,33 +291,92 @@ fn load_bundle(path: &Path) -> Result<SnapshotManifest, LoadError> {
             PublishError::io("reading bundled snapshot", cause),
         )
     })?;
-    // Bound the on-disk size *before* parsing, mirroring the corpus loader: an
-    // oversized file is rejected rather than read into memory.
+    load_validated_json("bundled snapshot", bytes)
+}
+
+/// Read and validate a bundled snapshot **embedded in the binary**.
+///
+/// This is the first-sync fallback of `plan.md` §5 / `docs/LICENSING.md` §5:
+/// the binary ships a validated snapshot (`crate::bundled::JSON`), so a fresh
+/// install serves the Rust toolchain documentation **without any network
+/// access**. The selection mirrors [`load_snapshot`] but the fallback source is
+/// the in-memory `bundle` bytes rather than a file on disk:
+///
+/// 1. **Local** — a valid local published snapshot (from a prior `sync`) is
+///    preferred; a read/validation failure records a short reason and falls
+///    through.
+/// 2. **Embedded** — the shipped `bundle` bytes are validated with the same
+///    complete-corpus gate and reported as [`SnapshotSource::Embedded`].
+/// 3. **Fail** — when neither source yields a valid corpus, return
+///    [`LoadError::NoValidCorpus`] with both reasons, directing the operator to
+///    `sync`.
+///
+/// The selection makes **no** network call and performs **no** write, so it
+/// never deletes or mutates the local corpus (the last valid snapshot is always
+/// preserved). It returns an immutable [`RuntimeSnapshot`] fixed for the process
+/// lifetime.
+pub fn load_snapshot_embedded(
+    data_dir: &Path,
+    bundle: &[u8],
+) -> Result<RuntimeSnapshot, LoadError> {
+    // Step 1: a valid local published snapshot, when present, is preferred.
+    let local = match load_local(data_dir) {
+        Ok(manifest) => {
+            return Ok(RuntimeSnapshot {
+                manifest,
+                source: SnapshotSource::Local {
+                    path: corpus::published_snapshot_path(data_dir),
+                },
+            });
+        }
+        Err(err) => Some(err.reason()),
+    };
+
+    // Step 2: the embedded, shipped fallback, validated with the same gate.
+    match load_validated_json("bundled (embedded) snapshot", bundle.to_vec()) {
+        Ok(manifest) => Ok(RuntimeSnapshot {
+            manifest,
+            source: SnapshotSource::Embedded,
+        }),
+        Err(err) => Err(LoadError::NoValidCorpus {
+            local,
+            bundle: Some(err.reason()),
+        }),
+    }
+}
+
+/// Validate `bytes` as a snapshot: bound the size, check UTF-8 integrity, parse
+/// through the schema-version gate, and run the complete-corpus validation.
+///
+/// Shared by the path-based ([`load_bundle`]) and embedded
+/// ([`load_snapshot_embedded`]) bundle paths so the two fallbacks apply the
+/// **identical** gates (`plan.md` §5: the bundled snapshot is "a validated
+/// snapshot"). `context` names the source in any diagnostic.
+fn load_validated_json(context: &str, bytes: Vec<u8>) -> Result<SnapshotManifest, LoadError> {
+    // Bound the size *before* parsing, mirroring the corpus loader: an oversized
+    // blob is rejected rather than read into memory.
     if bytes.len() > MAX_SNAPSHOT_BYTES {
         return Err(LoadError::source(
-            "bundled snapshot",
+            context,
             PublishError::too_large(bytes.len()),
         ));
     }
-    // UTF-8 integrity: a corrupt (non-UTF-8) bundle must not be misparsed.
+    // UTF-8 integrity: a corrupt (non-UTF-8) blob must not be misparsed.
     let json = String::from_utf8(bytes).map_err(|err| {
         LoadError::source(
-            "bundled snapshot",
+            context,
             PublishError::Schema(SchemaError::Json(format!(
-                "bundled snapshot is not valid UTF-8: {err}"
+                "{context} is not valid UTF-8: {err}"
             ))),
         )
     })?;
     // Schema gate: the version is checked before the body is trusted.
     let manifest = SnapshotManifest::from_json_str(&json)
-        .map_err(|err| LoadError::source("bundled snapshot", PublishError::from(err)))?;
+        .map_err(|err| LoadError::source(context, PublishError::from(err)))?;
     // Complete-corpus validation, mirroring the local path.
     let report = corpus::validate_snapshot(&manifest);
     if !report.is_valid() {
-        return Err(LoadError::source(
-            "bundled snapshot",
-            PublishError::Invalid(report),
-        ));
+        return Err(LoadError::source(context, PublishError::Invalid(report)));
     }
     Ok(manifest)
 }
@@ -819,6 +889,129 @@ mod tests {
         assert!(
             source.to_string().contains("reading bundled snapshot"),
             "the underlying PublishError must surface through source(): {source}"
+        );
+    }
+
+    // -- The embedded, binary-shipped bundle: the first-sync fallback (§5). --
+
+    /// **AC1 (issue #31)**: a fresh install with **no** local snapshot serves
+    /// the validated snapshot embedded in the binary — no network, no `sync`
+    /// required. This is the offline-first-launch guarantee `plan.md` §5 /
+    /// `docs/LICENSING.md` §5 calls for.
+    #[test]
+    fn an_embedded_snapshot_makes_a_fresh_install_work_offline() {
+        let tmp = temp_dir();
+        let data_dir = tmp.0.join("data");
+        // No local snapshot exists; the embedded bundle is the fallback.
+        let rt = load_snapshot_embedded(&data_dir, crate::bundled::JSON.as_bytes())
+            .expect("the bundled snapshot must load offline");
+
+        assert!(
+            matches!(rt.source, SnapshotSource::Embedded),
+            "with no local snapshot, the embedded bundle must be selected"
+        );
+        assert_eq!(
+            rt.manifest.body.snapshot_id.as_str(),
+            crate::bundled::SNAPSHOT_ID,
+            "the served snapshot must be the embedded seed"
+        );
+    }
+
+    /// A valid local snapshot (from a prior `sync`) is **preferred** over the
+    /// embedded bundle: the seed is a fallback, not the steady state.
+    #[test]
+    fn a_local_snapshot_is_preferred_over_the_embedded_bundle() {
+        let tmp = temp_dir();
+        let data_dir = tmp.0.join("data");
+        publish_snapshot(&data_dir, &valid_snapshot("rust-docs-local"))
+            .expect("the local snapshot must publish");
+
+        let rt = load_snapshot_embedded(&data_dir, crate::bundled::JSON.as_bytes())
+            .expect("a valid local must load");
+
+        assert!(
+            matches!(rt.source, SnapshotSource::Local { .. }),
+            "a valid local snapshot must be preferred over the embedded bundle"
+        );
+        assert_eq!(rt.manifest.body.snapshot_id.as_str(), "rust-docs-local");
+        assert_ne!(
+            rt.manifest.body.snapshot_id.as_str(),
+            crate::bundled::SNAPSHOT_ID,
+            "the embedded seed must not be consulted when a local snapshot is valid"
+        );
+    }
+
+    /// A corrupt embedded blob (the real bundle is always valid, but the shared
+    /// gate must still reject one) yields an actionable, `sync`-directing error
+    /// rather than a panic — the loader never starts an apparently-healthy
+    /// empty server.
+    #[test]
+    fn a_corrupt_embedded_blob_fails_actionably() {
+        let tmp = temp_dir();
+        let data_dir = tmp.0.join("data");
+
+        let err = load_snapshot_embedded(&data_dir, b"this is not a snapshot")
+            .expect_err("a corrupt blob must fail");
+        let message = err.to_string();
+        assert!(
+            message.to_lowercase().contains("sync"),
+            "the remedy must name `sync`: {message}"
+        );
+    }
+
+    /// The embedded bundle carries every one of the eight required sources and
+    /// their attribution, and validates as a complete corpus — the seed is a
+    /// real, usable corpus, not a placeholder.
+    #[test]
+    fn the_embedded_bundle_covers_all_eight_sources_and_their_attribution() {
+        let parsed = SnapshotManifest::from_json_str(crate::bundled::JSON)
+            .expect("the embedded JSON parses");
+
+        for collection in SourceCollection::ALL {
+            let id = collection.id();
+            assert!(
+                parsed.body.sources.iter().any(|s| s.id.as_str() == id),
+                "the embedded bundle must include the {id} source"
+            );
+            assert!(
+                parsed
+                    .body
+                    .attribution
+                    .iter()
+                    .any(|a| a.source.as_str() == id),
+                "the embedded bundle must attribute the {id} source"
+            );
+        }
+        assert_eq!(
+            parsed.body.attribution.len(),
+            SourceCollection::ALL.len(),
+            "every source must carry exactly one attribution record"
+        );
+        assert!(
+            crate::corpus::validate_snapshot(&parsed).is_valid(),
+            "the embedded bundle must be a complete, valid corpus"
+        );
+    }
+
+    /// Selecting the embedded snapshot is read-only: a corrupt local is never
+    /// deleted or mutated (the last valid corpus is always preserved).
+    #[test]
+    fn an_embedded_load_never_touches_the_local_corpus() {
+        let tmp = temp_dir();
+        let data_dir = tmp.0.join("data");
+        let local_path = corpus::published_snapshot_path(&data_dir);
+        corrupt_local(&data_dir, b"corrupt local");
+
+        let rt = load_snapshot_embedded(&data_dir, crate::bundled::JSON.as_bytes())
+            .expect("the embedded bundle must load over a corrupt local");
+        assert!(
+            matches!(rt.source, SnapshotSource::Embedded),
+            "a corrupt local must fall back to the embedded bundle"
+        );
+        assert_eq!(
+            fs::read(&local_path).expect("the local file is still present"),
+            b"corrupt local",
+            "the loader must not delete or rewrite the local snapshot"
         );
     }
 }

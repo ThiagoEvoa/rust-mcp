@@ -218,6 +218,40 @@ impl SourceCollection {
         }
     }
 
+    /// The upstream source repository that *owns* this collection's content
+    /// (`docs/LICENSING.md` §2 "Per-source evidence" → "Upstream repo"), as a
+    /// `https://github.com/rust-lang/<repo>` URL — the same `repository` form
+    /// the [`AttributionRef`](crate::model::AttributionRef) field documents and
+    /// the model's own example uses (`https://github.com/rust-lang/rust`).
+    ///
+    /// This is distinct from [`entry_url`], which is the *rendered* entry point
+    /// a human or client opens. Three collections are not separate repositories:
+    /// `style-guide`, `rustc`, and `rustdoc` live inside `rust-lang/rust` under
+    /// `src/doc/{style-guide,rustc,rustdoc}` on the `master` branch; `clippy`
+    /// owns `rust-lang/rust-clippy`; `cargo` owns `rust-lang/cargo`. Branch and
+    /// sub-path detail (`master`/`main`, `src/doc/…`) is documented here rather
+    /// than in the bare repo URL, matching the model's repo-only convention.
+    pub fn source_repo(&self) -> &'static str {
+        match self {
+            // `rust-lang/api-guidelines` (master)
+            SourceCollection::ApiGuidelines => "https://github.com/rust-lang/api-guidelines",
+            // `rust-lang/rust`, `src/doc/style-guide/` (master)
+            SourceCollection::StyleGuide => "https://github.com/rust-lang/rust",
+            // `rust-lang/cargo` (master; MDBook `book/`)
+            SourceCollection::Cargo => "https://github.com/rust-lang/cargo",
+            // `rust-lang/rust`, `src/doc/rustc` (master)
+            SourceCollection::Rustc => "https://github.com/rust-lang/rust",
+            // `rust-lang/rustup` (main)
+            SourceCollection::Rustup => "https://github.com/rust-lang/rustup",
+            // `rust-lang/rustfmt` (main; README.md, Configurations.md)
+            SourceCollection::Rustfmt => "https://github.com/rust-lang/rustfmt",
+            // `rust-lang/rust-clippy` (main; `clippy_lints/src`)
+            SourceCollection::Clippy => "https://github.com/rust-lang/rust-clippy",
+            // `rust-lang/rust`, `src/doc/rustdoc` (master)
+            SourceCollection::Rustdoc => "https://github.com/rust-lang/rust",
+        }
+    }
+
     /// The fixed fetch boundaries for this collection: the permitted hosts,
     /// path prefixes (or, for rustfmt, the approved file set), document
     /// formats, and parser adapters.

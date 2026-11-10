@@ -220,14 +220,20 @@ impl Cli {
             // through the gated subscriber (like `sync`/`serve`), so stdout
             // stays exclusive to MCP messages (plan.md §8/§9 / task [004]).
             Command::Status { stale_days } => {
-                // Select the fixed runtime snapshot. The CLI has no bundled
-                // snapshot path wired yet, so the loader is given `None` and
-                // falls back to the local published snapshot; when neither a
-                // local snapshot nor a bundle is available, `load_snapshot`
-                // returns an actionable `LoadError` that directs the operator
-                // to `sync` — surfaced like the `sync` failure path (a typed,
+                // Select the fixed runtime snapshot: the local published snapshot
+                // (from a prior `sync`) when it exists, else the validated
+                // snapshot **embedded in the binary** (`crate::bundled::JSON`) —
+                // the first-sync fallback that makes a fresh install work
+                // offline (`plan.md` §5, `docs/LICENSING.md` §5). This is a pure,
+                // **offline** read: `load_snapshot_embedded` makes **no** network
+                // request. When *neither* source yields a valid corpus, it
+                // returns an actionable `LoadError` that directs the operator to
+                // `sync` — surfaced like the `sync` failure path (a typed,
                 // stderr diagnostic and a non-zero exit, never a panic).
-                let snapshot = match crate::runtime::load_snapshot(&data_dir, None) {
+                let snapshot = match crate::runtime::load_snapshot_embedded(
+                    &data_dir,
+                    crate::bundled::JSON.as_bytes(),
+                ) {
                     Ok(snapshot) => snapshot,
                     Err(err) => {
                         tracing::error!("rust-docs-mcp: status failed: {err}");
