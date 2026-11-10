@@ -248,6 +248,37 @@ fn is_command_verb(s: &str) -> bool {
 const DEFAULT_K1: f64 = 1.2;
 const DEFAULT_B: f64 = 0.75;
 
+// --- Task [035]: exact-match boost tiers ----------------------------------
+//
+// The [034] ranking is a pure BM25 order. This task lifts an *exact* match
+// (guideline code / command name / lint id) above a weaker body match. The lift
+// is a deterministic `tier` that becomes the **primary** key of the ranking
+// sort, so an exact match always precedes a body-only match regardless of the
+// corpus's length statistics — the magnitude of the additive boost below only
+// makes the reported `score` grow with match strength; it is *not* what
+// guarantees the ordering (that is the tier).
+
+/// Exact-match rank tiers, highest priority first.
+///
+/// A section's tier is the highest exact-match category it achieves for a query;
+/// the tier is the primary key of the ranking sort, so a higher tier always
+/// precedes a lower one. Command usage outranks a lint entry, which outranks a
+/// guideline code, which outranks a body/heading-only match
+/// (`plan.md` §6 "Rank exact guideline-code, command-name, and lint-ID matches
+/// first … Keep a large lint catalog from crowding out command-usage answers").
+const EXACT_TIER_NONE: u8 = 0; // body / heading / identifier only
+const EXACT_TIER_CODE: u8 = 1; // an exact guideline-code match
+const EXACT_TIER_LINT: u8 = 2; // an exact lint-id match
+const EXACT_TIER_COMMAND: u8 = 3; // an exact command-name match
+
+/// The additive exact-match boosts, one per non-zero tier. Folded into the BM25
+/// score so a stronger match reports a higher [`Hit::score`]; the *ordering*
+/// guarantee itself is the tier (the primary sort key), not these magnitudes, so
+/// the boosts need not dominate the BM25 range.
+const EXACT_BOOST_CODE: f64 = 1.0;
+const EXACT_BOOST_LINT: f64 = 2.0;
+const EXACT_BOOST_COMMAND: f64 = 3.0;
+
 /// A ranked match returned by [`SectionIndex::search`].
 ///
 /// It carries the **retrievable section identity** ([`SectionId`], AC1) plus
@@ -570,6 +601,14 @@ impl SectionIndex {
             return Vec::new();
         }
 
+        // Group the query's exact-match tokens by kind: a token that *exactly*
+        // equals one of a section's structured fields (guideline code / command
+        // key / lint id) lifts that section to the matching rank tier
+        // (`plan.md` §6 "Rank exact guideline-code, command-name, and lint-ID
+        // matches first"). Word/flag tokens are the "weaker" body matches the
+        // boost sits above, so they contribute no tier.
+        let (codes, commands, lints) = split_exact(&query_tokens);
+
         // Sum BM25 over the distinct query terms. Deduplicating on the token
         // string (via the `BTreeMap` accumulator below) keeps scoring
         // deterministic and independent of a repeated query term's order.
@@ -588,26 +627,44 @@ impl SectionIndex {
             }
         }
 
-        // Restrict the ranked hits to the requested source(s) *after* ranking, so
-        // the ranking signal is computed over the whole corpus and the filter
-        // only decides which hits are returned. Section ids are unique, so the
-        // `section id asc` term alone yields a total, deterministic order; no
-        // additional tie-break is needed.
-        let mut hits: Vec<Hit> = scored
+        // Restrict to the requested source(s) *after* ranking, then apply the
+        // exact-match boost. The sort key is (tier desc, score desc, section id
+        // asc):
+        //
+        //   * `tier` is the categorical guarantee that an exact match precedes a
+        //     body-only match — so a large lint catalog cannot crowd out a
+        //     command-usage answer when the query names the command (AC2);
+        //   * within a tier, the boosted `score` refines the order;
+        //   * `section id asc` is the total, deterministic tie-break (section
+        //     ids are unique), preserving [034]'s deterministic total order.
+        //
+        // The ranking signal is computed over the whole corpus; the source
+        // filter only decides which of the ranked hits are returned.
+        let mut ranked: Vec<(u8, Hit)> = scored
             .into_iter()
             .filter(|(doc, _)| filter.contains(self.sections[*doc].source_id.as_str()))
-            .map(|(doc, score)| Hit {
-                section_id: self.sections[doc].id.clone(),
-                score,
+            .map(|(doc, bm25)| {
+                let section = &self.sections[doc];
+                let (tier, boost) = section_boost(section, &codes, &commands, &lints);
+                (
+                    tier,
+                    Hit {
+                        section_id: section.id.clone(),
+                        score: bm25 + boost,
+                    },
+                )
             })
             .collect();
-        hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.section_id.as_str().cmp(b.section_id.as_str()))
+        ranked.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| {
+                    b.1.score
+                        .partial_cmp(&a.1.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.1.section_id.as_str().cmp(b.1.section_id.as_str()))
         });
-        hits
+        ranked.into_iter().map(|(_, hit)| hit).collect()
     }
 
     /// Rank the sections that contain any token of `query` within a single
@@ -678,6 +735,84 @@ fn section_tokens(section: &Section) -> Vec<Token> {
         }
     }
     tokenize(&buf)
+}
+
+/// Split a query's tokens into the three exact-match sets (guideline codes,
+/// command keys, lint ids), each a `BTreeSet` for deterministic membership.
+///
+/// Only the structured-field token kinds contribute: [`Token::Word`] and
+/// [`Token::Flag`] are the "weaker" body/heading/identifier matches that sit
+/// *below* an exact match (`plan.md` §6 "then boost headings and identifier
+/// matches over body text"), so they lift no section's tier. The sets dedupe
+/// and order the payloads, which keeps the boost (and therefore the ranking)
+/// independent of the order a repeated exact term appears in the query.
+fn split_exact(query_tokens: &[Token]) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
+    let mut codes = BTreeSet::new();
+    let mut commands = BTreeSet::new();
+    let mut lints = BTreeSet::new();
+    for token in query_tokens {
+        match token {
+            Token::GuidelineCode(s) => {
+                codes.insert(s.clone());
+            }
+            Token::Command(s) => {
+                commands.insert(s.clone());
+            }
+            Token::LintId(s) => {
+                lints.insert(s.clone());
+            }
+            Token::Word(_) | Token::Flag(_) => {}
+        }
+    }
+    (codes, commands, lints)
+}
+
+/// The exact-match rank `tier` and additive `boost` for `section` given the
+/// query's exact-match sets (see [`split_exact`]).
+///
+/// The tier is the *highest-priority* exact match the section achieves: a
+/// command-key match ([`EXACT_TIER_COMMAND`]) outranks a lint-id match
+/// ([`EXACT_TIER_LINT`]), which outranks a guideline-code match
+/// ([`EXACT_TIER_CODE`]); no exact match is [`EXACT_TIER_NONE`] (body/heading
+/// only). The boost is the matching tier's additive score, folded into the BM25
+/// score so the reported [`Hit::score`] grows with match strength. The
+/// *ordering guarantee*, however, is the tier itself (the primary sort key in
+/// [`SectionIndex::search_in`]), not these magnitudes — so an exact match
+/// always precedes a body-only match regardless of the corpus's length
+/// statistics, and a command-usage section is never crowded out by the
+/// individual lint entries of a large catalog.
+///
+/// The match is exact string equality between a query token's payload and a
+/// section's structured field, so `cargo clippy` matches a `command_keys` entry
+/// of `"cargo clippy"` but not `"clippy"`, and `clippy::unwrap_used` matches a
+/// `lint_ids` entry of the same but not a body mention of the words.
+fn section_boost(
+    section: &Section,
+    codes: &BTreeSet<String>,
+    commands: &BTreeSet<String>,
+    lints: &BTreeSet<String>,
+) -> (u8, f64) {
+    // Command usage outranks the individual lint entries it would otherwise be
+    // crowded out by (`plan.md` §6: "Keep a large lint catalog from crowding
+    // out command-usage answers when the query names a command").
+    if section
+        .command_keys
+        .iter()
+        .any(|k| commands.contains(k.as_str()))
+    {
+        return (EXACT_TIER_COMMAND, EXACT_BOOST_COMMAND);
+    }
+    if section.lint_ids.iter().any(|l| lints.contains(l.as_str())) {
+        return (EXACT_TIER_LINT, EXACT_BOOST_LINT);
+    }
+    if section
+        .guideline_codes
+        .iter()
+        .any(|c| codes.contains(c.as_str()))
+    {
+        return (EXACT_TIER_CODE, EXACT_BOOST_CODE);
+    }
+    (EXACT_TIER_NONE, 0.0)
 }
 
 #[cfg(test)]
@@ -1390,6 +1525,262 @@ mod tests {
         assert_eq!(
             texts(&tokenize("A B C-CONV clippy::x cargo test --f")),
             vec!["A", "B", "C-CONV", "clippy::x", "cargo test", "--f"]
+        );
+    }
+
+    // --- Task [035]: exact-match boosts -----------------------------------
+
+    /// AC1: an exact guideline-code match ranks its canonical section first,
+    /// above a body-only mention of the same code — even when the body-only
+    /// section mentions the code far more often. The exact match's *tier* (the
+    /// primary sort key), not the additive boost magnitude, is what guarantees
+    /// the order.
+    #[test]
+    fn exact_guideline_code_ranks_above_body_only_mention() {
+        // Carries "C-CONV" as a structured guideline code; its body does not
+        // mention the code, so its only "C-CONV" occurrence is the exact field.
+        let exact = section(
+            "api-guidelines",
+            "about",
+            "alphacode",
+            "prefers From and Into for conversions between types",
+            &["C-CONV".to_string()],
+            &[],
+            &[],
+        );
+        // Mentions "C-CONV" many times in prose, with no structured field: a
+        // stronger frequency match that a plain BM25 ranking would put first.
+        let body_only = section(
+            "api-guidelines",
+            "style",
+            "betabody",
+            "C-CONV C-CONV C-CONV C-CONV C-CONV C-CONV",
+            &[],
+            &[],
+            &[],
+        );
+        let index = SectionIndex::build(&snapshot(vec![body_only.clone(), exact.clone()]));
+        let hits = index.search("C-CONV");
+        assert_eq!(hits.len(), 2, "both sections mention the code");
+        assert_eq!(
+            hits[0].section_id, exact.id,
+            "the exact-code section must rank first despite the higher-frequency mention"
+        );
+        assert_eq!(hits[1].section_id, body_only.id);
+    }
+
+    /// AC1: an exact lint-id match ranks its canonical entry first, above a
+    /// body-only mention of the same lint id.
+    #[test]
+    fn exact_lint_id_ranks_above_body_only_mention() {
+        let exact = section(
+            "clippy",
+            "lints/unwrap-used",
+            "alphalint",
+            "the unwrap_used lint flags unwrap calls in production code",
+            &[],
+            &[],
+            &["clippy::unwrap_used".to_string()],
+        );
+        let body_only = section(
+            "clippy",
+            "style",
+            "betabody",
+            "clippy::unwrap_used clippy::unwrap_used clippy::unwrap_used clippy::unwrap_used",
+            &[],
+            &[],
+            &[],
+        );
+        let index = SectionIndex::build(&snapshot(vec![body_only.clone(), exact.clone()]));
+        let hits = index.search("clippy::unwrap_used");
+        assert_eq!(hits.len(), 2, "both sections mention the lint id");
+        assert_eq!(
+            hits[0].section_id, exact.id,
+            "the exact lint-id entry must rank first"
+        );
+        assert_eq!(hits[1].section_id, body_only.id);
+    }
+
+    /// AC2: a large lint catalog must not crowd out a command-usage answer when
+    /// the query names the command. Five clippy lint entries all mention the
+    /// command in prose (a catalog a plain ranking could let dominate); one
+    /// usage section carries the command as an exact key and must rank first.
+    #[test]
+    fn exact_command_not_crowded_out_by_large_lint_catalog() {
+        // Each lint entry mentions "cargo clippy" in prose, so a plain ranking
+        // of the catalog could bury the usage answer.
+        let mut corpus = Vec::new();
+        for i in 0..5 {
+            corpus.push(section(
+                "clippy",
+                &format!("lints/lint-{i}"),
+                &format!("beta{i}"),
+                "run cargo clippy to find this clippy lint in the source",
+                &[],
+                &[],
+                &[format!("clippy::lint_{i}")],
+            ));
+        }
+        let usage = section(
+            "clippy",
+            "commands/cargo-clippy",
+            "alphacargo",
+            "cargo clippy runs the clippy lints over your crate",
+            &[],
+            &["cargo clippy".to_string()],
+            &[],
+        );
+        corpus.push(usage.clone());
+        let index = SectionIndex::build(&snapshot(corpus));
+        let hits = index.search("cargo clippy");
+        assert!(!hits.is_empty(), "the command query must retrieve sections");
+        assert_eq!(
+            hits[0].section_id, usage.id,
+            "the exact command-usage section must rank first, not be crowded out by the catalog"
+        );
+    }
+
+    /// `search_in` with the empty (all-sources) filter is exactly the public
+    /// `search`: the ranking path is shared, so an unfiltered search is a
+    /// filtered one over every source — the boost layer does not distort it.
+    #[test]
+    fn search_in_all_filter_matches_public_search() {
+        let index = SectionIndex::build(&sample_snapshot());
+        for query in [
+            "cargo build",
+            "C-CONV",
+            "clippy::unwrap_used",
+            "",
+            "no-such-term",
+        ] {
+            assert_eq!(
+                index.search(query),
+                index.search_in(query, &SourceFilter::all()),
+                "an all-sources filter must equal the public search for {query:?}"
+            );
+        }
+    }
+
+    // --- Task [035]: source filtering --------------------------------------
+
+    /// AC2: a source filter restricts the ranked hits to the requested source.
+    /// Three sections in three sources all contain the query term; filtering to
+    /// one source returns only that source's section.
+    #[test]
+    fn source_filter_restricts_to_one_source() {
+        let cargo = section(
+            "cargo",
+            "a",
+            "probe1",
+            "the common term here",
+            &[],
+            &[],
+            &[],
+        );
+        let rustc = section(
+            "rustc",
+            "b",
+            "probe2",
+            "the common term here",
+            &[],
+            &[],
+            &[],
+        );
+        let clippy = section(
+            "clippy",
+            "c",
+            "probe3",
+            "the common term here",
+            &[],
+            &[],
+            &[],
+        );
+        let index = SectionIndex::build(&snapshot(vec![
+            cargo.clone(),
+            rustc.clone(),
+            clippy.clone(),
+        ]));
+
+        // No filter: all three match.
+        assert_eq!(index.search("common").len(), 3);
+        // Filter to cargo: only cargo's section.
+        let filter = SourceFilter::source("cargo").expect("cargo is a valid source");
+        let hits = index.search_in("common", &filter);
+        assert_eq!(hits.len(), 1, "only the cargo section is returned");
+        assert_eq!(hits[0].section_id, cargo.id);
+    }
+
+    /// An empty filter (or the public `search`) spans every source.
+    #[test]
+    fn source_filter_empty_means_all_sources() {
+        let cargo = section("cargo", "a", "p1", "the common term here", &[], &[], &[]);
+        let rustc = section("rustc", "b", "p2", "the common term here", &[], &[], &[]);
+        let index = SectionIndex::build(&snapshot(vec![cargo.clone(), rustc.clone()]));
+        assert_eq!(index.search_in("common", &SourceFilter::all()).len(), 2);
+    }
+
+    /// A filter may name several sources at once; only those sources are
+    /// returned, in the ranked order.
+    #[test]
+    fn source_filter_accepts_multiple_sources() {
+        let cargo = section("cargo", "a", "p1", "the common term here", &[], &[], &[]);
+        let _rustc = section("rustc", "b", "p2", "the common term here", &[], &[], &[]);
+        let clippy = section("clippy", "c", "p3", "the common term here", &[], &[], &[]);
+        let index = SectionIndex::build(&snapshot(vec![cargo.clone(), _rustc, clippy.clone()]));
+        let filter = SourceFilter::sources(["cargo", "clippy"]).expect("both ids are valid");
+        let hits = index.search_in("common", &filter);
+        let ids: Vec<&str> = hits.iter().map(|h| h.section_id.as_str()).collect();
+        assert_eq!(hits.len(), 2, "only the two requested sources are returned");
+        assert!(ids.iter().any(|id| *id == cargo.id.as_str()));
+        assert!(ids.iter().any(|id| *id == clippy.id.as_str()));
+    }
+
+    /// AC2: an *unsupported* source is a typed error that names the bad value
+    /// and lists the valid ids as discoverable alternatives — never a silent
+    /// empty result.
+    #[test]
+    fn search_source_unsupported_is_a_typed_error() {
+        let cargo = section("cargo", "a", "p1", "the common term here", &[], &[], &[]);
+        let index = SectionIndex::build(&snapshot(vec![cargo]));
+        let err = index
+            .search_source("common", "not-a-real-source")
+            .expect_err("an unknown source must be a typed error, not an empty Vec");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not-a-real-source"),
+            "the error names the bad value; got {msg:?}"
+        );
+        // The valid ids are surfaced as discoverable alternatives.
+        for id in [
+            "api-guidelines",
+            "style-guide",
+            "cargo",
+            "rustc",
+            "rustup",
+            "rustfmt",
+            "clippy",
+            "rustdoc",
+        ] {
+            assert!(
+                msg.contains(id),
+                "the error lists the valid source id {id}; got {msg:?}"
+            );
+        }
+    }
+
+    /// A valid source that matches no section returns `Ok` of an empty `Vec` — a
+    /// successful zero-hit search, distinct from the unsupported-source error.
+    #[test]
+    fn search_source_valid_source_no_match_is_empty() {
+        let cargo = section("cargo", "a", "p1", "the common term here", &[], &[], &[]);
+        let index = SectionIndex::build(&snapshot(vec![cargo]));
+        // "rustc" is a valid source but has no section matching "common" here.
+        let hits = index
+            .search_source("common", "rustc")
+            .expect("rustc is a valid source");
+        assert!(
+            hits.is_empty(),
+            "a valid source with no match is an empty, successful result"
         );
     }
 }
