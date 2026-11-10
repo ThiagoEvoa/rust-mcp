@@ -137,6 +137,28 @@ impl Instant {
     pub fn exceeds_by(self, other: Instant, secs: i64) -> bool {
         self.duration_secs(other) > secs
     }
+
+    /// Build an [`Instant`] from a [`std::time::SystemTime`], truncated to whole
+    /// seconds since the Unix epoch.
+    ///
+    /// This is the CLI's "now": the model deliberately has no `now`-style
+    /// constructor because reading the wall clock is a side-effecting concern
+    /// that belongs at the process boundary (task [030] builds "now" from
+    /// `SystemTime::now()` and passes it here), not inside the pure provenance
+    /// model. Construction goes through the private `secs` field so no unvalidated
+    /// epoch can be spliced in, mirroring [`Instant::parse`]. A pre-epoch clock
+    /// (effectively never on real systems) or a value past `i64::MAX` saturates
+    /// to epoch `0` rather than panicking, so no external input can unwind.
+    pub fn from_system_time(now: std::time::SystemTime) -> Self {
+        let secs = match now.duration_since(std::time::UNIX_EPOCH) {
+            // A real wall clock is post-epoch; a pre-epoch clock saturates to
+            // epoch 0 rather than panicking, and a value past `i64::MAX`
+            // saturates to `i64::MAX` rather than wrapping.
+            Ok(elapsed) => i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX),
+            Err(_) => 0,
+        };
+        Self { secs }
+    }
 }
 
 /// Tighten a [007] [`Timestamp`] into a comparable instant.

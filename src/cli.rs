@@ -97,9 +97,15 @@ pub enum Command {
 
     /// Report available snapshots, the selected corpus, and freshness.
     ///
-    /// Runs without network access. (Lands in M2/M4; task [003] parses and
-    /// dispatches only.)
-    Status,
+    /// Runs without network access and reads the one snapshot the process would
+    /// serve. Staleness is judged against a configurable threshold; the default
+    /// is seven days (`plan.md` §5).
+    Status {
+        /// Override the staleness threshold in days. Omit to use the seven-day
+        /// default.
+        #[arg(long = "stale-days", value_name = "DAYS")]
+        stale_days: Option<u64>,
+    },
 }
 
 impl Cli {
@@ -126,11 +132,11 @@ impl Cli {
     ///
     /// Resolves the data directory first (so an unavailable default is reported
     /// through the typed error layer before any subcommand work, for *every*
-    /// subcommand including `serve`), then dispatches. `serve` now runs the real
-    /// M1 stdio runtime; `sync`/`status` remain labelled placeholders whose
-    /// bodies land in M2/M4. Returns the process [`ExitCode`]; on a startup
-    /// failure this yields an [`AppError`] so the caller ([`main`]) can turn it
-    /// into a non-zero exit *without ever panicking* on external input.
+    /// subcommand including `serve`), then dispatches. `serve` runs the real
+    /// M1 stdio runtime and `sync` runs the bounded ingestion pipeline; `status`
+    /// loads the selected snapshot and reports its freshness offline. A startup
+    /// failure yields an [`AppError`] so the caller ([`main`]) can turn it into
+    /// a non-zero exit *without ever panicking* on external input.
     pub fn run(self) -> AppResult<ExitCode> {
         // `DataDirError` folds into `AppError` via `From`, so `?` gives a typed
         // context-carrying failure instead of a bare unwrap. M1 does not read the
@@ -205,19 +211,55 @@ impl Cli {
                 }
             }
 
-            // `status` remains an [003] placeholder whose body lands in M4. We
-            // *emit* the diagnostic through the stderr-only tracer rather than
-            // `eprintln!` so diagnostics flow through the gated subscriber and
-            // stdout stays MCP-exclusive (plan.md §8/§9 / task [004]).
-            Command::Status => {
-                let message = format!(
-                    "status: snapshot reporting is not wired yet (reporting lands in \
-                     M4). Data directory: {data_dir:?}.",
-                );
-                tracing::warn!("rust-docs-mcp: {message}");
-                // Non-zero: the work is deliberately not implemented, so we must
-                // not present a clean exit as if the command had run successfully.
-                Ok(ExitCode::FAILURE)
+            // `status` (task [030]): report the one snapshot the process would
+            // serve — its identity, source/section counts, and each source's
+            // freshness — judged against a configurable threshold. This is a
+            // pure, **offline** read: it loads the already-selected snapshot
+            // (local preferred, bundled fallback) and makes **no** network
+            // request. The human report is a *diagnostic* emitted on **stderr**
+            // through the gated subscriber (like `sync`/`serve`), so stdout
+            // stays exclusive to MCP messages (plan.md §8/§9 / task [004]).
+            Command::Status { stale_days } => {
+                // Select the fixed runtime snapshot. The CLI has no bundled
+                // snapshot path wired yet, so the loader is given `None` and
+                // falls back to the local published snapshot; when neither a
+                // local snapshot nor a bundle is available, `load_snapshot`
+                // returns an actionable `LoadError` that directs the operator
+                // to `sync` — surfaced like the `sync` failure path (a typed,
+                // stderr diagnostic and a non-zero exit, never a panic).
+                let snapshot = match crate::runtime::load_snapshot(&data_dir, None) {
+                    Ok(snapshot) => snapshot,
+                    Err(err) => {
+                        tracing::error!("rust-docs-mcp: status failed: {err}");
+                        return Ok(ExitCode::FAILURE);
+                    }
+                };
+
+                // "Now" is read from the wall clock at this process boundary and
+                // passed to the pure report as an injected instant, so the
+                // freshness logic itself never touches the clock (tests inject a
+                // fixed `as_of`).
+                let as_of =
+                    crate::provenance::Instant::from_system_time(std::time::SystemTime::now());
+
+                // The threshold is configurable (AC1): an explicit `--stale-days`
+                // wins, otherwise the plan's seven-day default. A `u64` flag
+                // keeps the window non-negative; the cast saturates the
+                // practically-unreachable `> i64::MAX` case rather than wrapping
+                // or panicking.
+                let threshold = match *stale_days {
+                    Some(days) => crate::provenance::StaleThreshold::days(
+                        i64::try_from(days).unwrap_or(i64::MAX),
+                    ),
+                    None => crate::provenance::StaleThreshold::default(),
+                };
+
+                // Build the report purely from the in-memory snapshot, then emit
+                // it on stderr through the gated subscriber, keeping stdout
+                // exclusive to MCP messages.
+                let report = crate::status::build_report(&snapshot.manifest, as_of, threshold);
+                tracing::info!("rust-docs-mcp: {}", report.to_stderr());
+                Ok(ExitCode::SUCCESS)
             }
         }
     }
@@ -313,7 +355,44 @@ mod tests {
     fn each_subcommand_parses() {
         assert_eq!(parse(&["rust-docs-mcp", "serve"]).command, Command::Serve);
         assert_eq!(parse(&["rust-docs-mcp", "sync"]).command, Command::Sync);
-        assert_eq!(parse(&["rust-docs-mcp", "status"]).command, Command::Status);
+        // `status` parses with no threshold flag (the default is applied later).
+        assert_eq!(
+            parse(&["rust-docs-mcp", "status"]).command,
+            Command::Status { stale_days: None }
+        );
+    }
+
+    // AC1 (CLI surface): the `--stale-days` threshold flag parses, and is
+    // `None` when omitted so the seven-day default is applied at dispatch.
+    #[test]
+    fn status_stale_days_flag_parses_and_defaults_when_omitted() {
+        // Omitted -> the caller applies the seven-day default.
+        assert_eq!(
+            parse(&["rust-docs-mcp", "status"]).command,
+            Command::Status { stale_days: None }
+        );
+        // Explicit -> the window is configurable from the CLI.
+        assert_eq!(
+            parse(&["rust-docs-mcp", "status", "--stale-days", "14"]).command,
+            Command::Status {
+                stale_days: Some(14)
+            }
+        );
+        // Zero is a valid (non-negative) window.
+        assert_eq!(
+            parse(&["rust-docs-mcp", "status", "--stale-days", "0"]).command,
+            Command::Status {
+                stale_days: Some(0)
+            }
+        );
+    }
+
+    #[test]
+    fn status_stale_days_requires_a_value() {
+        // A flag without its value is an actionable parse error.
+        assert!(Cli::try_parse_from(["rust-docs-mcp", "status", "--stale-days"]).is_err());
+        // A negative value is rejected: the window is a non-negative integer.
+        assert!(Cli::try_parse_from(["rust-docs-mcp", "status", "--stale-days", "-3"]).is_err());
     }
 
     #[test]
