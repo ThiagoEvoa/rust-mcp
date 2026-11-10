@@ -27,28 +27,40 @@
 //!   consulted ([`is_stale`]): a dead-sentinel pid (`0`, not a real user
 //!   process) or a timestamp older than the staleness threshold ([`DEFAULT_LOCK_TTL`])
 //!   means the holder is gone or stuck, so the lock is *reclaimed* (removed and
-//!   re-created). This is the "recover cleanly after an interrupted sync" step:
-//!   a sync that crashed mid-write leaves a stale `sync.lock`, and the next sync
-//!   reclaims it instead of blocking forever.
+//!   re-created). This is the "recover cleanly after an interrupted sync" step.
+//!   A sync that crashed mid-write may leave a stale `sync.lock`, and the next
+//!   sync reclaims it instead of blocking forever. An *empty* lock (a process
+//!   killed between `create_new` and the atomic `rename`, so no record was
+//!   written) carries no timestamp to read, so it is aged by its file
+//!   modification time ([`is_stale_by_mtime`]): a *fresh* empty lock is a live
+//!   writer mid-stamp and is left busy, while an empty lock older than the TTL
+//!   is a crash leftover that is reclaimed.
 //!
 //! ## A deliberate, documented boundary
 //!
 //! The reclaim decision is **best-effort** and **std-only**: it relies on a
-//! wall-clock timestamp and a dead-pid sentinel rather than a real
-//! cross-process liveness probe. Real process liveness would need a platform
-//! syscall (e.g. `kill(pid, 0)`) or a dependency, which the MVP deliberately
-//! avoids (the dependency policy in `Cargo.toml` / `docs/COMPATIBILITY.md`
-//! keeps the closure minimal and offline). The timestamp/TTL check is
-//! deterministic in tests (callers inject the clock and threshold) and bounds
-//! the worst-case recovery window in production. The hard correctness backstop
-//! is the atomic `rename` in `publish_snapshot`: even in the rare reclaim race
-//! where two writers briefly overlap, each renames a uniquely named, fully
-//! written candidate, so the published snapshot is never torn. The [`WriterGuard`]'s
-//! `Drop` likewise releases *only* the lock it still owns, so it can never
-//! delete a lock a reclaimer already took over.
+//! wall-clock timestamp, a dead-pid sentinel, and a file-modification-time age
+//! check rather than a real cross-process liveness probe. Real process liveness
+//! would need a platform syscall (e.g. `kill(pid, 0)`) or a dependency, which the
+//! MVP deliberately avoids (the dependency policy in `Cargo.toml` /
+//! `docs/COMPATIBILITY.md` keeps the closure minimal and offline). The
+//! timestamp/TTL/mtime checks are deterministic in tests (callers inject the
+//! clock and threshold) and bound the worst-case recovery window in production.
+//! The hard correctness backstop is the atomic `rename` in `publish_snapshot`:
+//! even in the rare reclaim race where two writers briefly overlap, each renames
+//! a uniquely named, fully written candidate, so the published snapshot is never
+//! torn.
 //!
-//! No network, no command execution, no project access — only the one lock file
-//! inside the configured data directory.
+//! One residual, corruption-free boundary (F-028-2): [`WriterGuard`]'s `Drop`
+//! releases *only the lock it still owns* by reading the current record and, if it
+//! still matches, removing the file — a check-then-remove that is not atomic. In
+//! the documented stale-overlap window (a sync running longer than the TTL), a
+//! reclaimer could re-stamp between the read and the remove, and this writer would
+//! then delete the reclaimer's fresh lock; the reclaimer simply re-claims on its
+//! next retry. The atomic `rename` backstop means this never tears the published
+//! snapshot, so it is accepted as a documented boundary rather than closed with an
+//! atomic compare-and-delete. No network, no command execution, no project access
+//! — only the one lock file inside the configured data directory.
 
 use std::fmt;
 use std::fs;
@@ -271,35 +283,50 @@ pub(crate) fn acquire_with_clock(
                     Some(_stale) => {
                         let _ = fs::remove_file(&lock_path);
                     }
-                    // No parseable record. Two distinct cases must not be
+                    // No parseable record. Three distinct cases must not be
                     // conflated:
                     //
                     //  * A *fresh, empty* file is a writer that won the
                     //    `create_new` race and is *mid-stamp* (between creating
-                    //    the file and writing its record). Reclaiming it would
-                    //    let two writers enter the critical section at once, so
-                    //    an empty file is treated as *busy* — the claimer backs
-                    //    off and retries rather than clobbering a live stamp.
-                    //  * A *non-empty but unparseable* file is a corrupt leftover
-                    //    (a crashed writer left a partial record). It is stale and
-                    //    reclaimable, which is the "recover after an interrupted
-                    //    write" path.
+                    //    the file and renaming its record into place). Reclaiming
+                    //    it would let two writers enter the critical section at
+                    //    once, so a fresh empty file is treated as *busy* — the
+                    //    claimer backs off and retries rather than clobbering a
+                    //    live stamp.
+                    //  * An *old, empty* file is a crash leftover: a process
+                    //    killed between `create_new` and the `rename` leaves an
+                    //    empty lock with no record to read its timestamp from. It
+                    //    is judged by its modification time (F-028-1): once the
+                    //    file is older than the TTL it is reclaimed, so a later
+                    //    sync recovers an interrupted write (AC2) instead of
+                    //    blocking forever. A live mid-stamp is never older than
+                    //    the TTL, so a fresh empty lock is still left busy.
+                    //  * A *non-empty but unparseable* file cannot come from a
+                    //    live writer — the atomic stamp installs a *complete*
+                    //    record via `rename`, so the lock is never a non-empty
+                    //    partial — so it is a genuine crash or manual corruption
+                    //    and is reclaimable immediately.
                     None => {
                         let empty = matches!(
                             fs::metadata(&lock_path),
                             Ok(meta) if meta.len() == 0
                         );
                         if empty {
-                            // A writer is mid-stamp; back off and retry instead of
-                            // reclaiming a lock it still owns. `now`/`ttl` are
-                            // irrelevant here because a fresh empty file carries no
-                            // timestamp, so the liveness judgment is "assume alive".
-                            return Err(LockError::WriterBusy(LockRecord {
-                                pid: 0,
-                                acquired_at_ns: 0,
-                            }));
+                            if is_stale_by_mtime(&lock_path, now, ttl) {
+                                // An old empty lock: a crashed writer's leftover.
+                                // Reclaim and retry so a later sync recovers it.
+                                let _ = fs::remove_file(&lock_path);
+                            } else {
+                                // A fresh empty lock: a live writer is mid-stamp.
+                                // Back off and retry instead of clobbering it.
+                                return Err(LockError::WriterBusy(LockRecord {
+                                    pid: 0,
+                                    acquired_at_ns: 0,
+                                }));
+                            }
+                        } else {
+                            let _ = fs::remove_file(&lock_path);
                         }
-                        let _ = fs::remove_file(&lock_path);
                     }
                 }
             }
@@ -321,6 +348,30 @@ fn is_stale(record: &LockRecord, now: u64, ttl: Duration) -> bool {
     // Compute the elapsed time as `u128` so a large `ttl` never truncates the
     // comparison; a holder is stale once it has been "alive" longer than the TTL.
     let elapsed = u128::from(now).saturating_sub(u128::from(record.acquired_at_ns));
+    elapsed > ttl.as_nanos()
+}
+
+/// Whether an *empty* lock file at `path` is stale — a crash leftover — at time
+/// `now` (nanoseconds) with threshold `ttl`, judged by the file's modification
+/// time.
+///
+/// A live writer that is mid-stamp has an empty lock whose mtime is *fresh* (not
+/// older than the TTL), so it is left busy; a process killed between
+/// `create_new` and the `rename` leaves an empty lock whose mtime eventually ages
+/// past the TTL, at which point a later sync reclaims it (AC2 recovery, F-028-1).
+/// An unreadable mtime is treated as *not stale* — the conservative choice, since
+/// we must never reclaim a lock we cannot age. Mirrors [`is_stale`]'s `u128`
+/// saturating arithmetic so a large `ttl` never truncates the comparison.
+fn is_stale_by_mtime(path: &Path, now: u64, ttl: Duration) -> bool {
+    let modified = match fs::metadata(path).and_then(|meta| meta.modified()) {
+        Ok(modified) => modified,
+        Err(_) => return false,
+    };
+    let modified_ns = modified
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let elapsed = u128::from(now).saturating_sub(u128::from(modified_ns));
     elapsed > ttl.as_nanos()
 }
 
@@ -356,10 +407,27 @@ static STAMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// The name carries the holder pid, the claim timestamp, and a process-local
 /// counter, so two writers never write the same temp file and a stale leftover
 /// from a different run is never reused.
+///
+/// It is exposed (with [`is_stamp_temp`]) so `crate::corpus` `cleanup_stale_temps`
+/// can sweep a stamp orphan left by a process killed mid-stamp, alongside the
+/// `snapshot-*.tmp` candidates.
+///
+/// The fixed prefix is `{LOCK_NAME}.stamp-` (i.e. `"sync.lock.stamp-"`). `concat!`
+/// cannot derive it from [`LOCK_NAME`], so the coupling is asserted at runtime in
+/// the `stamp_prefix_matches_lock_name` test rather than encoded at compile time.
+pub const STAMP_PREFIX: &str = "sync.lock.stamp-";
+
+/// Whether `name` is a transient writer-lock stamp temp file (as opposed to the
+/// lock itself, `manifest.json`, or a `snapshot-*.tmp` candidate). A stamp temp
+/// is named `{STAMP_PREFIX}<pid>-<ns>-<n>`.
+pub fn is_stamp_temp(name: &str) -> bool {
+    name.starts_with(STAMP_PREFIX)
+}
+
 fn stamp_path(corpus_dir: &Path, record: &LockRecord) -> PathBuf {
     let n = STAMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     corpus_dir.join(format!(
-        "{LOCK_NAME}.stamp-{}-{}-{n}",
+        "{STAMP_PREFIX}{}-{}-{n}",
         record.pid, record.acquired_at_ns
     ))
 }
@@ -621,6 +689,77 @@ mod tests {
             acquire_with_clock(&corpus, now, ttl).expect("a lock past the TTL is reclaimed");
         drop(guard);
         assert!(!lock.exists());
+    }
+
+    /// The stamp-temp prefix is coupled to the lock name (`{LOCK_NAME}.stamp-`):
+    /// it must stay in sync so `cleanup_stale_temps` sweeps the right orphan
+    /// family. `concat!` cannot encode this at compile time, so assert it here.
+    #[test]
+    fn stamp_prefix_matches_lock_name() {
+        // `concat!` cannot take a const ident, so verify the coupling by
+        // structure instead of by reconstruction.
+        assert!(
+            STAMP_PREFIX.starts_with(LOCK_NAME),
+            "STAMP_PREFIX must be `{LOCK_NAME}...`"
+        );
+        assert!(
+            STAMP_PREFIX.ends_with(".stamp-"),
+            "STAMP_PREFIX must be `...{LOCK_NAME}.stamp-`"
+        );
+        assert!(is_stamp_temp("sync.lock.stamp-123-456-0"));
+        assert!(!is_stamp_temp("sync.lock"), "the lock itself is not a stamp temp");
+        assert!(!is_stamp_temp("snapshot-1-0-0.tmp"), "a candidate temp is not a stamp temp");
+        assert!(!is_stamp_temp("manifest.json"));
+    }
+
+    /// **AC2 recovery for a mid-stamp crash (F-028-1 / F-028-3):** a process
+    /// killed between `create_new` and the atomic `rename` leaves an *empty*
+    /// `sync.lock` with no record to read a timestamp from. A *fresh* empty lock
+    /// is a live writer mid-stamp and is left busy; the *same* empty lock, aged
+    /// past the TTL, is a crash leftover and is reclaimed. The decision uses the
+    /// file's modification time, driven deterministically by injecting `now`.
+    #[test]
+    fn an_empty_lock_past_the_ttl_is_reclaimed_but_a_fresh_one_is_not() {
+        let dir = temp_corpus_dir();
+        let corpus = dir.0.join("corpus");
+        let lock = corpus.join(LOCK_NAME);
+
+        // Seed an *empty* lock — the leftover a process leaves when killed between
+        // `create_new` and the atomic `rename`. Its mtime is the instant it was
+        // written, just before `base`.
+        fs::write(&lock, b"").expect("seed an empty lock");
+        assert_eq!(
+            fs::metadata(&lock).unwrap().len(),
+            0,
+            "the seed must be empty"
+        );
+        let base = now_ns();
+
+        // A fresh empty lock (a live writer is mid-stamp) is not reclaimed: the
+        // claim reports busy. `now` is only one second after the seed's mtime,
+        // comfortably inside a one-hour TTL.
+        let fresh_now = base + 1_000_000_000;
+        let err = acquire_with_clock(&corpus, fresh_now, Duration::from_secs(3600))
+            .expect_err("a fresh empty lock is busy");
+        assert!(
+            matches!(err, LockError::WriterBusy(_)),
+            "a fresh empty lock must report WriterBusy, got {err:?}"
+        );
+        assert!(
+            lock.exists(),
+            "a fresh empty lock is left in place for the mid-stamp writer"
+        );
+
+        // The same empty lock, now aged two hours past a one-minute TTL, is a
+        // crash leftover and is reclaimed.
+        let stale_now = base + 7200 * 1_000_000_000;
+        let guard = acquire_with_clock(&corpus, stale_now, Duration::from_secs(60))
+            .expect("an empty lock older than the TTL is reclaimed (F-028-1 / AC2 recovery)");
+        drop(guard);
+        assert!(
+            !lock.exists(),
+            "the reclaimed empty lock is released on drop"
+        );
     }
 
     /// **AC2 (corrupt):** an unreadable/corrupt lock is treated as stale and

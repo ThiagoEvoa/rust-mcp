@@ -739,7 +739,15 @@ fn cleanup_stale_temps(corpus_dir: &Path) -> Result<(), PublishError> {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX) && name != PUBLISHED_NAME {
+        // Two transient families are swept: the candidate temps
+        // (`snapshot-<pid>-<n>-<nanos>.tmp`) and the writer-lock stamp temps
+        // (`sync.lock.stamp-<pid>-<ns>-<n>`), the latter left by a process
+        // killed mid-stamp (task `[028]`). Both are safe to remove here because
+        // this pass runs *inside the held writer lock*, so no live writer is
+        // stamping; any temp present is an orphan from an earlier interrupted run.
+        if (name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX) && name != PUBLISHED_NAME)
+            || crate::writer_lock::is_stamp_temp(name)
+        {
             let _ = fs::remove_file(entry.path());
         }
     }
