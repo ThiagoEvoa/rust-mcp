@@ -670,6 +670,18 @@ fn published_path(data_dir: &Path) -> PathBuf {
     data_dir.join(CORPUS_SUBDIR).join(PUBLISHED_NAME)
 }
 
+/// The fixed, on-disk path of the active snapshot under `data_dir`
+/// (`<data_dir>/corpus/manifest.json`), exposed for the runtime loader (task
+/// `[029]`) to name the *local* source without reaching into this module.
+///
+/// It is the public mirror of the private [`published_path`]: the very same
+/// un-canonicalized path, so the snapshot read by [`load_published_snapshot`]
+/// and the path the runtime records for its local source agree byte-for-byte.
+/// It performs **no** I/O and creates nothing.
+pub fn published_snapshot_path(data_dir: &Path) -> PathBuf {
+    published_path(data_dir)
+}
+
 /// Build the next unique transient publication path *inside* `corpus_dir`.
 ///
 /// The name is stamped with the process id, a process-local counter, and the

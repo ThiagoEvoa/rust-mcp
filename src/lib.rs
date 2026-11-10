@@ -17,7 +17,10 @@
 //!   their entry points, path/host boundaries, document formats, parser adapters,
 //!   and explicit aliases (`[009]`),
 //! - [`ingest`] — fetching, extraction, validation, publication (`[010]`-`[028]`),
-//! - [`corpus`] — snapshot loading, IDs, bounded reads (`[029]`-`[030]`),
+//! - [`corpus`] — the *write* side of snapshot selection: complete-corpus
+//!   validation, IDs, bounded reads, and atomic publication (`[025]`-`[028]`),
+//! - [`runtime`] — the *read* side of snapshot selection: the fixed, immutable
+//!   startup snapshot with a bundled fallback (`[029]`),
 //! - [`search`] — tokenization, ranking, pagination (`[033]`-`[047]`),
 //! - [`commands`] — source-backed command catalog/guidance (`[039]`-`[044]`),
 //! - [`mcp`] — tool/resource handlers and protocol errors (`[048]`-`[059]`).
@@ -38,6 +41,7 @@ mod mcp;
 mod model;
 mod provenance;
 mod registry;
+mod runtime;
 mod search;
 mod writer_lock;
 
