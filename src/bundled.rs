@@ -426,7 +426,9 @@ fn attribution_for(collection: SourceCollection) -> AttributionRef {
     AttributionRef {
         source: SourceId::new(collection.id()).expect("a registry id builds a SourceId"),
         licenses: vec!["MIT OR Apache-2.0".to_string()],
-        repository: collection.entry_url().to_string(),
+        // The upstream repository that owns the content (`docs/LICENSING.md` §2
+        // "Upstream repo"), not the rendered entry point.
+        repository: collection.source_repo().to_string(),
         required_notice: format!(
             "{short} upstream content (MIT OR Apache-2.0), attributed in THIRD_PARTY_NOTICES.md"
         ),
