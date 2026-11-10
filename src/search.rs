@@ -263,6 +263,18 @@ pub struct Hit {
     pub score: f64,
 }
 
+#[cfg(test)]
+impl Hit {
+    /// The section ids of a ranked hit list, in order — the order-only view the
+    /// ranking assertions read (`score` is the float, `section_id` the
+    /// identity).
+    fn section_ids(hits: &[Hit]) -> Vec<String> {
+        hits.iter()
+            .map(|h| h.section_id.as_str().to_string())
+            .collect()
+    }
+}
+
 /// The in-memory, deterministic BM25 index over an immutable corpus
 /// ([`SnapshotManifest`]'s sections).
 ///
@@ -497,5 +509,463 @@ fn section_tokens(section: &Section) -> Vec<Token> {
 
 #[cfg(test)]
 mod tests {
-    // AC1/AC2 coverage is added in the next commit; the module compiles empty.
+    use super::*;
+    use crate::model::{
+        ManifestBody, Release, SchemaVersion, SectionBuilder, SnapshotId, SnapshotManifest, Source,
+        SourceId, Timestamp, Url,
+    };
+
+    /// Unique probe words, one per sample section, in the same order as
+    /// `sample_sections`. Each word is embedded only in its own section's body,
+    /// so a query for it resolves to exactly that section's `SectionId` — the
+    /// AC1 coverage check ("every section is retrievable by an identity").
+    const SAMPLE_PROBES: [&str; 5] = [
+        "alphacargo",
+        "bravocrustc",
+        "charlieapi",
+        "deltacode",
+        "echoes",
+    ];
+
+    // --- Fixtures ---------------------------------------------------------
+
+    /// A minimal, well-formed section at `(source, chapter)`, carrying the
+    /// structured fields a query plausibly names so the ranking has something
+    /// to match. `probe` is a single, unique word prefixed into the body so the
+    /// section is retrievable by a term no other section shares. Built through
+    /// `SectionBuilder` so the id and content hash are the consistent,
+    /// recomputed values the model requires.
+    fn section(
+        source: &str,
+        chapter: &str,
+        probe: &str,
+        body: &str,
+        codes: &[String],
+        cmds: &[String],
+        lints: &[String],
+    ) -> Section {
+        SectionBuilder::new(
+            SourceId::new(source).expect("a registry id builds a SourceId"),
+            "Test doc",
+            chapter,
+            Url::new("https://doc.rust-lang.org/cargo/").expect("a valid URL"),
+            format!("{probe} {body}"),
+        )
+        .guideline_codes(codes)
+        .command_keys(cmds)
+        .lint_ids(lints)
+        .build()
+        .expect("a well-formed section builds")
+    }
+
+    /// A snapshot that carries the given sections (the corpus the index builds
+    /// over). Every other field is the minimal valid shape `SectionBuilder` / the
+    /// manifest envelope require.
+    fn snapshot(sections: Vec<Section>) -> SnapshotManifest {
+        SnapshotManifest {
+            schema_version: SchemaVersion::CURRENT,
+            body: ManifestBody {
+                snapshot_id: SnapshotId::new("rust-docs-search-test").expect("a valid snapshot id"),
+                created_at: Timestamp::new("2026-10-30T00:00:00Z").expect("a valid timestamp"),
+                parser_version: "test/1".into(),
+                sources: vec![Source {
+                    id: SourceId::new("cargo").expect("a registry id builds a SourceId"),
+                    title: "The Cargo Book".into(),
+                    entry_url: Url::new("https://doc.rust-lang.org/cargo/").expect("a valid URL"),
+                    document_urls: vec![],
+                    last_checked: None,
+                    fetched_at: Timestamp::new("2026-10-30T00:00:00Z").expect("a valid timestamp"),
+                    upstream_modified: None,
+                    content_hash: crate::model::CorpusHash::compute(b"fixture"),
+                    release: Release::default(),
+                    parser: "test/1".into(),
+                }],
+                sections,
+                checklist: vec![],
+                commands: vec![],
+                validation: Default::default(),
+                attribution: vec![],
+            },
+        }
+    }
+
+    /// A small but multi-source corpus exercising distinct sources, a
+    /// guideline-code section, a command-phrase section, a lint-id section, and
+    /// a section whose text has no overlap with the others (the no-match
+    /// control). Each section carries a unique probe word in its body so it is
+    /// retrievable on its own.
+    fn sample_sections() -> Vec<Section> {
+        vec![
+            section(
+                "cargo",
+                "commands/cargo-build",
+                "alphacargo",
+                "cargo build compiles the local package and its dependencies",
+                &[],
+                &["cargo build".to_string()],
+                &[],
+            ),
+            section(
+                "rustc",
+                "options",
+                "bravocrustc",
+                "rustc accepts compiler options such as --no-default-features and -O",
+                &[],
+                &[],
+                &[],
+            ),
+            section(
+                "api-guidelines",
+                "about",
+                "charlieapi",
+                "The guideline C-CONV prefers From and Into for conversions",
+                &["C-CONV".to_string()],
+                &[],
+                &[],
+            ),
+            section(
+                "clippy",
+                "configuration",
+                "deltacode",
+                "The lint clippy::unwrap_used catches unwrap calls in production code",
+                &[],
+                &[],
+                &["clippy::unwrap_used".to_string()],
+            ),
+            // A no-overlap control section: shares none of the query terms
+            // above, so a query that names one of the others must never rank it
+            // (the no-match / empty-result guarantee is exercised against it).
+            section(
+                "style-guide",
+                "intro",
+                "echoes",
+                "whitespace and comment style notes",
+                &[],
+                &[],
+                &[],
+            ),
+        ]
+    }
+
+    fn sample_snapshot() -> SnapshotManifest {
+        snapshot(sample_sections())
+    }
+
+    // --- AC1: indexing covers every loaded source / section ---------------
+
+    /// AC1: `build` indexes **every** section of the corpus, and each indexed
+    /// section's identity resolves through the index — a query naming that
+    /// section's distinctive term returns its `SectionId`.
+    #[test]
+    fn indexing_covers_every_section_and_produces_retrievable_identities() {
+        let snap = sample_snapshot();
+        let index = SectionIndex::build(&snap);
+
+        // The index covers every loaded section.
+        assert_eq!(
+            index.doc_count(),
+            snap.body.sections.len(),
+            "the index must cover every loaded section"
+        );
+        assert_ne!(index.doc_count(), 0, "the corpus is non-empty");
+
+        // Every section is retrievable by an identity: a query naming that
+        // section's distinctive probe word returns a hit carrying its
+        // `SectionId`, and the probe word is unique so exactly one section
+        // resolves.
+        let mut resolved: Vec<String> = Vec::new();
+        for (i, section) in snap.body.sections.iter().enumerate() {
+            let id = section.id.clone();
+            let query = SAMPLE_PROBES[i];
+            let hits = index.search(query);
+            let got = Hit::section_ids(&hits);
+            assert_eq!(
+                got,
+                vec![id.as_str().to_string()],
+                "section {id:?} must be the sole hit for its probe {query:?}; got {got:?}"
+            );
+            resolved.push(id.as_str().to_string());
+        }
+
+        // The identities are distinct and complete: every loaded section's id
+        // appears, exactly once, across the per-section retrievals.
+        let mut expected: Vec<String> = snap
+            .body
+            .sections
+            .iter()
+            .map(|s| s.id.as_str().to_string())
+            .collect();
+        expected.sort_unstable();
+        let mut got_ids = resolved.clone();
+        got_ids.sort_unstable();
+        assert_eq!(
+            got_ids, expected,
+            "every loaded section must resolve to its own identity, exactly once"
+        );
+    }
+
+    /// AC1 over a *multi-source* corpus: sections from different sources are
+    /// each indexed and retrievable under their own identities.
+    #[test]
+    fn every_source_section_is_indexed_and_resolvable() {
+        let snap = sample_snapshot();
+        let index = SectionIndex::build(&snap);
+        // Four distinct sources are present and indexed.
+        let mut sources: Vec<String> = snap
+            .body
+            .sections
+            .iter()
+            .map(|s| s.source_id.as_str().to_string())
+            .collect();
+        sources.sort_unstable();
+        sources.dedup();
+        assert!(
+            sources.len() >= 3,
+            "the sample corpus spans multiple sources"
+        );
+        // Each source's section resolves to its identity (a non-empty hit list
+        // carrying that section's id), searched by its unique probe word.
+        for (i, section) in snap.body.sections.iter().enumerate() {
+            let got = Hit::section_ids(&index.search(SAMPLE_PROBES[i]));
+            assert_eq!(
+                got,
+                vec![section.id.as_str().to_string()],
+                "source section {section:?} must be retrievable by its probe {}",
+                SAMPLE_PROBES[i]
+            );
+        }
+    }
+
+    /// AC1: an **empty corpus** yields an empty index whose `search` is the
+    /// empty, successful result — never a panic.
+    #[test]
+    fn empty_corpus_yields_no_results_without_panicking() {
+        let index = SectionIndex::build(&snapshot(Vec::new()));
+        assert_eq!(index.doc_count(), 0);
+        assert!(index.search("cargo build").is_empty());
+        assert!(index.search("anything at all").is_empty());
+        assert!(index.search("").is_empty());
+    }
+
+    // --- AC2: deterministic scoring and tie-breaking ----------------------
+
+    /// AC2: building the same corpus twice and searching the same query yields
+    /// **identical ordering and scores**, run several times (no randomness, no
+    /// order dependence).
+    #[test]
+    fn build_and_search_are_deterministic_across_runs() {
+        let snap = sample_snapshot();
+        let a = SectionIndex::build(&snap);
+        let b = SectionIndex::build(&snap);
+
+        for query in [
+            "cargo build",
+            "C-CONV",
+            "clippy::unwrap_used",
+            "--no-default-features",
+            "build dependencies",
+            "",
+            "nonexistent-term-xyzzy",
+        ] {
+            let ra = a.search(query);
+            let rb = b.search(query);
+            assert_eq!(
+                Hit::section_ids(&ra),
+                Hit::section_ids(&rb),
+                "ordering must be identical for {query:?}"
+            );
+            assert_eq!(
+                ra, rb,
+                "scored hits (identity + score) must be identical for {query:?}"
+            );
+            // Repeated searches of one index agree too.
+            for _ in 0..8 {
+                assert_eq!(Hit::section_ids(&a.search(query)), Hit::section_ids(&ra));
+                assert_eq!(a.search(query), ra, "scores stable for {query:?}");
+            }
+        }
+    }
+
+    /// AC2: when two sections score identically, the tie is broken by the
+    /// section id string (a total, deterministic order), **not** by any
+    /// iteration/insertion order. The two sections have identical indexable
+    /// text, so they score exactly equal and are ordered purely by id.
+    #[test]
+    fn equal_scores_tie_break_by_section_id() {
+        // Identical body, codes, commands, lints => identical token multiset =>
+        // identical length and identical BM25 contribution for any query. The
+        // only difference is the chapter path (and thus the section id).
+        let a = section(
+            "cargo",
+            "aaa",
+            "ignored",
+            "cargo build compiles the package and its dependencies",
+            &[],
+            &["cargo build".to_string()],
+            &[],
+        );
+        let b = section(
+            "rustc",
+            "zzz",
+            "ignored",
+            "cargo build compiles the package and its dependencies",
+            &[],
+            &["cargo build".to_string()],
+            &[],
+        );
+        let index = SectionIndex::build(&snapshot(vec![b.clone(), a.clone()]));
+        // Insert the higher-id section *first* to prove ordering does not follow
+        // build/insertion order.
+
+        let hits = index.search("cargo build dependencies");
+        assert_eq!(hits.len(), 2, "both equal-score sections match the query");
+        assert_eq!(
+            hits[0].score, hits[1].score,
+            "the two sections must score identically"
+        );
+        // Tie broken by id string: the lexicographically smaller id ranks first.
+        let order: Vec<&str> = hits.iter().map(|h| h.section_id.as_str()).collect();
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            order, sorted,
+            "equal scores must be ordered by ascending section id"
+        );
+    }
+
+    /// AC2 (no-remote guarantee): `search` reads only the in-memory index and
+    /// the query string; it issues no I/O. Exercised here as an offline, pure
+    /// call — no network, async, or `unsafe` path is reachable from `build`/
+    /// `search`. A query with no matches returns an empty (successful) result
+    /// rather than fabricating a hit or panicking.
+    #[test]
+    fn search_is_offline_and_no_match_is_empty() {
+        let index = SectionIndex::build(&sample_snapshot());
+        assert!(
+            index.search("nonexistent-term-xyzzy").is_empty(),
+            "a query with no matches is a successful, empty result"
+        );
+        assert!(index.search("").is_empty(), "a blank query yields no hits");
+        assert!(
+            index.search("   \t \n  ").is_empty(),
+            "whitespace-only query is blank"
+        );
+    }
+
+    // --- Ranking quality (sanity for the later [035] boosts) ---------------
+
+    /// A guideline-code query surfaces only its section, mirroring the
+    /// behavioural case "an exact `C-CONV` query returns its upstream
+    /// explanation first". This is the *ranking* signal [035] will formalize
+    /// with an explicit boost; the index already isolates the exact-code
+    /// section.
+    #[test]
+    fn exact_guideline_code_resolves_its_section() {
+        let index = SectionIndex::build(&sample_snapshot());
+        let got = Hit::section_ids(&index.search("C-CONV"));
+        let api = section(
+            "api-guidelines",
+            "about",
+            "ignored",
+            "ignored",
+            &["C-CONV".to_string()],
+            &[],
+            &[],
+        )
+        .id;
+        assert_eq!(
+            got,
+            vec![api.as_str().to_string()],
+            "the C-CONV section must be the sole hit; got {got:?}"
+        );
+    }
+
+    /// A command-phrase query surfaces the section documenting that command, and
+    /// a lint-id query surfaces its lint section — the exact-name/lint cases
+    /// the index must resolve without [035]'s explicit boosts.
+    #[test]
+    fn command_phrase_and_lint_id_queries_resolve_their_sections() {
+        let index = SectionIndex::build(&sample_snapshot());
+
+        let cmd = section(
+            "cargo",
+            "commands/cargo-build",
+            "ignored",
+            "cargo command reference text",
+            &[],
+            &["cargo build".to_string()],
+            &[],
+        )
+        .id;
+        let cmd_hits = index.search("cargo build");
+        assert_eq!(
+            Hit::section_ids(&cmd_hits).first().map(|s| s.as_str()),
+            Some(cmd.as_str()),
+            "`cargo build` must surface its command section"
+        );
+
+        let lint = section(
+            "clippy",
+            "configuration",
+            "ignored",
+            "lint configuration reference text",
+            &[],
+            &[],
+            &["clippy::unwrap_used".to_string()],
+        )
+        .id;
+        let lint_hits = index.search("clippy::unwrap_used");
+        assert_eq!(
+            Hit::section_ids(&lint_hits).first().map(|s| s.as_str()),
+            Some(lint.as_str()),
+            "`clippy::unwrap_used` must surface its lint section"
+        );
+    }
+
+    /// A section that contains none of a query's terms must not appear in the
+    /// results: a no-overlap query returns zero hits, never a fabricated one.
+    #[test]
+    fn a_no_overlap_query_returns_no_hits() {
+        let index = SectionIndex::build(&sample_snapshot());
+        // No section mentions `quantum chromodynamics`.
+        assert!(index.search("quantum chromodynamics").is_empty());
+    }
+
+    /// A command-phrase query returns only the section that names the command —
+    /// relevance is not a constant, and a no-overlap section is excluded.
+    #[test]
+    fn a_term_query_ranks_only_sections_containing_it() {
+        let index = SectionIndex::build(&sample_snapshot());
+        let got = Hit::section_ids(&index.search("cargo build"));
+        assert!(
+            got.iter()
+                .any(|s| s.contains("cargo/commands%2Fcargo-build")),
+            "the cargo-build section must match; got {got:?}"
+        );
+        assert!(
+            !got.iter().any(|s| s.contains("style-guide")),
+            "a no-overlap section must not match `cargo build`; got {got:?}"
+        );
+    }
+
+    /// Token preservation end-to-end through the index: the atomic forms the
+    /// [033] tokenizer protects (`as_`, `into_`, `--no-default-features`)
+    /// survive as indexable terms and are retrievable.
+    #[test]
+    fn index_preserves_atomic_token_forms_end_to_end() {
+        let built = section(
+            "cargo",
+            "commands/cargo-build",
+            "ignored",
+            "as_ and into_ conversions; --no-default-features is a flag",
+            &[],
+            &[],
+            &[],
+        );
+        let index = SectionIndex::build(&snapshot(vec![built]));
+        for q in ["as_", "into_", "--no-default-features"] {
+            let got = Hit::section_ids(&index.search(q));
+            assert!(!got.is_empty(), "atomic form {q:?} must be retrievable");
+        }
+    }
 }
