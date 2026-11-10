@@ -446,11 +446,27 @@ fn body_has_list(body: &str) -> bool {
 }
 
 /// Whether a leading `1. `, `12. ` … token begins an ordered list item.
+///
+/// A proper Markdown ordered-list marker is a run of one or more ASCII digits
+/// followed by a `.` and then end-of-line or whitespace. The period is the
+/// marker, so a bare number with no period (e.g. `1 item`) is not a list item;
+/// splitting on the first space and testing the left half would miss the period
+/// in `1. item` and falsely accept `1 item`, so it does neither.
 fn is_ordered_item(trimmed: &str) -> bool {
-    if let Some((digits, rest)) = trimmed.split_once(' ') {
-        !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) && !rest.is_empty()
-    } else {
-        false
+    let bytes = trimmed.as_bytes();
+    // Count the leading run of ASCII digits.
+    let mut digits = 0;
+    while digits < bytes.len() && bytes[digits].is_ascii_digit() {
+        digits += 1;
+    }
+    // A marker needs at least one digit, a following `.`, then end-of-line or
+    // whitespace; `1 item` (no period) and `1x item` both fail here.
+    if digits == 0 || bytes.get(digits) != Some(&b'.') {
+        return false;
+    }
+    match bytes.get(digits + 1) {
+        Some(next) => next.is_ascii_whitespace(),
+        None => true,
     }
 }
 
@@ -688,6 +704,30 @@ mod tests {
             report
                 .present
                 .contains(&FidelityType::NoNavigationOrScripts)
+        );
+    }
+
+    #[test]
+    fn fidelity_detects_ordered_list_items() {
+        // F-032-1 regression: a Markdown ordered-list marker (`1. `, `12. `) must
+        // be detected as a list, while a bare number with no period (`1 item`)
+        // must not. The detector keys on the period, not the first space.
+        let ordered = bare_section("Steps:\n\n1. first step\n2. second step\n");
+        let ordered_report = inspect_fidelity(&[ordered]);
+        assert!(
+            ordered_report.present.contains(&FidelityType::List),
+            "an ordered list must be detected as a list: {}",
+            ordered_report.render(),
+        );
+
+        // A line of digits with no period is not an ordered-list marker, so the
+        // `List` type stays absent for it.
+        let unnumbered = bare_section("The value 1 item is not a list.\n");
+        let unnumbered_report = inspect_fidelity(&[unnumbered]);
+        assert!(
+            unnumbered_report.absent.contains(&FidelityType::List),
+            "a number without a period must not be detected as a list: {}",
+            unnumbered_report.render(),
         );
     }
 

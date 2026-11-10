@@ -112,7 +112,8 @@ pub enum Command {
     /// coverage gap, and which content types the extractors retain (nested
     /// headings, anchors, lists, tables, command syntax, stability callouts,
     /// relative links, lint "known issues", fenced examples) while navigation
-    /// chrome and scripts are stripped. Degrades gracefully; always exits `0`.
+    /// chrome and scripts are stripped. No panic; it exits non-zero only on a
+    /// snapshot-load failure, otherwise `0`.
     Inspect,
 }
 
