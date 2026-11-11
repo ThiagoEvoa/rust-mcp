@@ -30,6 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::model::{Section, SectionId, SnapshotManifest};
+use crate::pagination::{DEFAULT_HIT_LIMIT, MAX_HIT_LIMIT, MAX_QUERY_BYTES};
 use crate::registry::SourceCollection;
 
 /// A single lexical token produced by [`tokenize`].
@@ -351,6 +352,29 @@ pub enum SearchError {
     /// the caller distinguishes this from a successful zero-hit search.
     #[error("unsupported source `{0}`: expected one of {SUPPORTED_SOURCES}")]
     UnsupportedSource(String),
+
+    /// The query is blank — empty or whitespace-only.
+    ///
+    /// `plan.md` §6: "Limit queries to 1,000 UTF-8 bytes and reject blank
+    /// queries." A blank query cannot match anything, so it is a clear, typed
+    /// validation error that the caller distinguishes from a *successful*
+    /// zero-hit search (which carries helpful next steps instead of failing).
+    #[error("blank search query: a query must contain at least one non-whitespace character")]
+    BlankQuery,
+
+    /// The query exceeds [`MAX_QUERY_BYTES`] UTF-8 bytes.
+    ///
+    /// `plan.md` §6: "Limit queries to 1,000 UTF-8 bytes." The bound is on
+    /// UTF-8 *byte* length (not character count): a 1,000-byte query is accepted
+    /// and a 1,001-byte query is this error — a clear, bounded failure that names
+    /// the offending length and the cap, never a panic or a silent truncation.
+    #[error("search query is {bytes} UTF-8 bytes, over the {limit}-byte limit")]
+    QueryTooLarge {
+        /// The query's UTF-8 byte length.
+        bytes: usize,
+        /// The cap ([`MAX_QUERY_BYTES`]).
+        limit: usize,
+    },
 }
 
 /// A source restriction for [`SectionIndex::search_in`] / [`search_source`].
@@ -455,6 +479,148 @@ fn resolve_source(id: &str) -> Result<&'static str, SearchError> {
         .find(|c| c.id() == id)
         .map(|c| c.id())
         .ok_or_else(|| SearchError::UnsupportedSource(id.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Task [038]: a validated search_docs entry + useful, non-fabricated results
+//
+// The [034]/[035] seam (`search` / `search_in` / `search_source`) is a pure,
+// ranked `Vec<Hit>` and is deliberately *unvalidated*: a blank or whitespace-only
+// query yields an empty `Vec`. This task layers a *validated* `search_docs` entry
+// on top of that same ranking without changing it:
+//
+// * a [`SearchRequest`] is built only from a non-blank, within-`MAX_QUERY_BYTES`
+//   query, so a blank or oversized query is a clear [`SearchError`]
+//   ([`SearchError::BlankQuery`] / [`SearchError::QueryTooLarge`]) — never a
+//   silent empty result and never a panic (`plan.md` §6 "reject blank queries";
+//   "Limit queries to 1,000 UTF-8 bytes");
+// * the request's hit limit is defaulted to [`DEFAULT_HIT_LIMIT`] (five) and
+//   clamped to [`MAX_HIT_LIMIT`] (twenty) — the *same* clamp the [037]
+//   `paginate_items` layer applies, so the two agree (a 100 becomes 20);
+// * a request that matches no section is a *successful* zero-hit
+//   [`SearchResult`] carrying helpful, non-fabricated next steps — the "empty
+//   results are a successful search with zero hits" rule (`plan.md` §6), kept
+//   distinct from the blank/oversized *error* above.
+//
+// The [037] byte cap and cursor pagination layer on top of this count-bounded
+// result at the MCP seam; this task owns the query/limit *validation* and the
+// empty-result guidance only, reusing the [037] limit constants verbatim.
+// ---------------------------------------------------------------------------
+
+/// A validated `search_docs` request: a non-blank, within-`MAX_QUERY_BYTES`
+/// query and a hit limit clamped to the [`DEFAULT_HIT_LIMIT`..=`MAX_HIT_LIMIT`]
+/// range.
+///
+/// Built only through the fallible constructors below, so a held `SearchRequest`
+/// is always valid: a blank or oversized query is a [`SearchError`] (never a
+/// value), and an out-of-range limit is *clamped*, not rejected — matching the
+/// [037] `paginate_items` clamp. The query is held as an owned `String` so the
+/// validated value outlives the `&str` it was built from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([048]+)
+pub struct SearchRequest {
+    query: String,
+    limit: usize,
+}
+
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([048]+)
+impl SearchRequest {
+    /// Build a request for `query` with the default hit limit
+    /// ([`DEFAULT_HIT_LIMIT`], five).
+    ///
+    /// Fails with [`SearchError::BlankQuery`] for a blank or whitespace-only
+    /// query and [`SearchError::QueryTooLarge`] for one over `MAX_QUERY_BYTES`
+    /// UTF-8 bytes — a clear, typed error, never a silent empty result.
+    pub fn new(query: impl AsRef<str>) -> Result<Self, SearchError> {
+        Self::with_limit(query, None)
+    }
+
+    /// Build a request for `query` with `limit` hits.
+    ///
+    /// `limit` defaults to [`DEFAULT_HIT_LIMIT`] (five) when `None` and is
+    /// clamped to [`MAX_HIT_LIMIT`] (twenty) when larger — a 100 becomes 20,
+    /// exactly as the [037] `paginate_items` clamp. A `0` is honored as an empty
+    /// result. The query is validated as in [`new`](Self::new).
+    pub fn with_limit(query: impl AsRef<str>, limit: Option<usize>) -> Result<Self, SearchError> {
+        let query = query.as_ref();
+        validate_query(query)?;
+        let limit = limit.unwrap_or(DEFAULT_HIT_LIMIT).min(MAX_HIT_LIMIT);
+        Ok(SearchRequest {
+            query: query.to_string(),
+            limit,
+        })
+    }
+
+    /// The validated query.
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// The effective hit limit: defaulted to [`DEFAULT_HIT_LIMIT`] and clamped to
+    /// [`MAX_HIT_LIMIT`].
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+}
+
+/// The outcome of a validated `search_docs` call: the count-bounded ranked hits
+/// plus, for a successful zero-hit search, helpful, non-fabricated next steps.
+///
+/// [`hits`](SearchResult::hits) holds at most [`SearchRequest::limit`] hits, in
+/// the ranking's order. When the query matched no section, [`next_steps`]
+/// is populated with generic guidance that names the real tools and the source
+/// registry — it never claims a match the ranking did not produce, so an empty
+/// result is *helpful but never fabricated* (`plan.md` §6 "Empty results are a
+/// successful search with zero hits"). When the query matched one or more
+/// sections, `next_steps` is empty even if the count limit returned fewer than
+/// the match count.
+#[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([048]+)
+pub struct SearchResult {
+    /// The ranked hits, bounded by the request's limit.
+    pub hits: Vec<Hit>,
+    /// The effective (defaulted, clamped) hit limit.
+    pub limit: usize,
+    /// Generic, non-fabricated guidance, populated only for a zero-hit search.
+    pub next_steps: Vec<&'static str>,
+}
+
+/// Reject a blank or over-`MAX_QUERY_BYTES` query with a clear [`SearchError`].
+///
+/// A blank (empty or whitespace-only) query is [`SearchError::BlankQuery`]; a
+/// query over `MAX_QUERY_BYTES` UTF-8 bytes is [`SearchError::QueryTooLarge`]
+/// carrying the offending byte length and the cap. A blank query is checked
+/// first, so a long whitespace-only string is reported as blank. Total: any
+/// input — including multi-byte UTF-8 — validates without panicking.
+fn validate_query(query: &str) -> Result<(), SearchError> {
+    if query.trim().is_empty() {
+        return Err(SearchError::BlankQuery);
+    }
+    if query.len() > MAX_QUERY_BYTES {
+        return Err(SearchError::QueryTooLarge {
+            bytes: query.len(),
+            limit: MAX_QUERY_BYTES,
+        });
+    }
+    Ok(())
+}
+
+/// The generic, non-fabricated next steps for a successful zero-hit search.
+///
+/// Each step names a real capability the server already offers (`list_sources`,
+/// `get_section`) or a property of the corpus (the source registry; the exact
+/// codes/keys/ids the ranking matches on). None claims a match, names a
+/// fabricated section, or invents content: an empty result is *helpful* without
+/// being *fabricated* (`plan.md` §6 "Empty results are a successful search with
+/// zero hits"; §11 "…behave predictably").
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([048]+)
+fn empty_result_next_steps() -> Vec<&'static str> {
+    vec![
+        "No documentation matched this query in the current snapshot.",
+        "Try broader or fewer terms, or use the exact guideline code, command name, or lint id.",
+        "Confirm the source is registered: list_sources lists the eight canonical sources.",
+        "A section you expected may sit under a different heading; verify it with get_section using its exact id.",
+    ]
 }
 
 /// The in-memory, deterministic BM25 index over an immutable corpus
@@ -704,6 +870,55 @@ impl SectionIndex {
     pub fn search_source(&self, query: &str, source: &str) -> Result<Vec<Hit>, SearchError> {
         let filter = SourceFilter::source(source)?;
         Ok(self.search_in(query, &filter))
+    }
+
+    /// Run a validated `search_docs` request across **every** source, returning
+    /// a [`SearchResult`] with the count-bounded hits and (for a zero-hit search)
+    /// helpful, non-fabricated next steps.
+    ///
+    /// This is [`run_in`](Self::run_in) with the all-sources filter — the
+    /// `search_docs` entry for an omitted `source` (`plan.md` §6 "omission
+    /// searches all sources"). The request is already validated at construction,
+    /// so a blank or oversized query never reaches here: it failed at
+    /// [`SearchRequest::new`] / [`SearchRequest::with_limit`].
+    pub fn run(&self, request: &SearchRequest) -> SearchResult {
+        self.run_in(request, &SourceFilter::all())
+    }
+
+    /// Run a validated `search_docs` request restricted to `filter`, returning a
+    /// count-bounded [`SearchResult`] with next steps when the query matched
+    /// nothing.
+    ///
+    /// The query is the request's validated query and the filter is an already
+    /// validated [`SourceFilter`] ([035]); the result holds at most
+    /// [`SearchRequest::limit`] hits in ranking order. A query that matches no
+    /// section in the filtered scope is a *successful* zero-hit result carrying
+    /// [`next_steps`](SearchResult::next_steps); a blank or oversized query can
+    /// never reach this path — it failed at request construction. The [037] byte
+    /// cap and cursor pagination layer on top of this count-bounded result.
+    pub fn run_in(&self, request: &SearchRequest, filter: &SourceFilter) -> SearchResult {
+        // Rank over the validated, non-blank query through the single, unchanged
+        // [034]/[035] seam.
+        let matched = self.search_in(request.query(), filter);
+        let limit = request.limit();
+        // Whether the query matched anything is decided *before* the count limit
+        // consumes the list: next steps key off the match count, not the
+        // count-limited result, so a query that matched but was limited to zero
+        // is not treated as a no-match.
+        let no_match = matched.is_empty();
+        // The count limit is applied here; the [037] byte cap + cursor pagination
+        // layers on top at the MCP seam.
+        let hits = matched.into_iter().take(limit).collect();
+        let next_steps = if no_match {
+            empty_result_next_steps()
+        } else {
+            Vec::new()
+        };
+        SearchResult {
+            hits,
+            limit,
+            next_steps,
+        }
     }
 
     /// The corpus-wide inverse-document-frequency factor for a term seen in
@@ -1951,6 +2166,260 @@ mod tests {
             registry_set.len(),
             8,
             "the registry has exactly the eight approved sources"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Task [038]: query/limit validation + useful, non-fabricated results
+    // -------------------------------------------------------------------
+
+    /// AC1: a blank or whitespace-only query is a clear, typed error — never a
+    /// silent empty result, never a panic. Both entry points reject it.
+    #[test]
+    fn blank_or_whitespace_query_is_a_clear_error() {
+        for blank in ["", "   ", "\t\n", " \t \n "] {
+            assert_eq!(
+                SearchRequest::new(blank),
+                Err(SearchError::BlankQuery),
+                "a blank query {blank:?} must be a clear BlankQuery error"
+            );
+            // The limit overload validates the query before clamping.
+            assert_eq!(
+                SearchRequest::with_limit(blank, Some(5)),
+                Err(SearchError::BlankQuery),
+                "with_limit must reject a blank query {blank:?}"
+            );
+        }
+    }
+
+    /// AC1: a query over `MAX_QUERY_BYTES` UTF-8 bytes is a clear, typed error
+    /// naming the offending length and the cap.
+    #[test]
+    fn query_over_1000_bytes_is_a_clear_error() {
+        let too_long = "a".repeat(MAX_QUERY_BYTES + 1);
+        let err = SearchRequest::new(&too_long).expect_err("an over-cap query fails");
+        assert_eq!(
+            err,
+            SearchError::QueryTooLarge {
+                bytes: MAX_QUERY_BYTES + 1,
+                limit: MAX_QUERY_BYTES,
+            }
+        );
+        // The message names both the length and the cap, so a caller can
+        // correct from the error alone.
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&(MAX_QUERY_BYTES + 1).to_string()),
+            "the error names the offending length; got {msg:?}"
+        );
+        assert!(
+            msg.contains(&MAX_QUERY_BYTES.to_string()),
+            "the error names the cap; got {msg:?}"
+        );
+    }
+
+    /// AC1 (boundary): a query of exactly `MAX_QUERY_BYTES` UTF-8 bytes is
+    /// accepted, with the default limit of five — the cap is on the byte length,
+    /// not on the count being merely "near" it.
+    #[test]
+    fn a_query_of_exactly_1000_bytes_is_accepted() {
+        let ok = "a".repeat(MAX_QUERY_BYTES);
+        let req = SearchRequest::new(&ok).expect("a 1000-byte query is within the cap");
+        assert_eq!(req.query().len(), MAX_QUERY_BYTES);
+        assert_eq!(req.limit(), DEFAULT_HIT_LIMIT, "the default limit is five");
+    }
+
+    /// AC1: the default limit is five and a limit above the cap is clamped to
+    /// twenty — the same clamp the [037] `paginate_items` layer applies. A `0`
+    /// is honored (an empty page) and `None` is the default.
+    #[test]
+    fn default_limit_is_five_and_over_max_is_clamped() {
+        assert_eq!(SearchRequest::new("cargo").unwrap().limit(), 5);
+        assert_eq!(
+            SearchRequest::with_limit("cargo", Some(100))
+                .unwrap()
+                .limit(),
+            MAX_HIT_LIMIT,
+            "a 100 limit is clamped to the cap"
+        );
+        assert_eq!(
+            SearchRequest::with_limit("cargo", Some(MAX_HIT_LIMIT))
+                .unwrap()
+                .limit(),
+            MAX_HIT_LIMIT
+        );
+        assert_eq!(
+            SearchRequest::with_limit("cargo", Some(1)).unwrap().limit(),
+            1
+        );
+        assert_eq!(
+            SearchRequest::with_limit("cargo", Some(0)).unwrap().limit(),
+            0,
+            "a zero limit is honored, matching [037]"
+        );
+        assert_eq!(
+            SearchRequest::with_limit("cargo", None).unwrap().limit(),
+            DEFAULT_HIT_LIMIT,
+            "a None limit is the default"
+        );
+    }
+
+    /// AC1: the cap is measured on UTF-8 *bytes*, not on character count. A run
+    /// of 334 `€` (3 bytes each = 1002 bytes) is rejected though it is only 334
+    /// characters; 333 `€` (999 bytes) is accepted.
+    #[test]
+    fn query_length_is_measured_in_utf8_bytes_not_chars() {
+        let just_under = "€".repeat(333); // 999 bytes, 333 chars
+        assert!(SearchRequest::new(&just_under).is_ok());
+        let just_over = "€".repeat(334); // 1002 bytes, 334 chars
+        assert_eq!(
+            SearchRequest::new(&just_over),
+            Err(SearchError::QueryTooLarge {
+                bytes: 1002,
+                limit: MAX_QUERY_BYTES,
+            })
+        );
+    }
+
+    /// AC2: a valid query that matches no section is a *successful* zero-hit
+    /// result carrying helpful, non-fabricated next steps.
+    #[test]
+    fn an_empty_search_succeeds_with_zero_hits_and_next_steps() {
+        let index = SectionIndex::build(&sample_snapshot());
+        let req = SearchRequest::new("quantum chromodynamics").expect("a valid query");
+        let result = index.run(&req);
+        assert!(result.hits.is_empty(), "a no-match query returns zero hits");
+        assert_eq!(
+            result.limit, DEFAULT_HIT_LIMIT,
+            "the result records the effective limit"
+        );
+        assert!(
+            !result.next_steps.is_empty(),
+            "a zero-hit search carries helpful next steps"
+        );
+
+        // Non-fabricated: none of the next steps names a section id from the
+        // corpus (which would be a fabricated "match"), and the guidance names
+        // the real tools.
+        let corpus_ids: Vec<String> = sample_snapshot()
+            .body
+            .sections
+            .iter()
+            .map(|s| s.id.as_str().to_string())
+            .collect();
+        for step in &result.next_steps {
+            for id in &corpus_ids {
+                assert!(
+                    !step.contains(id),
+                    "a next step must not name a fabricated match ({id:?}): {step:?}"
+                );
+            }
+        }
+        assert!(
+            result.next_steps.iter().any(|s| s.contains("list_sources")),
+            "the guidance references the real list_sources tool"
+        );
+        assert!(
+            result.next_steps.iter().any(|s| s.contains("get_section")),
+            "the guidance references the real get_section tool"
+        );
+    }
+
+    /// AC2 contrast: a query that *does* match returns hits and no next steps —
+    /// next steps are only for a zero-hit search, so a match is never padded,
+    /// even when the count limit trims it to zero.
+    #[test]
+    fn a_matching_search_returns_hits_without_next_steps() {
+        let index = SectionIndex::build(&sample_snapshot());
+        // A query that matches, count-limited to zero: still a match, so no
+        // next steps (there *are* matches, the caller just asked for none).
+        let zero = SearchRequest::with_limit("C-CONV", Some(0)).expect("a valid query");
+        let result = index.run(&zero);
+        assert!(result.hits.is_empty(), "a zero limit returns no hits");
+        assert!(
+            result.next_steps.is_empty(),
+            "a query with matches carries no next steps, even at a zero limit"
+        );
+
+        // The same query with the default limit returns its hit and no next steps.
+        let def = SearchRequest::new("C-CONV").expect("a valid query");
+        let result = index.run(&def);
+        assert!(!result.hits.is_empty(), "an exact-code query matches");
+        assert!(
+            result.next_steps.is_empty(),
+            "a match carries no next steps"
+        );
+    }
+
+    /// AC2: a source filter that matches nothing is also a successful zero-hit
+    /// result with next steps.
+    #[test]
+    fn a_filtered_empty_search_also_carries_next_steps() {
+        let index = SectionIndex::build(&sample_snapshot());
+        // "rustdoc" is a valid source with no section matching the query here.
+        let filter = SourceFilter::source("rustdoc").expect("rustdoc is a valid source");
+        let req = SearchRequest::new("cargo build").expect("a valid query");
+        let result = index.run_in(&req, &filter);
+        assert!(
+            result.hits.is_empty(),
+            "a filtered no-match returns zero hits"
+        );
+        assert!(
+            !result.next_steps.is_empty(),
+            "a filtered zero-hit search carries next steps"
+        );
+    }
+
+    /// AC2: an empty corpus yields a zero-hit result with next steps — never a
+    /// panic.
+    #[test]
+    fn an_empty_corpus_query_carries_next_steps() {
+        let index = SectionIndex::build(&snapshot(Vec::new()));
+        let req = SearchRequest::new("cargo build").expect("a valid query");
+        let result = index.run(&req);
+        assert!(result.hits.is_empty());
+        assert!(!result.next_steps.is_empty());
+    }
+
+    /// AC1/AC2: `run` applies the validated count limit to the ranked hits — a
+    /// query matching more than the limit returns exactly the limit, in ranked
+    /// order, with no next steps (the query matched).
+    #[test]
+    fn run_applies_the_count_limit_to_the_hits() {
+        // Ten sections all containing the term "sharedterm".
+        let mut sections = Vec::new();
+        for i in 0..10 {
+            sections.push(section(
+                "cargo",
+                &format!("shared/{i}"),
+                &format!("probe{i}"),
+                "this section discusses sharedterm and probe",
+                &[],
+                &[],
+                &[],
+            ));
+        }
+        let index = SectionIndex::build(&snapshot(sections));
+
+        // The default limit bounds ten matches to five hits.
+        let req = SearchRequest::new("sharedterm").expect("a valid query");
+        let result = index.run(&req);
+        assert_eq!(
+            result.hits.len(),
+            DEFAULT_HIT_LIMIT,
+            "the default limit bounds the hits to five"
+        );
+        assert!(
+            result.next_steps.is_empty(),
+            "a match carries no next steps"
+        );
+
+        // An explicit smaller limit further bounds the hits.
+        let small = SearchRequest::with_limit("sharedterm", Some(2)).expect("a valid query");
+        assert_eq!(
+            index.run(&small).hits.len(),
+            2,
+            "an explicit limit of two bounds to two"
         );
     }
 }
