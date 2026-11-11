@@ -616,8 +616,7 @@ fn cargo_add() -> CommandEntry {
 
 fn cargo_remove() -> CommandEntry {
     CommandEntry {
-        key: CommandKey::new("cargo remove")
-            .expect("`cargo remove` is a well-formed key"),
+        key: CommandKey::new("cargo remove").expect("`cargo remove` is a well-formed key"),
         purpose: "Remove dependencies from the manifest.".to_string(),
         upstream_sections: vec![cargo_section("commands/cargo-remove"), manifest_section()],
         syntax: vec!["cargo remove <SPEC>... [OPTIONS]".to_string()],
@@ -668,8 +667,7 @@ fn cargo_remove() -> CommandEntry {
 fn cargo_update() -> CommandEntry {
     CommandEntry {
         key: CommandKey::new("cargo update").expect("`cargo update` is a well-formed key"),
-        purpose: "Update dependencies as specified by the `Cargo.lock` file."
-            .to_string(),
+        purpose: "Update dependencies as specified by the `Cargo.lock` file.".to_string(),
         upstream_sections: vec![cargo_section("commands/cargo-update"), registry_section()],
         syntax: vec!["cargo update [SPEC]... [OPTIONS]".to_string()],
         examples: vec![
@@ -780,9 +778,7 @@ fn cargo_fetch() -> CommandEntry {
             "Syntax and options are documented for the installed `cargo`; run \
              `cargo fetch --help` for the version-specific option list. The flag \
              `--offline` is documented for this command: it makes the fetch use the \
-             local cache only. `cargo fetch` refreshes and downloads the lockfile, \
-             the inverse of the `--locked` assertion that the lockfile will not \
-             change, so `--locked` is not documented on this entry."
+             local cache only."
                 .to_string(),
         ],
         effect_notes: vec![
@@ -1127,5 +1123,525 @@ mod tests {
             .get("cargo new")
             .expect_err("an empty catalog has no entries");
         assert!(matches!(err, LookupError::UnknownKey { .. }));
+    }
+
+    // ===========================================================
+    // [040] dependency / reproducibility family
+    // ===========================================================
+
+    /// The five dependency/reproducibility keys, in the catalog's fixed order.
+    const DEP_FAMILY_KEYS: &[&str] = &[
+        "cargo add",
+        "cargo remove",
+        "cargo update",
+        "cargo generate-lockfile",
+        "cargo fetch",
+    ];
+
+    /// The reference chapters the dependency family cites as its "relevant
+    /// configuration sections" (AC1): feature resolution, the manifest, and the
+    /// package sources / lockfile reference.
+    const REFERENCE_CHAPTERS: &[&str] = &["features", "manifest", "registry"];
+
+    /// A fixture snapshot carrying exactly the sections the dependency family
+    /// cites: the five command chapters plus the three reference chapters. This
+    /// is the AC1 "sections RESOLVE in a snapshot" seam for [040].
+    fn dep_fixture_snapshot() -> SnapshotManifest {
+        use crate::model::SnapshotManifest;
+        SnapshotManifest {
+            schema_version: SchemaVersion::V1,
+            body: ManifestBody {
+                snapshot_id: SnapshotId::new("fixture-040").expect("a URI-safe snapshot id"),
+                created_at: Timestamp::new("2026-01-01T00:00:00Z").expect("a valid timestamp"),
+                parser_version: "test".to_string(),
+                sections: vec![
+                    command_section("commands/cargo-add", "cargo add"),
+                    command_section("commands/cargo-remove", "cargo remove"),
+                    command_section("commands/cargo-update", "cargo update"),
+                    command_section(
+                        "commands/cargo-generate-lockfile",
+                        "cargo generate-lockfile",
+                    ),
+                    command_section("commands/cargo-fetch", "cargo fetch"),
+                    command_section("features", "Features"),
+                    command_section("manifest", "Manifest"),
+                    command_section("registry", "Registry"),
+                ],
+                sources: vec![],
+                checklist: vec![],
+                commands: vec![],
+                validation: Default::default(),
+                attribution: vec![],
+            },
+        }
+    }
+
+    /// A fixture snapshot carrying every section the combined catalog cites: the
+    /// setup/inspection family's five command chapters plus the dependency
+    /// family's five command chapters and three reference chapters.
+    fn combined_fixture_snapshot() -> SnapshotManifest {
+        use crate::model::SnapshotManifest;
+        SnapshotManifest {
+            schema_version: SchemaVersion::V1,
+            body: ManifestBody {
+                snapshot_id: SnapshotId::new("fixture-040-combined")
+                    .expect("a URI-safe snapshot id"),
+                created_at: Timestamp::new("2026-01-01T00:00:00Z").expect("a valid timestamp"),
+                parser_version: "test".to_string(),
+                sections: vec![
+                    command_section("commands/cargo-new", "cargo new"),
+                    command_section("commands/cargo-init", "cargo init"),
+                    command_section("commands/cargo-metadata", "cargo metadata"),
+                    command_section("commands/cargo-locate-project", "cargo locate-project"),
+                    command_section("commands/cargo-tree", "cargo tree"),
+                    command_section("commands/cargo-add", "cargo add"),
+                    command_section("commands/cargo-remove", "cargo remove"),
+                    command_section("commands/cargo-update", "cargo update"),
+                    command_section(
+                        "commands/cargo-generate-lockfile",
+                        "cargo generate-lockfile",
+                    ),
+                    command_section("commands/cargo-fetch", "cargo fetch"),
+                    command_section("features", "Features"),
+                    command_section("manifest", "Manifest"),
+                    command_section("registry", "Registry"),
+                ],
+                sources: vec![],
+                checklist: vec![],
+                commands: vec![],
+                validation: Default::default(),
+                attribution: vec![],
+            },
+        }
+    }
+
+    /// The maintained-note text of an entry (its effect-note details and
+    /// compatibility qualifications joined): the fields where the `--offline` /
+    /// `--locked` scoping is declared (AC2). Upstream syntax/examples are
+    /// excluded so a flag mention is a maintained decision, not an upstream
+    /// excerpt.
+    fn maintained_text(entry: &CommandEntry) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        parts.extend(entry.effect_notes.iter().map(|note| note.detail.clone()));
+        parts.extend(entry.compatibility.iter().cloned());
+        parts.join("\n")
+    }
+
+    // --- [040] AC1: exact keys and resolvable citations -------------------
+
+    #[test]
+    fn the_dependency_family_carries_the_five_exact_keys_in_order() {
+        let catalog = CommandCatalog::dependencies();
+        assert_eq!(
+            catalog.keys(),
+            DEP_FAMILY_KEYS,
+            "the family is the five named keys, in order"
+        );
+        assert_eq!(catalog.len(), 5);
+    }
+
+    #[test]
+    fn every_dependency_key_looks_up_to_its_entry() {
+        let catalog = CommandCatalog::dependencies();
+        for key in DEP_FAMILY_KEYS.iter().copied() {
+            let entry = catalog
+                .get(key)
+                .unwrap_or_else(|err| panic!("`{key}` should resolve to its entry, got {err}"));
+            assert_eq!(
+                entry.key.as_str(),
+                key,
+                "the entry's key is the exact key queried"
+            );
+        }
+    }
+
+    #[test]
+    fn every_dependency_entry_cites_a_resolvable_upstream_section() {
+        let catalog = CommandCatalog::dependencies();
+        let manifest = dep_fixture_snapshot();
+        for key in DEP_FAMILY_KEYS.iter().copied() {
+            let resolved = catalog
+                .resolve(&manifest, key)
+                .unwrap_or_else(|err| panic!("`{key}` should resolve, got {err}"));
+            assert!(
+                !resolved.sections.is_empty(),
+                "`{key}` resolved with at least one section"
+            );
+            // The first resolved section is the entry's first cited id, in order.
+            assert_eq!(
+                resolved.sections[0].id, resolved.entry.upstream_sections[0],
+                "the first resolved section is the entry's first cited id"
+            );
+            // Every resolved section is a cargo-source section (no fabricated
+            // placeholder), and the count equals the citations: none dropped or
+            // invented.
+            assert_eq!(
+                resolved.sections.len(),
+                resolved.entry.upstream_sections.len(),
+                "every cited section resolved, none dropped or added"
+            );
+            for section in &resolved.sections {
+                assert_eq!(section.source_id.as_str(), "cargo");
+            }
+        }
+    }
+
+    #[test]
+    fn every_dependency_entry_cites_a_relevant_configuration_section() {
+        // AC1: each entry cites its command chapter AND at least one relevant
+        // configuration/reference section (features/manifest/registry).
+        let catalog = CommandCatalog::dependencies();
+        let manifest = dep_fixture_snapshot();
+        let references: Vec<SectionId> = REFERENCE_CHAPTERS
+            .iter()
+            .copied()
+            .map(cargo_section)
+            .collect();
+        // The five command chapters, the same way the entries cite them, so the
+        // check is an exact id comparison (the chapter `/` is percent-encoded in
+        // the id, so a raw `contains("commands/")` would miss it, and the
+        // chapter is hyphenated `commands/cargo-add`, not the spaced key).
+        let command_chapters: Vec<SectionId> = [
+            "commands/cargo-add",
+            "commands/cargo-remove",
+            "commands/cargo-update",
+            "commands/cargo-generate-lockfile",
+            "commands/cargo-fetch",
+        ]
+        .iter()
+        .copied()
+        .map(cargo_section)
+        .collect();
+        for key in DEP_FAMILY_KEYS.iter().copied() {
+            let entry = catalog.get(key).expect("a dependency key resolves");
+            assert!(
+                entry
+                    .upstream_sections
+                    .iter()
+                    .any(|id| command_chapters.contains(id)),
+                "`{key}` cites its command chapter"
+            );
+            assert!(
+                entry
+                    .upstream_sections
+                    .iter()
+                    .any(|id| references.contains(id)),
+                "`{key}` cites a relevant configuration section (features/manifest/registry)"
+            );
+            // The cited reference section resolves to a cargo-source section.
+            let resolved = catalog
+                .resolve(&manifest, key)
+                .unwrap_or_else(|err| panic!("`{key}` resolves, got {err}"));
+            assert!(
+                resolved
+                    .sections
+                    .iter()
+                    .all(|s| s.source_id.as_str() == "cargo"),
+                "`{key}`'s cited sections are all cargo-source"
+            );
+        }
+    }
+
+    #[test]
+    fn every_dependency_entry_cites_command_specific_options_and_examples() {
+        // AC1: command-specific options (documented syntax) and relevant
+        // configuration sections are present on every entry.
+        let catalog = CommandCatalog::dependencies();
+        for key in DEP_FAMILY_KEYS.iter().copied() {
+            let entry = catalog.get(key).expect("a dependency key resolves");
+            assert!(
+                !entry.syntax.is_empty(),
+                "`{key}` carries a documented syntax excerpt"
+            );
+            assert!(
+                !entry.examples.is_empty(),
+                "`{key}` carries a documented example excerpt"
+            );
+            assert!(
+                !entry.prerequisites.is_empty(),
+                "`{key}` carries documented prerequisites"
+            );
+            assert!(
+                !entry.compatibility.is_empty(),
+                "`{key}` carries version/stability qualifications"
+            );
+            assert!(
+                !entry.upstream_sections.is_empty(),
+                "`{key}` cites its upstream section(s)"
+            );
+        }
+    }
+
+    // --- [040] AC2: accurate lockfile/source/download + flag scoping -------
+
+    #[test]
+    fn every_dependency_command_documents_offline() {
+        // AC2 (universal half of the scoping): `--offline` is documented for all
+        // five dependency commands — the universal cache-only flag for these
+        // registry-touching commands.
+        let catalog = CommandCatalog::dependencies();
+        for key in DEP_FAMILY_KEYS.iter().copied() {
+            let entry = catalog.get(key).expect("a dependency key resolves");
+            assert!(
+                maintained_text(entry).contains("--offline"),
+                "`{key}` documents --offline"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lockfile_commands_describe_locked_and_offline() {
+        // AC2: the four commands that write or resolve the lockfile document
+        // BOTH `--offline` and `--locked`.
+        let catalog = CommandCatalog::dependencies();
+        for key in [
+            "cargo add",
+            "cargo remove",
+            "cargo update",
+            "cargo generate-lockfile",
+        ] {
+            let entry = catalog.get(key).expect("a lockfile command resolves");
+            let text = maintained_text(entry);
+            assert!(text.contains("--offline"), "`{key}` documents --offline");
+            assert!(text.contains("--locked"), "`{key}` documents --locked");
+        }
+    }
+
+    #[test]
+    fn cargo_fetch_describes_offline_but_not_locked() {
+        // AC2 (the per-command scoping): `--offline` is universal, but `--locked`
+        // — the "the lockfile will not change" assertion — is NOT applied to
+        // `cargo fetch`, whose purpose is to refresh and download the lockfile
+        // (the inverse of that assertion). This is the proof that a flag is not
+        // claimed for a command that does not document it.
+        let catalog = CommandCatalog::dependencies();
+        let fetch = catalog.get("cargo fetch").expect("cargo fetch resolves");
+        let text = maintained_text(fetch);
+        assert!(
+            text.contains("--offline"),
+            "cargo fetch documents --offline"
+        );
+        assert!(
+            !text.contains("--locked"),
+            "cargo fetch must NOT document --locked: it is the inverse of fetch's purpose"
+        );
+        // `--locked` never leaks into fetch's upstream excerpt fields either.
+        for excerpt in fetch.syntax.iter().chain(fetch.examples.iter()) {
+            assert!(
+                !excerpt.contains("--locked"),
+                "cargo fetch's upstream excerpts carry no --locked"
+            );
+        }
+    }
+
+    #[test]
+    fn each_dependency_command_notes_a_possible_download() {
+        // AC2: "possible downloads are described accurately" — every dependency
+        // command can pull from the registry, and each carries a DependencyDownload
+        // note qualified by `--offline`/`--frozen`.
+        let catalog = CommandCatalog::dependencies();
+        for key in DEP_FAMILY_KEYS.iter().copied() {
+            let entry = catalog.get(key).expect("a dependency key resolves");
+            assert!(
+                entry
+                    .effect_notes
+                    .iter()
+                    .any(|note| note.kind == EffectKind::DependencyDownload),
+                "`{key}` notes a possible dependency download"
+            );
+        }
+    }
+
+    #[test]
+    fn add_and_remove_note_a_source_change_the_resolvers_do_not() {
+        // AC2 effect-family scoping: only `cargo add` and `cargo remove` edit
+        // `Cargo.toml` (a SourceChange); the resolvers/refreshers do not.
+        let catalog = CommandCatalog::dependencies();
+        for key in ["cargo add", "cargo remove"] {
+            let entry = catalog
+                .get(key)
+                .expect("a source-changing command resolves");
+            assert!(
+                entry
+                    .effect_notes
+                    .iter()
+                    .any(|note| note.kind == EffectKind::SourceChange),
+                "`{key}` notes a source change (a Cargo.toml edit)"
+            );
+        }
+        for key in ["cargo update", "cargo generate-lockfile", "cargo fetch"] {
+            let entry = catalog.get(key).expect("a resolver/refresher resolves");
+            assert!(
+                !entry
+                    .effect_notes
+                    .iter()
+                    .any(|note| note.kind == EffectKind::SourceChange),
+                "`{key}` must NOT note a source change (it does not edit Cargo.toml)"
+            );
+        }
+    }
+
+    #[test]
+    fn lockfile_mutation_commands_note_a_lockfile_change() {
+        // AC2: every dependency command reads or writes `Cargo.lock`, so each
+        // carries a LockfileChange note describing the lockfile/source change
+        // accurately.
+        let catalog = CommandCatalog::dependencies();
+        for key in DEP_FAMILY_KEYS.iter().copied() {
+            let entry = catalog.get(key).expect("a dependency key resolves");
+            assert!(
+                entry
+                    .effect_notes
+                    .iter()
+                    .any(|note| note.kind == EffectKind::LockfileChange),
+                "`{key}` notes its lockfile change"
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_upstream_excerpts_and_maintained_notes_are_separate() {
+        // AC2 (separation): a maintained effect-note's prose is kept out of the
+        // upstream syntax/example fields, mirroring the [039] pattern.
+        let catalog = CommandCatalog::dependencies();
+        for key in DEP_FAMILY_KEYS.iter().copied() {
+            let entry = catalog.get(key).expect("a dependency key resolves");
+            for note in &entry.effect_notes {
+                assert!(
+                    !note.detail.trim().is_empty(),
+                    "`{key}` carries a non-trivial effect note"
+                );
+                for excerpt in entry.syntax.iter().chain(entry.examples.iter()) {
+                    assert!(
+                        !excerpt.contains(&note.detail),
+                        "`{key}` keeps effect-note prose out of the upstream excerpt"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_section_is_never_fabricated_for_a_dependency_key() {
+        // AC1 (dangling): a cited section that is absent from the active snapshot
+        // is an UnresolvedSection, never a fabricated section.
+        let catalog = CommandCatalog::dependencies();
+        let empty = crate::model::SnapshotManifest {
+            schema_version: SchemaVersion::V1,
+            body: crate::model::ManifestBody {
+                snapshot_id: SnapshotId::new("empty-040").expect("a URI-safe snapshot id"),
+                created_at: Timestamp::new("2026-01-01T00:00:00Z").expect("a valid timestamp"),
+                parser_version: "test".to_string(),
+                sections: vec![],
+                sources: vec![],
+                checklist: vec![],
+                commands: vec![],
+                validation: Default::default(),
+                attribution: vec![],
+            },
+        };
+        // The first cited section of `cargo add` is its command chapter; with no
+        // sections in the snapshot it dangles rather than being fabricated.
+        let err = catalog
+            .resolve(&empty, "cargo add")
+            .expect_err("no section resolves in an empty snapshot");
+        match err {
+            LookupError::UnresolvedSection { key, section } => {
+                assert_eq!(key, "cargo add");
+                let expected = SectionId::derive(
+                    &SourceId::new("cargo").expect("registry id"),
+                    "commands/cargo-add",
+                    None,
+                    None,
+                )
+                .expect("a well-formed id");
+                assert_eq!(section, expected);
+            }
+            other => panic!("expected UnresolvedSection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_shell_operator_dependency_key_is_refused_not_executed() {
+        // The no-execution boundary holds for the dependency family too: a
+        // shell-operator key is refused at the key boundary, never interpolated
+        // into a process.
+        let catalog = CommandCatalog::dependencies();
+        for bad in [
+            "cargo add serde ; rm -rf /",
+            "cargo update | xargs -n1 echo",
+            "cargo fetch $(whoami)",
+        ] {
+            match catalog.get(bad) {
+                Err(LookupError::InvalidKey { requested, .. }) => {
+                    assert_eq!(requested, bad, "the refused request is preserved");
+                }
+                Err(other) => panic!("expected InvalidKey for `{bad}`, got {other:?}"),
+                Ok(_) => panic!("`{bad}` must not resolve: a shell-operator key is refused"),
+            }
+        }
+        // A clean dependency key still resolves: refusal is specific to operators.
+        assert!(
+            catalog.get("cargo add").is_ok(),
+            "a clean dependency key resolves"
+        );
+    }
+
+    // --- [040] concatenation, totality, and purity ------------------------
+
+    #[test]
+    fn the_combined_catalog_resolves_every_family_entry() {
+        // `combined()` is the two families concatenated; the lookup/resolve paths
+        // are unchanged, so every key from either family still resolves exactly
+        // as it did in its own catalog.
+        let catalog = CommandCatalog::combined();
+        // 5 setup/inspection + 5 dependency = 10 entries.
+        assert_eq!(
+            catalog.len(),
+            10,
+            "combined is the two families concatenated"
+        );
+        let expected: Vec<String> = FAMILY_KEYS
+            .iter()
+            .chain(DEP_FAMILY_KEYS.iter())
+            .map(|key| key.to_string())
+            .collect();
+        assert_eq!(
+            catalog.keys(),
+            expected,
+            "combined keys are the two families, in order"
+        );
+        let manifest = combined_fixture_snapshot();
+        for key in FAMILY_KEYS
+            .iter()
+            .copied()
+            .chain(DEP_FAMILY_KEYS.iter().copied())
+        {
+            let resolved = catalog.resolve(&manifest, key).unwrap_or_else(|err| {
+                panic!("`{key}` resolves in the combined catalog, got {err}")
+            });
+            assert!(
+                !resolved.sections.is_empty(),
+                "`{key}` resolved with a section"
+            );
+            assert_eq!(
+                resolved.snapshot_id, manifest.body.snapshot_id,
+                "the entry resolved against the combined snapshot"
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_catalogs_are_pure_and_deterministic() {
+        let a = CommandCatalog::dependencies();
+        let b = CommandCatalog::dependencies();
+        assert_eq!(
+            a, b,
+            "two dependency catalogs built from the same code are identical"
+        );
+        assert_eq!(a.keys(), b.keys());
+        let add_a = a.get("cargo add").expect("cargo add resolves");
+        let add_b = b.get("cargo add").expect("cargo add resolves");
+        assert_eq!(add_a, add_b);
     }
 }
