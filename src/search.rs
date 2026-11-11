@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::model::{Section, SectionId, SnapshotManifest};
-use crate::pagination::{DEFAULT_HIT_LIMIT, MAX_HIT_LIMIT, MAX_QUERY_BYTES};
+use crate::pagination::{MAX_QUERY_BYTES, clamp_query_limit};
 use crate::registry::SourceCollection;
 
 /// A single lexical token produced by [`tokenize`].
@@ -495,7 +495,8 @@ fn resolve_source(id: &str) -> Result<&'static str, SearchError> {
 //   silent empty result and never a panic (`plan.md` §6 "reject blank queries";
 //   "Limit queries to 1,000 UTF-8 bytes");
 // * the request's hit limit is defaulted to [`DEFAULT_HIT_LIMIT`] (five) and
-//   clamped to [`MAX_HIT_LIMIT`] (twenty) — the *same* clamp the [037]
+//   clamped to [`MAX_HIT_LIMIT`] (twenty) via the shared
+//   [`crate::pagination::clamp_query_limit`] helper — the *same* clamp the [037]
 //   `paginate_items` layer applies, so the two agree (a 100 becomes 20);
 // * a request that matches no section is a *successful* zero-hit
 //   [`SearchResult`] carrying helpful, non-fabricated next steps — the "empty
@@ -538,13 +539,17 @@ impl SearchRequest {
     /// Build a request for `query` with `limit` hits.
     ///
     /// `limit` defaults to [`DEFAULT_HIT_LIMIT`] (five) when `None` and is
-    /// clamped to [`MAX_HIT_LIMIT`] (twenty) when larger — a 100 becomes 20,
-    /// exactly as the [037] `paginate_items` clamp. A `0` is honored as an empty
-    /// result. The query is validated as in [`new`](Self::new).
+    /// clamped to [`MAX_HIT_LIMIT`] (twenty) when larger — a 100 becomes 20 — via
+    /// the shared [`crate::pagination::clamp_query_limit`] helper, exactly the
+    /// clamp the [037] `paginate_items` layer applies, so the two layers share
+    /// one source of truth. A `0` is honored as an empty result. The query is
+    /// validated as in [`new`](Self::new).
     pub fn with_limit(query: impl AsRef<str>, limit: Option<usize>) -> Result<Self, SearchError> {
         let query = query.as_ref();
         validate_query(query)?;
-        let limit = limit.unwrap_or(DEFAULT_HIT_LIMIT).min(MAX_HIT_LIMIT);
+        // Clamp via the shared [037] helper so this request and the
+        // `paginate_items` layer apply the identical default-and-cap rule.
+        let limit = clamp_query_limit(limit);
         Ok(SearchRequest {
             query: query.to_string(),
             limit,
@@ -1060,6 +1065,7 @@ mod tests {
         ManifestBody, Release, SchemaVersion, SectionBuilder, SnapshotId, SnapshotManifest, Source,
         SourceId, Timestamp, Url,
     };
+    use crate::pagination::{DEFAULT_HIT_LIMIT, MAX_HIT_LIMIT};
 
     /// Unique probe words, one per sample section, in the same order as
     /// `sample_sections`. Each word is embedded only in its own section's body,

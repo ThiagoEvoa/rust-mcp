@@ -81,6 +81,19 @@ pub const MAX_HIT_LIMIT: usize = 20;
 /// 1,000 UTF-8 bytes and reject blank queries").
 pub const MAX_QUERY_BYTES: usize = 1000;
 
+/// The effective hit limit for a response — the **single source of truth** for
+/// the default-and-clamp rule, shared by the [037] [`paginate_items`] layer and
+/// the [038] `search_docs` request validation so the two cannot disagree.
+///
+/// `limit` is defaulted to [`DEFAULT_HIT_LIMIT`] (five) when `None` and clamped
+/// to [`MAX_HIT_LIMIT`] (twenty) when larger: a `None` yields the default, a
+/// `0` is honoured as an empty page, and a request above the cap is clamped to
+/// the cap (a `100` becomes `20`). Total and pure: it maps every `Option<usize>`
+/// to a `usize` without panicking.
+pub fn clamp_query_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(DEFAULT_HIT_LIMIT).min(MAX_HIT_LIMIT)
+}
+
 // ---------------------------------------------------------------------------
 // Task [037] AC2: the cursor that binds operation / filters / snapshot
 // ---------------------------------------------------------------------------
@@ -636,9 +649,11 @@ pub fn paginate_items(
     };
 
     let remaining = items.get(start..).unwrap_or(&[]);
-    // Effective item count: default to five, clamp to [0, 20]. A request of 0
-    // yields an empty page; a request above the cap is clamped to the cap.
-    let count_limit = limit.unwrap_or(DEFAULT_HIT_LIMIT).min(MAX_HIT_LIMIT);
+    // Effective item count: default to five, clamp to [0, 20] via the shared
+    // [`clamp_query_limit`] so this layer and the [038] `search_docs` request
+    // agree on the rule. A request of 0 yields an empty page; a request above
+    // the cap is clamped to the cap.
+    let count_limit = clamp_query_limit(limit);
 
     // Greedily fill up to `count_limit` items, stopping when the next item would
     // push the *complete serialized* page over the cap.
@@ -1247,6 +1262,64 @@ mod tests {
             "the last page has no next cursor"
         );
         assert!(!page.next_item_oversized);
+    }
+
+    // --- AC1: the shared default-and-clamp helper ------------------------
+
+    #[test]
+    fn clamp_query_limit_defaults_caps_and_honours_zero() {
+        // The single source of truth for the default-and-cap rule, shared by
+        // `paginate_items` and the [038] `search_docs` request. A `None` yields
+        // the default, a `0` is honoured, and a request above the cap is
+        // clamped — the three behaviours [038] F-038-1 asked for.
+        assert_eq!(
+            clamp_query_limit(None),
+            DEFAULT_HIT_LIMIT,
+            "None -> default"
+        );
+        assert_eq!(
+            clamp_query_limit(Some(MAX_HIT_LIMIT)),
+            MAX_HIT_LIMIT,
+            "a limit at the cap is kept"
+        );
+        assert_eq!(
+            clamp_query_limit(Some(MAX_HIT_LIMIT + 1)),
+            MAX_HIT_LIMIT,
+            "a limit above the cap is clamped to the cap"
+        );
+        assert_eq!(
+            clamp_query_limit(Some(100)),
+            MAX_HIT_LIMIT,
+            "a 100 clamps to 20"
+        );
+        assert_eq!(clamp_query_limit(Some(1)), 1, "a small limit is kept");
+        assert_eq!(clamp_query_limit(Some(0)), 0, "a 0 is honoured as empty");
+    }
+
+    #[test]
+    fn clamp_query_limit_matches_paginate_items_effective_limit() {
+        // The shared helper must drive `paginate_items` exactly: a 100 request
+        // returns the clamped cap of items and a `None` returns the default.
+        let items: Vec<Item> = (0..50).map(|_| Item::Hit(hit("ch1", 1.0))).collect();
+        let page = paginate_items(
+            Operation::Search,
+            &FilterKey::all(),
+            &snap("snap"),
+            &items,
+            Some(100),
+            None,
+        )
+        .expect("pagination is total");
+        // `paginate_items` and the shared helper agree on the effective limit.
+        assert_eq!(
+            page.returned,
+            clamp_query_limit(Some(100)),
+            "paginate_items uses the shared clamp"
+        );
+        assert_eq!(
+            page.returned, MAX_HIT_LIMIT,
+            "a 100 request returns the clamped cap"
+        );
     }
 
     // --- AC1: every page stays within the 32 KiB cap ---------------------
