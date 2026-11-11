@@ -297,6 +297,7 @@ fn find_source<'a>(manifest: &'a SnapshotManifest, source_id: &SourceId) -> Opti
 mod tests {
     use super::*;
     use crate::bundled::manifest;
+    use crate::model::{Continuation, SectionBuilder, Url};
 
     /// A section id that is well-formed but absent from the committed corpus —
     /// the "known-but-missing" input that must produce `UnknownSection`.
@@ -310,6 +311,25 @@ mod tests {
     /// `fetched_at`), used as the freshness evaluation point.
     fn seed_as_of() -> Instant {
         Instant::parse("2026-10-30T00:00:00Z").expect("valid instant")
+    }
+
+    /// A split-section fixture, built the way `src/model.rs` defines it: a
+    /// [`Section`] whose `continuation` is `Some(Continuation { part, parts })`
+    /// with a 1-based `part <= parts` (here, 2 of 3). Its derived id carries the
+    /// `$c<part>.<parts>` discriminator, so it is distinguishable from every
+    /// unsplit seed section (whose `continuation` is `None`).
+    fn split_section() -> Section {
+        SectionBuilder::new(
+            SourceId::new("api-guidelines").expect("a registry id builds a SourceId"),
+            "Split Document",
+            "long-document",
+            Url::new("https://rust-lang.github.io/api-guidelines/long-document.html")
+                .expect("a valid URL"),
+            "Part two of three of a split document; the continuation marks it as 2 of 3.",
+        )
+        .continuation(Continuation { part: 2, parts: 3 })
+        .build()
+        .expect("a well-formed split section")
     }
 
     // -- AC1: reads preserve Markdown, heading context, citations, snapshot
@@ -439,6 +459,63 @@ mod tests {
             read.freshness.stale,
             Some(false),
             "a 1-day-old check is fresh"
+        );
+    }
+
+    // -- AC1: continuation is preserved through the read --------------------
+
+    /// AC1: `get_section` preserves a split section's `continuation` *verbatim*.
+    ///
+    /// The read returns the full [`Section`] (it clones the record resolved
+    /// through the [`crate::search::SectionIndex`]), so a `Continuation { part,
+    /// parts }` round-trips through it untouched. Every seed section is unsplit
+    /// (`continuation == None`), so this is the only test that exercises a
+    /// non-`None` continuation through the read — the gap `F-036-3` names.
+    #[test]
+    fn get_section_preserves_the_continuation() {
+        let split = split_section();
+        let id = split.id.clone();
+
+        // The split section's id carries the `$c<part>.<parts>` discriminator —
+        // only a continuation section's id does — so resolving this id can only
+        // land on the split section.
+        assert!(
+            id.as_str().contains("$c2.3"),
+            "a split section's id carries the continuation discriminator"
+        );
+
+        // The read is total: push the split section into a snapshot and read it
+        // back by its id, composing freshness from the owning source the seed
+        // already carries.
+        let mut m = manifest();
+        m.body.sections.push(split.clone());
+        let read = get_section(&m, &id, seed_as_of(), StaleThreshold::default()).expect("resolves");
+
+        // AC1: the read returns the section verbatim, including the continuation
+        // sub-field — nothing recomputed, truncated, or defaulted.
+        assert_eq!(
+            read.section, split,
+            "the read must return the section verbatim"
+        );
+        assert_eq!(
+            read.section.continuation,
+            Some(Continuation { part: 2, parts: 3 }),
+            "a split section's continuation must survive the read verbatim"
+        );
+
+        // Contrast: the unsplit seed sections carry no continuation through the
+        // same read — the discrimination is real, not a default `None` that
+        // every read would hand back regardless of the record's contents.
+        let unsplit = get_section(
+            &manifest(),
+            &"api-guidelines/about".parse().expect("valid id"),
+            seed_as_of(),
+            StaleThreshold::default(),
+        )
+        .expect("a seed section resolves");
+        assert_eq!(
+            unsplit.section.continuation, None,
+            "an unsplit section carries no continuation"
         );
     }
 
