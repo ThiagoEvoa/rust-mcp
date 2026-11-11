@@ -11,8 +11,14 @@
 //! **dependency and reproducibility** family — `cargo add`, `cargo remove`,
 //! `cargo update`, `cargo generate-lockfile`, and `cargo fetch`, each citing its
 //! command section *and* the relevant dependency/feature/lockfile reference
-//! sections — and a [`CommandCatalog::combined`] that concatenates the two
-//! families.
+//! sections. [041] adds the **implementation and verification** family —
+//! `cargo check`, `cargo build`, `cargo run`, `cargo test`, `cargo bench`,
+//! `cargo fmt`, `cargo clippy`, `cargo doc`, and `cargo fix`, each citing its
+//! Cargo command section *and* the relevant tooling chapters (the rustfmt
+//! usage/configuration reference for `cargo fmt`, the Clippy usage/configuration
+//! chapters for `cargo clippy`, the rustdoc book for `cargo doc`, and the rustdoc
+//! documentation-tests chapter for `cargo test`'s doctests). A
+//! [`CommandCatalog::combined`] concatenates all three families.
 //!
 //! ## Two acceptance criteria (`plan.md` §5/§6/§350, issue [#39])
 //!
@@ -49,11 +55,11 @@
 //! section resolvable — with no upstream ingestion, network call, or
 //! real-client/agent trial.
 //!
-//! **Out of scope for [040]** (later work, deliberately *not* built here): the
-//! remaining `[041]`-`[044]` command families, the `[048]+` MCP tool/resource
-//! wiring, and any change to the ingestion pipeline (`crate::ingest`) — this
-//! module *defines* the catalog and its resolution seam and consumes the tested
-//! [`SectionIndex`].
+//! **Out of scope for [041]** (later work, deliberately *not* built here): the
+//! remaining `[042]`-`[044]` command families (packaging/release and
+//! toolchain/diagnostics), the `[048]+` MCP tool/resource wiring, and any change
+//! to the ingestion pipeline (`crate::ingest`) — this module *defines* the
+//! catalog and its resolution seam and consumes the tested [`SectionIndex`].
 
 // The module is the transitional catalog seam: its items are exercised by the
 // tests below and by `crate::coverage`'s record-level inspections, but are not
@@ -160,11 +166,13 @@ fn key_error_reason(err: &crate::model::SchemaError) -> String {
 ///
 /// [039] shipped one family — the project setup and inspection commands of
 /// `plan.md` §6 — via [`CommandCatalog::setup_inspection`]. [040] adds the
-/// dependency and reproducibility family via [`CommandCatalog::dependencies`] and
-/// a [`CommandCatalog::combined`] that concatenates the two. A catalog is a plain,
+/// dependency and reproducibility family via [`CommandCatalog::dependencies`];
+/// [041] adds the implementation and verification family via
+/// [`CommandCatalog::implementation_verification`]; and
+/// [`CommandCatalog::combined`] concatenates all three. A catalog is a plain,
 /// ordered, cloneable value (no interior mutability, no global): building it twice
 /// yields byte-identical entries, so lookups are pure and deterministic. The
-/// remaining families (`[041]`-`[044]`) are added as further catalogs or as a
+/// remaining families (`[042]`-`[044]`) are added as further catalogs or as a
 /// concatenation this module's lookup already handles.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandCatalog {
@@ -232,16 +240,54 @@ impl CommandCatalog {
         }
     }
 
-    /// The catalog as of `[040]`: the [setup and inspection](Self::setup_inspection)
-    /// family concatenated with the [dependency and reproducibility](Self::dependencies)
-    /// family, in that order — the two families `plan.md` §6 names first.
+    /// The complete implementation and verification family (`plan.md` §6):
+    /// `cargo check`, `cargo build`, `cargo run`, `cargo test`, `cargo bench`,
+    /// `cargo fmt`, `cargo clippy`, `cargo doc`, and `cargo fix`, in that fixed
+    /// order.
+    ///
+    /// Each entry cites its Cargo command section **and** the relevant tooling
+    /// chapters the command defers to — the rustfmt usage/configuration reference
+    /// for `cargo fmt`, the Clippy usage/configuration chapters for `cargo
+    /// clippy`, the rustdoc book for `cargo doc`, and the rustdoc
+    /// documentation-tests chapter for `cargo test`'s doctests (AC1's
+    /// "command-specific options and relevant configuration sections"). The
+    /// selection/forwarding notes and the check-vs-apply / doctest-vs-test /
+    /// documented-nightly distinctions are maintained metadata kept in **separate**
+    /// fields (AC2): applying source changes is [`EffectKind::SourceChange`] (the
+    /// `cargo fmt` and `cargo fix` apply commands), running project code is
+    /// [`EffectKind::ProjectCodeExecution`] (the `cargo run`/`cargo test`/
+    /// `cargo bench` execute commands), and producing build output is
+    /// [`EffectKind::ArtifactWrite`]. The check commands (`cargo check`,
+    /// `cargo clippy`, `cargo doc`, and `cargo test`'s non-doctest runs) carry no
+    /// source change; `cargo fix` and `cargo fmt` are the apply counterparts.
+    pub fn implementation_verification() -> CommandCatalog {
+        CommandCatalog {
+            entries: vec![
+                cargo_check(),
+                cargo_build(),
+                cargo_run(),
+                cargo_test(),
+                cargo_bench(),
+                cargo_fmt(),
+                cargo_clippy(),
+                cargo_doc(),
+                cargo_fix(),
+            ],
+        }
+    }
+
+    /// The catalog as of `[041]`: the [setup and inspection](Self::setup_inspection),
+    /// [dependency and reproducibility](Self::dependencies), and [implementation and
+    /// verification](Self::implementation_verification) families, in that order — the
+    /// three families `plan.md` §6 names first.
     ///
     /// This is the "a concatenation this module's lookup already handles" case:
     /// the lookup/resolve paths are unchanged by the concatenation, so every key
-    /// from either family still resolves exactly as it did in its own catalog.
+    /// from any family still resolves exactly as it did in its own catalog.
     pub fn combined() -> CommandCatalog {
         let mut entries = CommandCatalog::setup_inspection().entries;
         entries.extend(CommandCatalog::dependencies().entries);
+        entries.extend(CommandCatalog::implementation_verification().entries);
         CommandCatalog { entries }
     }
 
@@ -380,6 +426,59 @@ fn cargo_source() -> SourceId {
 fn cargo_section(chapter: &str) -> SectionId {
     SectionId::derive(&cargo_source(), chapter, None, None)
         .expect("a well-formed cargo chapter path derives a section id")
+}
+
+// ---------------------------------------------------------------------------
+// The clippy / rustfmt / rustdoc source helpers
+//
+// The implementation and verification family (`[041]`) cites not only the Cargo
+// command chapters but the tooling chapters the commands defer to: rustfmt's
+// approved static Markdown (ingested by `crate::ingest::rustfmt` at a pinned
+// commit), the Clippy book's usage/configuration chapters (ingested by
+// `crate::ingest::clippy_book`), and the rustdoc book's chapters (ingested by
+// `crate::ingest::rustdoc`). These helpers derive the same section ids the
+// ingestion stages do, so a cited section resolves against a real snapshot rather
+// than a fabricated placeholder.
+// ---------------------------------------------------------------------------
+
+/// The Clippy source id — the Clippy book (`doc.rust-lang.org/clippy/`).
+fn clippy_source() -> SourceId {
+    SourceId::new("clippy").expect("`clippy` is a registry source id")
+}
+
+/// The rustfmt source id — the approved static Markdown ingested at a pinned
+/// commit under `raw.githubusercontent.com/rust-lang/rustfmt/`.
+fn rustfmt_source() -> SourceId {
+    SourceId::new("rustfmt").expect("`rustfmt` is a registry source id")
+}
+
+/// The rustdoc source id — the rustdoc book (`doc.rust-lang.org/rustdoc/`).
+fn rustdoc_source() -> SourceId {
+    SourceId::new("rustdoc").expect("`rustdoc` is a registry source id")
+}
+
+/// Derive the section id for a Clippy Book chapter (`usage`, `configuration`,
+/// …), the way `crate::ingest::clippy_book::chapter_path` derives it, so the
+/// citation resolves against a real Clippy section.
+fn clippy_section(chapter: &str) -> SectionId {
+    SectionId::derive(&clippy_source(), chapter, None, None)
+        .expect("a well-formed clippy chapter path derives a section id")
+}
+
+/// Derive the section id for an approved rustfmt Markdown file (`README.md` /
+/// `Configurations.md`), the way `crate::ingest::rustfmt::chapter_path` derives
+/// it (the last raw-URL path segment is the approved file name).
+fn rustfmt_section(file: &str) -> SectionId {
+    SectionId::derive(&rustfmt_source(), file, None, None)
+        .expect("a well-formed rustfmt file derives a section id")
+}
+
+/// Derive the section id for a rustdoc Book chapter (`commands`,
+/// `documentation-tests`, `cargo-integration`, …), the way
+/// `crate::ingest::rustdoc::chapter_path` derives it.
+fn rustdoc_section(chapter: &str) -> SectionId {
+    SectionId::derive(&rustdoc_source(), chapter, None, None)
+        .expect("a well-formed rustdoc chapter path derives a section id")
 }
 
 fn cargo_new() -> CommandEntry {
@@ -802,6 +901,563 @@ fn cargo_fetch() -> CommandEntry {
                 detail: "may update `Cargo.lock` to match the manifest when the \
                          lockfile is missing or out of date (a lockfile change; it \
                          does not edit `Cargo.toml`)."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The nine implementation/verification entries
+//
+// [041] adds the third family of `plan.md` §6: `cargo check`, `cargo build`,
+// `cargo run`, `cargo test`, `cargo bench`, `cargo fmt`, `cargo clippy`,
+// `cargo doc`, and `cargo fix`. As with the earlier families, each entry is a
+// faithful, compact distillation of the upstream section that documents the
+// command, citing that command section *and* the relevant tooling chapter the
+// command defers to (rustfmt for `cargo fmt`, Clippy for `cargo clippy`, rustdoc
+// for `cargo doc`, and the rustdoc documentation-tests chapter for `cargo test`
+// doctests). The maintained metadata — selection/forwarding notes, the
+// check-vs-apply distinction, the doctest-vs-test distinction, and documented
+// nightly qualifications — lives in the separate `compatibility` and `effect_notes`
+// fields (AC2 / `plan.md` §6/§350). Upstream syntax/examples stay in their own
+// fields. No entry here is executed.
+// ---------------------------------------------------------------------------
+
+/// `cargo check`: compile to check for errors without producing final artifacts.
+///
+/// The *check* side of the check-vs-apply distinction: it writes intermediate
+/// build metadata to `target/` but produces no final artifact and runs no code.
+/// It does not execute a program, so it has no program-argument forwarding after
+/// `--`; compiler flags are supplied through `RUSTFLAGS` or the build options.
+fn cargo_check() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo check").expect("`cargo check` is a well-formed key"),
+        purpose: "Compile the current package to check for errors, without \
+                  generating a final artifact."
+            .to_string(),
+        upstream_sections: vec![cargo_section("commands/cargo-check")],
+        syntax: vec!["cargo check [OPTIONS]".to_string()],
+        examples: vec![
+            "`cargo check` compiles the package to the point of type-checking and \
+             borrow-checking and reports errors, producing no final binary or library \
+             artifact; it is the fast path for iterative development."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Cargo package or workspace: a manifest (`Cargo.toml`) is present in the \
+             working directory or an ancestor of it."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo check --help` for the version-specific option list. The \
+             selection flags `-p`/`--package`, `-w`/`--workspace`, `--target`, and \
+             `--features`/`--all-features` choose the package(s), target, and \
+             feature set to check; `--offline` resolves from the local cache only \
+             and `--locked` asserts the lockfile will not be changed."
+                .to_string(),
+            "`cargo check` does not execute a program, so it has no \
+             program-argument forwarding after `--`; compiler flags are supplied \
+             through `RUSTFLAGS` or the documented build options rather than a \
+             program-argument separator."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::ArtifactWrite,
+                detail: "writes intermediate build metadata to the `target/` \
+                         directory; per its documented behavior it produces no \
+                         final binary or library artifact and runs no code — the \
+                         check side of the check-vs-apply distinction."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "may download dependencies that are not yet cached; \
+                         `--offline` (or `--frozen`) prevents any download."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+/// `cargo build`: compile the package, producing its binary or library artifacts.
+///
+/// The *produce-artifacts* side of the check-vs-apply distinction: it writes the
+/// final build output to `target/`. Like `cargo check` it does not execute a
+/// program, so it has no program-argument forwarding after `--`.
+fn cargo_build() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo build").expect("`cargo build` is a well-formed key"),
+        purpose: "Compile the current package, producing its binary or library \
+                  artifacts."
+            .to_string(),
+        upstream_sections: vec![cargo_section("commands/cargo-build")],
+        syntax: vec!["cargo build [OPTIONS]".to_string()],
+        examples: vec![
+            "`cargo build` compiles the current package and writes its artifacts (a \
+             binary for a `bin` target, a library for a `lib` target) under \
+             `target/`; `cargo build --release` builds an optimized release \
+             profile."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Cargo package or workspace: a manifest (`Cargo.toml`) is present in the \
+             working directory or an ancestor of it."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo build --help` for the version-specific option list. The \
+             selection flags `-p`/`--package`, `-w`/`--workspace`, `--target`, and \
+             `--features`/`--all-features` choose the package(s), target, and \
+             feature set to build; `--offline` resolves from the local cache only \
+             and `--locked` asserts the lockfile will not be changed."
+                .to_string(),
+            "`cargo build` does not execute a program, so it has no \
+             program-argument forwarding after `--`; compiler flags are supplied \
+             through `RUSTFLAGS` or the documented build options rather than a \
+             program-argument separator."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::ArtifactWrite,
+                detail: "produces the final build artifacts (a binary and/or \
+                         library) under `target/` — the build-output side effect \
+                         that distinguishes `cargo build` from the check \
+                         commands."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "may download dependencies that are not yet cached; \
+                         `--offline` (or `--frozen`) prevents any download."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+/// `cargo run`: compile and then execute the package's binary.
+///
+/// The *execute* side of the family: it runs the package's own code, and — unlike
+/// `cargo check`/`cargo build` — it forwards the arguments after `--` to the
+/// program being run.
+fn cargo_run() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo run").expect("`cargo run` is a well-formed key"),
+        purpose: "Compile and then execute the current package's binary."
+            .to_string(),
+        upstream_sections: vec![cargo_section("commands/cargo-run")],
+        syntax: vec!["cargo run [OPTIONS] [-- <args>]".to_string()],
+        examples: vec![
+            "`cargo run` compiles the package and runs its binary; `cargo run -- \
+             --help` compiles the binary and forwards `--help` to the program — \
+             everything after `--` is the program's argument list."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Cargo package with an executable target (`bin` or `example`): a \
+             manifest (`Cargo.toml`) is present in the working directory or an \
+             ancestor of it."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo run --help` for the version-specific option list. The \
+             selection flags `-p`/`--package`, `-w`/`--workspace`, `--target`, and \
+             `--features`/`--all-features` choose the package(s), target, and \
+             feature set to run; `--offline` resolves from the local cache only and \
+             `--locked` asserts the lockfile will not be changed."
+                .to_string(),
+            "Argument forwarding: everything after `--` is forwarded to the program \
+             being run, and nothing before `--` is (those are cargo options). This \
+             is the one of the compile commands that executes a program, so it is \
+             the one that forwards program arguments."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::ProjectCodeExecution,
+                detail: "compiles the package and then runs its own binary (its \
+                         code executes) — the execute side of the family."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::ArtifactWrite,
+                detail: "produces build artifacts under `target/` before running."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "may download dependencies that are not yet cached; \
+                         `--offline` (or `--frozen`) prevents any download."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+/// `cargo test`: compile and run the package's tests, including doctests.
+///
+/// It both *executes* code (the doctest-vs-test and execute distinctions) and is
+/// the command that runs doctests: `cargo test` runs unit, integration, and
+/// doctests, while `cargo test --doc` runs doctests only. It cites the rustdoc
+/// book's documentation-tests chapter for the doctest behavior.
+fn cargo_test() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo test").expect("`cargo test` is a well-formed key"),
+        purpose: "Compile and run the current package's tests, including the \
+                  documentation tests (doctests)."
+            .to_string(),
+        upstream_sections: vec![
+            cargo_section("commands/cargo-test"),
+            rustdoc_section("documentation-tests"),
+        ],
+        syntax: vec!["cargo test [OPTIONS] [TESTNAME] [-- <args>]".to_string()],
+        examples: vec![
+            "`cargo test` compiles and runs the package's unit, integration, and \
+             doctests; `cargo test --lib` runs only the library's unit tests and \
+             `cargo test --bins` only the binaries' tests."
+                .to_string(),
+            "`cargo test --doc` runs the documentation tests (doctests) only — the \
+             doctest-vs-other-tests distinction; a doctest is the fenced code in a \
+             `///` or `//!` doc comment that `cargo test --doc` compiles and runs."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Cargo package or workspace with tests or doctests: a manifest \
+             (`Cargo.toml`) is present in the working directory or an ancestor of \
+             it."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo test --help` for the version-specific option list. The \
+             selection flags `-p`/`--package`, `-w`/`--workspace`, `--target`, and \
+             `--features`/`--all-features` choose the package(s), target, and \
+             feature set to test; `--offline` resolves from the local cache only and \
+             `--locked` asserts the lockfile will not be changed."
+                .to_string(),
+            "Doctests are the fenced code in doc comments: `cargo test` runs them \
+             together with the unit and integration tests, while `cargo test --doc` \
+             runs the doctests only. Arguments after `--` are forwarded to the test \
+             binary; `--lib`/`--bins`/`--tests`/`--doc` select which target types \
+             run."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::ProjectCodeExecution,
+                detail: "compiles and runs the package's tests — unit, \
+                         integration, and doctests execute — the execute side of \
+                         the family."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::ArtifactWrite,
+                detail: "produces the test-binary artifacts under `target/`."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "may download dependencies that are not yet cached; \
+                         `--offline` (or `--frozen`) prevents any download."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+/// `cargo bench`: compile and run the package's benchmarks.
+///
+/// It *executes* the benchmark code. The documented-nightly qualification here is
+/// precise: `cargo bench` itself is stable, but the built-in `#[bench]` test-
+/// harness macros were nightly-only and have since been removed, so stable
+/// benchmarking today uses the `criterion` crate — no nightly is required for
+/// `cargo bench` itself.
+fn cargo_bench() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo bench").expect("`cargo bench` is a well-formed key"),
+        purpose: "Compile and run the current package's benchmarks."
+            .to_string(),
+        upstream_sections: vec![cargo_section("commands/cargo-bench")],
+        syntax: vec!["cargo bench [OPTIONS] [BENCHNAME] [-- <args>]".to_string()],
+        examples: vec![
+            "`cargo bench` compiles and runs the package's `[[bench]]` targets; \
+             `cargo bench -- --exact` forwards `--exact` to the benchmark harness."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Cargo package with a `[[bench]]` target (commonly the `criterion` \
+             crate): a manifest (`Cargo.toml`) is present in the working directory \
+             or an ancestor of it."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "`cargo bench` is a stable command. The built-in `#[bench]` test-harness \
+             macros were nightly-only and have since been removed; stable \
+             benchmarking today uses the `criterion` crate with a `[[bench]]` \
+             target — no nightly toolchain is required for `cargo bench` itself, \
+             and no nightly requirement is claimed that the documentation does not \
+             state."
+                .to_string(),
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo bench --help` for the version-specific option list. The \
+             selection flags `-p`/`--package`, `-w`/`--workspace`, `--target`, and \
+             `--features`/`--all-features` choose the package(s), target, and \
+             feature set to benchmark; `--offline` resolves from the local cache \
+             only. Arguments after `--` are forwarded to the benchmark binary."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::ProjectCodeExecution,
+                detail: "compiles and runs the package's benchmarks — their code \
+                         executes."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::ArtifactWrite,
+                detail: "produces the benchmark-binary artifacts under `target/`."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "may download dependencies that are not yet cached; \
+                         `--offline` (or `--frozen`) prevents any download."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+/// `cargo fmt`: run rustfmt on the package to format its source.
+///
+/// The *apply* counterpart to `cargo fmt --check`: `cargo fmt` rewrites the
+/// source files (a source change), while `cargo fmt --check` (a.k.a. `-n`) runs
+/// the same pass without writing. It cites the rustfmt usage/configuration
+/// reference, and — a per-command scoping point — it does *not* document
+/// `--target` or `--features`, which are not rustfmt options.
+fn cargo_fmt() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo fmt").expect("`cargo fmt` is a well-formed key"),
+        purpose: "Run rustfmt on the current package to format its source code."
+            .to_string(),
+        upstream_sections: vec![
+            cargo_section("commands/cargo-fmt"),
+            rustfmt_section("README.md"),
+            rustfmt_section("Configurations.md"),
+        ],
+        syntax: vec!["cargo fmt [OPTIONS] [-- <rustfmt-args>]".to_string()],
+        examples: vec![
+            "`cargo fmt` runs rustfmt and rewrites the package's source files to the \
+             canonical formatting; `cargo fmt --check` (equivalently `-n`) reports \
+             what would change without writing — the check-vs-apply distinction for \
+             formatting."
+                .to_string(),
+            "`cargo fmt -- --config tab_spaces=4` forwards the rustfmt option after \
+             `--`; rustfmt's own options follow the separator, distinct from cargo's \
+             options before it."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Rust toolchain that includes `rustfmt` (for example via the \
+             `rustup` default components)."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "`cargo fmt` is a stable command that invokes `rustfmt`; only \
+             rustfmt's *unstable* options require a nightly rustfmt, not the command \
+             or its stable options. Cargo options (`--manifest-path`, `--all` / \
+             `--all-packages`, and `-p`/`--package`) select the package(s) to \
+             format and are distinct from rustfmt options, which follow `--`; \
+             `--target` and `--features` are not rustfmt options and are not \
+             forwarded to it."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::SourceChange,
+                detail: "rustfmt rewrites the package's source files to apply \
+                         canonical formatting (a source change); it does not change \
+                         the program's behavior. `cargo fmt --check` (a.k.a. `-n`) \
+                         performs the same analysis without writing."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+/// `cargo clippy`: run Clippy's lints on the package.
+///
+/// By default it is a *check*: it compiles the package under Clippy's lints and
+/// reports them without modifying source. `cargo clippy --fix` is the apply
+/// variant. It cites the Clippy book's usage and configuration chapters, and
+/// documents the lint-level nuance (`-A`/`-W`/`-D`/`-F`, groups, `-D warnings`).
+fn cargo_clippy() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo clippy").expect("`cargo clippy` is a well-formed key"),
+        purpose: "Run Clippy's lints on the current package to find things that \
+                  can be simplified or done better."
+            .to_string(),
+        upstream_sections: vec![
+            clippy_section("usage"),
+            clippy_section("configuration"),
+        ],
+        syntax: vec!["cargo clippy [OPTIONS] [-- <args>]".to_string()],
+        examples: vec![
+            "`cargo clippy --all-targets -D warnings` compiles the package under \
+             Clippy's lints and treats warnings as errors; `cargo clippy --fix` \
+             instead applies the lints' machine-applicable suggestions."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Rust toolchain that includes the `clippy` component (for example via \
+             `rustup`)."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "`cargo clippy` is a stable command; Clippy runs on a stable toolchain, \
+             although a small number of lints are nightly-only. Lint levels are set \
+             with `-A`/`--allow`, `-W`/`--warn`, `-D`/`--deny`, and \
+             `-F`/`--forbid` (or by lint group, e.g. `clippy::pedantic`); \
+             `-D warnings` makes warnings fatal. The full, version-specific option \
+             list is in `cargo clippy --help`."
+                .to_string(),
+            "Clippy/compiler options are distinct from cargo options: clippy lint \
+             levels and rustc flags are forwarded after `--`, while the selection \
+             flags `-p`/`--package`, `-w`/`--workspace`, `--target`, and \
+             `--features`/`--all-features` and `--offline`/`--locked` are cargo \
+             options before it."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::ArtifactWrite,
+                detail: "compiles the package under Clippy's lints, writing build \
+                         artifacts to `target/`; by default it *reports* lints and \
+                         does not modify source — a check. `cargo clippy --fix` \
+                         instead applies the machine-applicable suggestions."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "may download dependencies that are not yet cached; \
+                         `--offline` (or `--frozen`) prevents any download."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+/// `cargo doc`: generate the package's documentation by running rustdoc.
+///
+/// It produces an artifact (the generated HTML under `target/doc`) but does not
+/// modify source and does *not* run doctests — doctests are executed by `cargo
+/// test`, not by `cargo doc`. It cites the rustdoc book's cargo-integration
+/// chapter.
+fn cargo_doc() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo doc").expect("`cargo doc` is a well-formed key"),
+        purpose: "Generate the current package's documentation by running rustdoc."
+            .to_string(),
+        upstream_sections: vec![
+            cargo_section("commands/cargo-doc"),
+            rustdoc_section("cargo-integration"),
+        ],
+        syntax: vec!["cargo doc [OPTIONS] [-- <args>]".to_string()],
+        examples: vec![
+            "`cargo doc` runs rustdoc and writes HTML documentation for the \
+             package's library and binaries to `target/doc`; `cargo doc --open` \
+             opens the result in a browser and `cargo doc -- --help` forwards \
+             `--help` to rustdoc."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Rust toolchain that includes `rustdoc` (for example via `rustup`): \
+             a manifest (`Cargo.toml`) is present in the working directory or an \
+             ancestor of it."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "`cargo doc` is a stable command that invokes `rustdoc`; rustdoc options \
+             follow `--` and are distinct from cargo options. The selection flags \
+             `-p`/`--package`, `-w`/`--workspace`, `--target`, and \
+             `--features`/`--all-features` and `--offline`/`--locked` are cargo \
+             options. Doctests are *executed* by `cargo test`, not by `cargo doc`."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::ArtifactWrite,
+                detail: "runs rustdoc and writes generated HTML documentation under \
+                         `target/doc` (an artifact); it does not modify the source \
+                         tree and does not run the doctests."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "may download dependencies that are not yet cached; \
+                         `--offline` (or `--frozen`) prevents any download."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+/// `cargo fix`: apply the fixes the compiler suggests for the package's warnings.
+///
+/// The *apply* counterpart to the check commands: it rewrites the source files
+/// with the compiler's suggested fixes (a source change). It is stable and needs
+/// no nightly toolchain.
+fn cargo_fix() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo fix").expect("`cargo fix` is a well-formed key"),
+        purpose: "Apply the fixes the compiler suggests for the current \
+                  package's warnings."
+            .to_string(),
+        upstream_sections: vec![cargo_section("commands/cargo-fix")],
+        syntax: vec!["cargo fix [OPTIONS] [-- <args>]".to_string()],
+        examples: vec![
+            "`cargo fix` runs the compiler with its suggestions and applies the \
+             machine-applicable fixes to the source; review the diff afterward. \
+             `cargo fix --broken-code` allows applying fixes that may leave the code \
+             non-compiling."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "Run `cargo check` or `cargo build` first so the compiler has \
+             suggestions to apply; a manifest (`Cargo.toml`) is present in the \
+             working directory or an ancestor of it."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "`cargo fix` is a stable command that applies the compiler's own \
+             suggestions and requires no nightly toolchain. By default it refuses to \
+             leave the code in a non-compiling state; `--broken-code` relaxes that. \
+             The selection flags `-p`/`--package`, `-w`/`--workspace`, and \
+             `--target` are cargo options, and arguments after `--` are forwarded to \
+             the compiler."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::SourceChange,
+                detail: "applies the compiler's suggested fixes to the package's \
+                         source files (a source change — the apply counterpart to \
+                         the check commands); review the diff after running, and use \
+                         `--broken-code` only where a non-compiling intermediate is \
+                         acceptable."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "compiles the package to gather suggestions and may download \
+                         dependencies that are not yet cached; `--offline` (or \
+                         `--frozen`) prevents any download."
                     .to_string(),
             },
         ],
