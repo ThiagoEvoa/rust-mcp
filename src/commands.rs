@@ -55,10 +55,11 @@
 //! section resolvable — with no upstream ingestion, network call, or
 //! real-client/agent trial.
 //!
-//! **Out of scope for [041]** (later work, deliberately *not* built here): the
-//! remaining `[042]`-`[044]` command families (packaging/release and
-//! toolchain/diagnostics), the `[048]+` MCP tool/resource wiring, and any change
-//! to the ingestion pipeline (`crate::ingest`) — this module *defines* the
+//! **Out of scope for [042]** (later work, deliberately *not* built here): the
+//! remaining `[043]`-`[044]` command families (the toolchain/diagnostics family —
+//! `rustup show`, toolchain/override/component/target commands, and `rustc`/
+//! `rustfmt`/`rustdoc` usage), the `[048]+` MCP tool/resource wiring, and any
+//! change to the ingestion pipeline (`crate::ingest`) — this module *defines* the
 //! catalog and its resolution seam and consumes the tested [`SectionIndex`].
 
 // The module is the transitional catalog seam: its items are exercised by the
@@ -168,12 +169,14 @@ fn key_error_reason(err: &crate::model::SchemaError) -> String {
 /// `plan.md` §6 — via [`CommandCatalog::setup_inspection`]. [040] adds the
 /// dependency and reproducibility family via [`CommandCatalog::dependencies`];
 /// [041] adds the implementation and verification family via
-/// [`CommandCatalog::implementation_verification`]; and
-/// [`CommandCatalog::combined`] concatenates all three. A catalog is a plain,
+/// [`CommandCatalog::implementation_verification`]; [042] adds the packaging and
+/// release-preparation family via [`CommandCatalog::packaging_release`]; and
+/// [`CommandCatalog::combined`] concatenates all four. A catalog is a plain,
 /// ordered, cloneable value (no interior mutability, no global): building it twice
 /// yields byte-identical entries, so lookups are pure and deterministic. The
-/// remaining families (`[042]`-`[044]`) are added as further catalogs or as a
-/// concatenation this module's lookup already handles.
+/// remaining families (`[043]`-`[044]`, the toolchain/diagnostics family) are
+/// added as further catalogs or as a concatenation this module's lookup already
+/// handles.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandCatalog {
     entries: Vec<CommandEntry>,
@@ -276,10 +279,33 @@ impl CommandCatalog {
         }
     }
 
-    /// The catalog as of `[041]`: the [setup and inspection](Self::setup_inspection),
-    /// [dependency and reproducibility](Self::dependencies), and [implementation and
-    /// verification](Self::implementation_verification) families, in that order — the
-    /// three families `plan.md` §6 names first.
+    /// The complete packaging and release-preparation family (`plan.md` §6):
+    /// `cargo package` and `cargo publish`, in that fixed order.
+    ///
+    /// Each entry cites its Cargo command chapter **and** the relevant
+    /// release-preparation reference chapter(s) — `packaging` for `cargo package`,
+    /// and `publishing` with `registry` for `cargo publish` (AC1's "release-
+    /// preparation references"). Each entry keeps its prerequisites, version/
+    /// stability qualifications, and the **separately labeled** effect notes in
+    /// distinct fields (AC2): the possible publication is
+    /// [`EffectKind::Publication`] (`cargo publish` uploads the package to the
+    /// registry), the produced `.crate` archive is
+    /// [`EffectKind::ArtifactWrite`], and the possible verification download is
+    /// [`EffectKind::DependencyDownload`]. A maintained note makes the effect
+    /// explicit while stating that this is *documentation lookup* that does not
+    /// authorize, request, or perform a publication — the calling agent decides
+    /// whether to run `cargo publish` through its own terminal tools.
+    pub fn packaging_release() -> CommandCatalog {
+        CommandCatalog {
+            entries: vec![cargo_package(), cargo_publish()],
+        }
+    }
+
+    /// The catalog as of `[042]`: the [setup and inspection](Self::setup_inspection),
+    /// [dependency and reproducibility](Self::dependencies), [implementation and
+    /// verification](Self::implementation_verification), and [packaging and release-
+    /// preparation](Self::packaging_release) families, in that order — the four
+    /// families `plan.md` §6 names first.
     ///
     /// This is the "a concatenation this module's lookup already handles" case:
     /// the lookup/resolve paths are unchanged by the concatenation, so every key
@@ -288,6 +314,7 @@ impl CommandCatalog {
         let mut entries = CommandCatalog::setup_inspection().entries;
         entries.extend(CommandCatalog::dependencies().entries);
         entries.extend(CommandCatalog::implementation_verification().entries);
+        entries.extend(CommandCatalog::packaging_release().entries);
         CommandCatalog { entries }
     }
 
@@ -665,6 +692,19 @@ fn registry_section() -> SectionId {
     cargo_section("registry")
 }
 
+/// The Cargo Book `packaging` reference chapter — the release-preparation
+/// reference a `cargo package` entry cites alongside its command chapter.
+fn packaging_section() -> SectionId {
+    cargo_section("packaging")
+}
+
+/// The Cargo Book `publishing` reference chapter — the release-preparation
+/// reference a `cargo publish` entry cites alongside its command chapter and the
+/// `registry` (package sources) reference.
+fn publishing_section() -> SectionId {
+    cargo_section("publishing")
+}
+
 fn cargo_add() -> CommandEntry {
     CommandEntry {
         key: CommandKey::new("cargo add").expect("`cargo add` is a well-formed key"),
@@ -908,6 +948,168 @@ fn cargo_fetch() -> CommandEntry {
 }
 
 // ---------------------------------------------------------------------------
+// The two packaging / release-preparation entries
+//
+// [042] adds the fourth family of `plan.md` §6: `cargo package` and
+// `cargo publish`, with the documented `--dry-run` behavior of `cargo publish`.
+// As with the earlier families, each entry is a faithful, compact distillation of
+// the Cargo Book section that documents the command, citing that command chapter
+// *and* the relevant release-preparation reference chapter(s) — `packaging` for
+// `cargo package`, `publishing` and `registry` for `cargo publish` (AC1). The
+// possible publication effects are made explicit via an `EffectKind::Publication`
+// note, and a separate maintained note states that this is *documentation lookup*
+// that does not authorize, request, or perform a publication (AC2 / `plan.md`
+// §6/§350). Upstream syntax/examples stay in their own fields. No entry here is
+// executed: the catalog selects documentation, and the calling agent runs these
+// commands through its own terminal tools.
+// ---------------------------------------------------------------------------
+
+/// `cargo package`: package the current package into a distributable `.crate`
+/// archive.
+///
+/// The *package* side of release preparation: it builds a distributable
+/// `target/<name>-<version>.crate` tarball and, by default, verifies the package
+/// is distributable. It packages but does *not* publish — uploading is
+/// `cargo publish`.
+fn cargo_package() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo package").expect("`cargo package` is a well-formed key"),
+        purpose: "Package the current package into a distributable `.crate` archive."
+            .to_string(),
+        upstream_sections: vec![
+            cargo_section("commands/cargo-package"),
+            packaging_section(),
+        ],
+        syntax: vec!["cargo package [OPTIONS]".to_string()],
+        examples: vec![
+            "`cargo package` verifies the current package and writes a distributable \
+             `.crate` tarball to `target/`; `cargo package --list` lists the files that \
+             would be included without creating the archive; `--no-verify` skips the \
+             verification build and `--allow-dirty` packs a working tree that has local \
+             changes."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Cargo package with a complete manifest (`Cargo.toml`) whose `name`, \
+             `version`, and license are set: packaging verifies these before producing \
+             the archive."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo package --help` for the version-specific option list. `--list` lists \
+             the files that would be packaged without creating the archive, `--no-verify` \
+             skips the verification build, and `--allow-dirty` packs a working tree with \
+             local or uncommitted changes."
+                .to_string(),
+            "`cargo package` produces the distributable `.crate` archive but does not \
+             publish or upload it — uploading is `cargo publish`. Retrieving this entry \
+             is documentation lookup: it surfaces packaging guidance and does not \
+             authorize, request, or perform a publication; the calling agent decides \
+             whether to run `cargo package` (and, later, `cargo publish`) through its own \
+             terminal tools."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::ArtifactWrite,
+                detail: "produces a distributable `.crate` tarball under `target/` \
+                         (the packaging artifact); it packages but does not publish or \
+                         upload — uploading is `cargo publish`.".to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "the default verification build may download dependencies that \
+                         are not yet cached; `--offline` (or `--frozen`) prevents any \
+                         download. `--no-verify` skips the verification build.".to_string(),
+            },
+        ],
+    }
+}
+
+/// `cargo publish`: package and upload the current package to the configured
+/// registry.
+///
+/// The *publish* side of release preparation: it packages the crate (as `cargo
+/// package` does) and, by default, uploads the resulting `.crate` to the
+/// configured registry — a publication. The documented `--dry-run` behavior is
+/// *prepare-only*: it performs the same packaging and verification but does not
+/// upload, reporting what would be published instead. The possible publication
+/// effect is made explicit via an `EffectKind::Publication` note, and a separate
+/// maintained note states that this is *documentation lookup* that does not
+/// authorize, request, or perform a publication (AC2).
+fn cargo_publish() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo publish").expect("`cargo publish` is a well-formed key"),
+        purpose: "Package and upload the current package to the configured registry."
+            .to_string(),
+        upstream_sections: vec![
+            cargo_section("commands/cargo-publish"),
+            publishing_section(),
+            registry_section(),
+        ],
+        syntax: vec!["cargo publish [OPTIONS]".to_string()],
+        examples: vec![
+            "`cargo publish` packages the current package (as `cargo package` does) and \
+             uploads the resulting `.crate` to the configured registry; \
+             `cargo publish --dry-run` performs the same packaging and verification but \
+             does NOT upload — it reports what would be published."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A publishable package — a complete manifest, a valid version, and a registry \
+             name not already taken — plus registry authentication: a configured registry \
+             token or credential. The default registry is crates.io."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo publish --help` for the version-specific option list. The registry is \
+             selected with `--registry` and authenticated with `--token` (or a configured \
+             credential); `--no-verify` skips the verification build. `--dry-run` performs \
+             the packaging and verification but does NOT upload — it reports what would be \
+             published. Publishing is the *default* behavior: omitting `--dry-run` is what \
+             uploads, so `--dry-run` is the prepare-only form (there is no `--no-dry-run` \
+             flag — the default already publishes)."
+                .to_string(),
+            "Release-preparation guidance is documentation lookup: retrieving this entry \
+             surfaces documentation and does not authorize, request, or perform a \
+             publication. No registry upload happens as a result of this lookup; the \
+             calling agent decides whether to run `cargo publish` through its own terminal \
+             tools. The effect note below names the possible publication effect; it is not \
+             an authorization."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::Publication,
+                detail: "uploads the packaged `.crate` to the configured registry (by \
+                         default crates.io) — a publication that reaches the registry and \
+                         its downstream users. This is the *default* behavior; \
+                         `cargo publish --dry-run` performs the same packaging and \
+                         verification but does NOT upload, reporting what would be \
+                         published instead. This note names the possible publication effect; \
+                         it is documentation, not an authorization — the lookup neither \
+                         authorizes nor performs a publication.".to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::ArtifactWrite,
+                detail: "packages the crate into a distributable `.crate` archive under \
+                         `target/` (as `cargo package` does) before publishing; \
+                         `--no-verify` skips the default verification build.".to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "the verification build may download dependencies that are not yet \
+                         cached; `--offline` (or `--frozen`) prevents any download. A \
+                         `--dry-run` run still downloads for the verification but uploads \
+                         nothing.".to_string(),
+            },
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The nine implementation/verification entries
 //
 // [041] adds the third family of `plan.md` §6: `cargo check`, `cargo build`,
@@ -922,6 +1124,18 @@ fn cargo_fetch() -> CommandEntry {
 // nightly qualifications — lives in the separate `compatibility` and `effect_notes`
 // fields (AC2 / `plan.md` §6/§350). Upstream syntax/examples stay in their own
 // fields. No entry here is executed.
+//
+// [042] adds the fourth family — packaging and release preparation:
+// `cargo package` and `cargo publish`, with the documented `--dry-run` behavior of
+// `cargo publish` (it packages and verifies but does not upload; publishing is the
+// default). Each entry cites its command chapter *and* the relevant
+// release-preparation reference chapters (`packaging` for `cargo package`,
+// `publishing` and `registry` for `cargo publish`). The possible publication
+// effects are made explicit via an [`EffectKind::Publication`] effect note, and a
+// separate maintained note states that this is *documentation lookup* that does
+// not authorize, request, or perform a publication — the calling agent decides
+// whether to run `cargo publish` through its own terminal tools. No entry here is
+// executed.
 // ---------------------------------------------------------------------------
 
 /// `cargo check`: compile to check for errors without producing final artifacts.
