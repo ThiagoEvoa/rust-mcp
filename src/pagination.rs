@@ -710,11 +710,6 @@ pub fn paginate_items(
 // Task [037] AC1/AC2: clip an over-cap body, carrying the remainder
 // ---------------------------------------------------------------------------
 
-/// Room reserved within the cap for a body part's metadata — the envelope plus the
-/// continuation cursor token — so a clipped body part's *complete serialized*
-/// size stays within the cap even though [`clip_body`] bounds only the body.
-const BODY_METADATA_RESERVE: usize = 1024;
-
 /// The first page of a body that is too large for one response: the leading
 /// `body` that fits under the cap, plus a continuation that carries the remainder.
 ///
@@ -766,31 +761,105 @@ struct SerializedBodyPart {
 ///
 /// The cut is on a **character boundary** (never splitting a multi-byte UTF-8
 /// code point), and the returned body is bounded so the part's *complete
-/// serialized* size stays within the cap. When a remainder exists, `next` is a
-/// cursor bound to `op`/`filter`/`snapshot_id` whose offset is the byte position
-/// of the remainder; resuming it re-clips the tail. Total: any body — empty,
-/// single-line, multi-line, multi-byte — clips without panicking.
+/// serialized* size — the JSON the server would actually send, **including JSON
+/// escaping** — stays within the cap. Because escaping *expands* a body (a
+/// backslash or quote becomes `\\`/`\\"`, a control character becomes `\\uXXXX`),
+/// the cut is chosen on the *emitted* size, not the raw byte length: a body
+/// dense in escapable characters is shrunk until its serialized part fits, so an
+/// escaping-dense body can never push the cap past [`MAX_RESPONSE_BYTES`] even
+/// though its raw length is a fraction of the cap. (This is the F-037-1 fix:
+/// a fixed raw-byte reserve was unsafe because `\\`/`\"`/`\\uXXXX` can
+/// multiply the emitted size well past the reserved room.)
+///
+/// When a remainder exists, `next` is a cursor bound to `op`/`filter`/
+/// `snapshot_id` whose offset is the byte position of the remainder; resuming it
+/// re-clips the tail. Total: any body — empty, single-line, multi-line,
+/// multi-byte, or escaping-dense — clips without panicking.
 pub fn clip_body(
     body: &str,
     op: Operation,
     filter: &FilterKey,
     snapshot_id: &SnapshotId,
 ) -> BodyPart {
-    let max_body = MAX_RESPONSE_BYTES.saturating_sub(BODY_METADATA_RESERVE);
-    let cut = char_boundary_at_or_below(body, max_body);
-    if cut >= body.len() {
-        BodyPart {
-            body: body.to_string(),
-            truncated: false,
-            next: None,
-        }
-    } else {
-        BodyPart {
-            body: body[..cut].to_string(),
-            truncated: true,
-            next: Some(Cursor::mint(op, filter, snapshot_id, cut)),
+    // If the whole body fits within the cap with no continuation, return it
+    // whole. This is the only path that returns a non-truncated part.
+    let whole = BodyPart {
+        body: body.to_string(),
+        truncated: false,
+        next: None,
+    };
+    if whole.serialized_size() <= MAX_RESPONSE_BYTES {
+        return whole;
+    }
+
+    // The body is too large on its complete *serialized*, escaped bytes to send
+    // whole. Find the largest character boundary `cut` such that a part holding
+    // `body[..cut]` with its continuation cursor stays within the cap. A
+    // serialized body size is monotone non-decreasing in the prefix length
+    // (escaping is position-independent, and a longer prefix never shortens the
+    // token), so the largest fitting `cut` is found by a binary search over the
+    // byte range; each probe snaps down to a character boundary, so a multi-byte
+    // code point is never split. When the region between `lo` and `hi` collapses
+    // to a single code point wider than the search gap, the snapped probe returns
+    // `lo` and the search would stall, so it steps to that code point's end
+    // instead — the loop always advances. The empty part (`lo`) always fits and
+    // the whole body (`hi`) never does: the two sentinels the search closes on.
+    let mut lo = 0usize;
+    let mut hi = body.len();
+    while lo + 1 < hi {
+        let mid = lo + (hi - lo) / 2;
+        let probe = char_boundary_at_or_below(body, mid);
+        if probe == lo {
+            // The region `(lo, hi)` holds at most one code point wider than the
+            // gap; step to that code point's end so the boundary advances and a
+            // multi-byte run can never stall the search.
+            let end = next_char_boundary(body, lo);
+            if end >= hi {
+                break;
+            }
+            if body_part_fits(body, end, op, filter, snapshot_id) {
+                lo = end;
+            } else {
+                hi = end;
+            }
+        } else if body_part_fits(body, probe, op, filter, snapshot_id) {
+            lo = probe;
+        } else {
+            hi = probe;
         }
     }
+    let mut cut = lo;
+    // Forward progress: for the 32 KiB cap the first code point always fits, so
+    // this never fires; it keeps the continuation from looping on a body whose
+    // smallest part would still overflow a (hypothetically) tiny cap.
+    if cut == 0 {
+        cut = next_char_boundary(body, 0);
+    }
+    BodyPart {
+        body: body[..cut].to_string(),
+        truncated: true,
+        next: Some(Cursor::mint(op, filter, snapshot_id, cut)),
+    }
+}
+
+/// Whether a part holding `body[..cut]` plus its continuation cursor stays within
+/// the response cap, measured on the part's *complete serialized* (escaped) bytes
+/// — the AC1 measurement. `cut` must be a character boundary of `body`; the probe
+/// that feeds it ([`char_boundary_at_or_below`]) guarantees that, so the slice
+/// never splits a code point.
+fn body_part_fits(
+    body: &str,
+    cut: usize,
+    op: Operation,
+    filter: &FilterKey,
+    snapshot_id: &SnapshotId,
+) -> bool {
+    let part = BodyPart {
+        body: body[..cut].to_string(),
+        truncated: true,
+        next: Some(Cursor::mint(op, filter, snapshot_id, cut)),
+    };
+    part.serialized_size() <= MAX_RESPONSE_BYTES
 }
 
 /// The largest index `<= max` that is a character boundary of `s`.
@@ -806,6 +875,16 @@ fn char_boundary_at_or_below(s: &str, max: usize) -> usize {
         cut -= 1;
     }
     cut
+}
+
+/// The character boundary after `from` (a byte offset that is itself a character
+/// boundary): `from` plus the length of the following code point, or `s.len()`
+/// when `from` is already the end. `from` must be a char boundary.
+fn next_char_boundary(s: &str, from: usize) -> usize {
+    from + s
+        .get(from..)
+        .and_then(|rest| rest.chars().next())
+        .map_or(0, |c| c.len_utf8())
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,9 +1253,12 @@ mod tests {
 
     #[test]
     fn every_page_stays_within_the_response_cap() {
-        // Ten items of ~5 KiB each: enough that the default of five would exceed
-        // the cap, forcing the byte cap to cut the page short.
-        let big = "x".repeat(5 * 1024);
+        // Ten items of ~20 KiB each: *two* items would exceed the cap, so the
+        // byte cap — not the five-item count — cuts every page to a single item.
+        // This forces AC1: the page stops on serialized size (the count of five
+        // is not the binding constraint), and the cursor walk still returns every
+        // item exactly once.
+        let big = "x".repeat(20 * 1024);
         let items: Vec<Item> = (0..10)
             .map(|i| Item::Section(Box::new(read(&format!("s{i}"), &big, "snap"))))
             .collect();
@@ -1200,6 +1282,12 @@ mod tests {
                 page.serialized_bytes(),
                 MAX_RESPONSE_BYTES
             );
+            // The byte cap, not the five-item count, is what bounds the page: a
+            // single 20 KiB item fits but two do not, so every page holds one.
+            assert_eq!(
+                page.returned, 1,
+                "the byte cap bounds the page to one item, not the count limit"
+            );
             total += page.returned;
             pages += 1;
             if page.truncated {
@@ -1210,7 +1298,10 @@ mod tests {
             assert!(pages <= 100, "the walk must terminate");
         }
         assert_eq!(total, 10, "the walk returns every item exactly once");
-        assert!(pages >= 2, "ten 5 KiB items need at least two pages");
+        assert_eq!(
+            pages, 10,
+            "the byte cap bounds each page to one item, so ten items span ten pages"
+        );
     }
 
     #[test]
@@ -1306,6 +1397,140 @@ mod tests {
         // Reassembling the clipped head with the resumed tail is the original.
         let tail = &body[part.next.expect("a truncated part continues").offset()..];
         assert_eq!(part.body + tail, body);
+    }
+
+    // --- AC1: clip_body bounds escaping-dense bodies on serialized bytes ------
+
+    #[test]
+    fn clip_body_keeps_backslash_dense_bodies_within_the_cap() {
+        // F-037-1 regression: a body of backslashes serializes to twice its raw
+        // length (each backslash -> `\\`). The old raw-byte reserve cut at
+        // `MAX_RESPONSE_BYTES - 1024` raw, so a 32 768-byte backslash body cut to
+        // 31 744 raw serialized to ~63 565 bytes — far over the cap. clip_body now
+        // bounds on the *emitted* (serialized) size, so every part stays within the
+        // cap even though its raw length is a fraction of the cap.
+        let dense = "\\".repeat(MAX_RESPONSE_BYTES); // 32 768 raw backslashes
+        let mut offset = 0usize;
+        let mut reassembled = String::new();
+        let mut parts = 0usize;
+        loop {
+            let tail = &dense[offset..];
+            let part = clip_body(
+                tail,
+                Operation::SectionContinuation,
+                &FilterKey::section(&section("backslashes")),
+                &snap("snap"),
+            );
+            // The part's *complete serialized* size stays within the cap even
+            // though its raw length (a fraction of the cap) escapes to twice as
+            // many bytes.
+            assert!(
+                part.serialized_size() <= MAX_RESPONSE_BYTES,
+                "part {parts} is {} serialized bytes, over the {} cap (raw {})",
+                part.serialized_size(),
+                MAX_RESPONSE_BYTES,
+                part.body.len()
+            );
+            // A truncated part's raw length is well short of the raw cap: the
+            // bound is on serialized bytes, not raw length.
+            if part.truncated {
+                assert!(
+                    part.body.len() < MAX_RESPONSE_BYTES,
+                    "a truncated part's raw length is below the raw cap"
+                );
+            }
+            reassembled.push_str(&part.body);
+            parts += 1;
+            if part.truncated {
+                let next = part.next.expect("a truncated part has a continuation");
+                // The continuation offset is the remainder's start within `tail`,
+                // which equals the raw body just emitted; it must advance the
+                // global position (no stalling, no concealed clip).
+                assert_eq!(
+                    next.offset(),
+                    part.body.len(),
+                    "the continuation offset is the remainder's start within the tail"
+                );
+                assert!(
+                    !part.body.is_empty(),
+                    "each part emits progress; no stalling clip"
+                );
+                // The continuation is bound to the same section/snapshot.
+                assert!(
+                    next.verify(
+                        Operation::SectionContinuation,
+                        &FilterKey::section(&section("backslashes")),
+                        &snap("snap")
+                    )
+                    .is_ok()
+                );
+                offset += part.body.len();
+                assert!(parts <= 100, "the walk must terminate");
+            } else {
+                break;
+            }
+        }
+        assert_eq!(
+            reassembled, dense,
+            "the backslash-dense body reassembles intact"
+        );
+        assert!(
+            parts >= 2,
+            "an over-cap dense body yields at least two parts"
+        );
+    }
+
+    #[test]
+    fn clip_body_keeps_control_char_dense_bodies_within_the_cap() {
+        // A body of U+0001 control characters serializes to six times its raw
+        // length (each -> `\\u0001`): the most aggressive escaping. The bound on
+        // serialized size still keeps every part within the cap and reassembles.
+        let dense = "\u{1}".repeat(MAX_RESPONSE_BYTES); // 32 768 raw control chars
+        let mut offset = 0usize;
+        let mut reassembled = String::new();
+        let mut parts = 0usize;
+        loop {
+            let tail = &dense[offset..];
+            let part = clip_body(
+                tail,
+                Operation::SectionContinuation,
+                &FilterKey::section(&section("controls")),
+                &snap("snap"),
+            );
+            assert!(
+                part.serialized_size() <= MAX_RESPONSE_BYTES,
+                "part {parts} is {} serialized bytes, over the {} cap (raw {})",
+                part.serialized_size(),
+                MAX_RESPONSE_BYTES,
+                part.body.len()
+            );
+            reassembled.push_str(&part.body);
+            parts += 1;
+            if part.truncated {
+                let next = part.next.expect("a truncated part has a continuation");
+                assert_eq!(
+                    next.offset(),
+                    part.body.len(),
+                    "the continuation offset is the remainder's start within the tail"
+                );
+                assert!(
+                    !part.body.is_empty(),
+                    "each part emits progress; no stalling clip"
+                );
+                offset += part.body.len();
+                assert!(parts <= 100, "the walk must terminate");
+            } else {
+                break;
+            }
+        }
+        assert_eq!(
+            reassembled, dense,
+            "the control-char-dense body reassembles intact"
+        );
+        assert!(
+            parts >= 2,
+            "an over-cap dense body yields at least two parts"
+        );
     }
 
     #[test]
