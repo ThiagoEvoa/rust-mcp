@@ -974,12 +974,8 @@ fn cargo_fetch() -> CommandEntry {
 fn cargo_package() -> CommandEntry {
     CommandEntry {
         key: CommandKey::new("cargo package").expect("`cargo package` is a well-formed key"),
-        purpose: "Package the current package into a distributable `.crate` archive."
-            .to_string(),
-        upstream_sections: vec![
-            cargo_section("commands/cargo-package"),
-            packaging_section(),
-        ],
+        purpose: "Package the current package into a distributable `.crate` archive.".to_string(),
+        upstream_sections: vec![cargo_section("commands/cargo-package"), packaging_section()],
         syntax: vec!["cargo package [OPTIONS]".to_string()],
         examples: vec![
             "`cargo package` verifies the current package and writes a distributable \
@@ -1015,13 +1011,15 @@ fn cargo_package() -> CommandEntry {
                 kind: EffectKind::ArtifactWrite,
                 detail: "produces a distributable `.crate` tarball under `target/` \
                          (the packaging artifact); it packages but does not publish or \
-                         upload — uploading is `cargo publish`.".to_string(),
+                         upload — uploading is `cargo publish`."
+                    .to_string(),
             },
             EffectNote {
                 kind: EffectKind::DependencyDownload,
                 detail: "the default verification build may download dependencies that \
                          are not yet cached; `--offline` (or `--frozen`) prevents any \
-                         download. `--no-verify` skips the verification build.".to_string(),
+                         download. `--no-verify` skips the verification build."
+                    .to_string(),
             },
         ],
     }
@@ -1041,8 +1039,7 @@ fn cargo_package() -> CommandEntry {
 fn cargo_publish() -> CommandEntry {
     CommandEntry {
         key: CommandKey::new("cargo publish").expect("`cargo publish` is a well-formed key"),
-        purpose: "Package and upload the current package to the configured registry."
-            .to_string(),
+        purpose: "Package and upload the current package to the configured registry.".to_string(),
         upstream_sections: vec![
             cargo_section("commands/cargo-publish"),
             publishing_section(),
@@ -1090,20 +1087,23 @@ fn cargo_publish() -> CommandEntry {
                          verification but does NOT upload, reporting what would be \
                          published instead. This note names the possible publication effect; \
                          it is documentation, not an authorization — the lookup neither \
-                         authorizes nor performs a publication.".to_string(),
+                         authorizes nor performs a publication."
+                    .to_string(),
             },
             EffectNote {
                 kind: EffectKind::ArtifactWrite,
                 detail: "packages the crate into a distributable `.crate` archive under \
                          `target/` (as `cargo package` does) before publishing; \
-                         `--no-verify` skips the default verification build.".to_string(),
+                         `--no-verify` skips the default verification build."
+                    .to_string(),
             },
             EffectNote {
                 kind: EffectKind::DependencyDownload,
                 detail: "the verification build may download dependencies that are not yet \
                          cached; `--offline` (or `--frozen`) prevents any download. A \
                          `--dry-run` run still downloads for the verification but uploads \
-                         nothing.".to_string(),
+                         nothing."
+                    .to_string(),
             },
         ],
     }
@@ -1766,10 +1766,7 @@ mod tests {
     ];
 
     /// The two packaging/release-preparation keys, in the catalog's fixed order.
-    const PKG_FAMILY_KEYS: &[&str] = &[
-        "cargo package",
-        "cargo publish",
-    ];
+    const PKG_FAMILY_KEYS: &[&str] = &["cargo package", "cargo publish"];
 
     /// A fixture snapshot carrying exactly the sections the implementation/
     /// verification family cites: the eight Cargo command chapters (note there is
@@ -3287,7 +3284,9 @@ mod tests {
         let catalog = CommandCatalog::packaging_release();
         let manifest = pkg_fixture_snapshot();
 
-        let package = catalog.get("cargo package").expect("cargo package resolves");
+        let package = catalog
+            .get("cargo package")
+            .expect("cargo package resolves");
         assert!(
             package
                 .upstream_sections
@@ -3303,7 +3302,9 @@ mod tests {
             "cargo package cites the packaging release-preparation reference"
         );
 
-        let publish = catalog.get("cargo publish").expect("cargo publish resolves");
+        let publish = catalog
+            .get("cargo publish")
+            .expect("cargo publish resolves");
         assert!(
             publish
                 .upstream_sections
@@ -3342,7 +3343,9 @@ mod tests {
         // effect — it uploads the package to the registry — via the
         // `EffectKind::Publication` note, and the note names the concrete effect.
         let catalog = CommandCatalog::packaging_release();
-        let publish = catalog.get("cargo publish").expect("cargo publish resolves");
+        let publish = catalog
+            .get("cargo publish")
+            .expect("cargo publish resolves");
         let publication = publish
             .effect_notes
             .iter()
@@ -3365,7 +3368,9 @@ mod tests {
         // AC2 effect scoping: `cargo package` produces the `.crate` artifact but
         // carries NO Publication effect — it packages, it does not publish.
         let catalog = CommandCatalog::packaging_release();
-        let package = catalog.get("cargo package").expect("cargo package resolves");
+        let package = catalog
+            .get("cargo package")
+            .expect("cargo package resolves");
         assert!(
             package
                 .effect_notes
@@ -3388,7 +3393,9 @@ mod tests {
         // packages and verifies and reports, but does NOT upload; publishing is
         // the default.
         let catalog = CommandCatalog::packaging_release();
-        let publish = catalog.get("cargo publish").expect("cargo publish resolves");
+        let publish = catalog
+            .get("cargo publish")
+            .expect("cargo publish resolves");
         let text = maintained_text(publish);
         assert!(
             text.contains("--dry-run"),
