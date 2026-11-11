@@ -21,6 +21,9 @@
 //!   validation, IDs, bounded reads, and atomic publication (`[025]`-`[028]`),
 //! - [`runtime`] — the *read* side of snapshot selection: the fixed, immutable
 //!   startup snapshot with a bundled fallback (`[029]`),
+//! - [`reads`] — the complete section and checklist reads: resolving a
+//!   server-issued section id and an upstream checklist category to their full,
+//!   retrievable records, with freshness and snapshot identity (`[036]`),
 //! - [`status`] — corpus status and freshness reporting: the snapshot identity,
 //!   source/section counts, and per-source staleness over a configurable
 //!   threshold (`[030]`),
@@ -45,6 +48,7 @@ mod logging;
 mod mcp;
 mod model;
 mod provenance;
+mod reads;
 mod registry;
 mod runtime;
 mod search;
