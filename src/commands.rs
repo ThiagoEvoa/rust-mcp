@@ -55,10 +55,11 @@
 //! section resolvable — with no upstream ingestion, network call, or
 //! real-client/agent trial.
 //!
-//! **Out of scope for [041]** (later work, deliberately *not* built here): the
-//! remaining `[042]`-`[044]` command families (packaging/release and
-//! toolchain/diagnostics), the `[048]+` MCP tool/resource wiring, and any change
-//! to the ingestion pipeline (`crate::ingest`) — this module *defines* the
+//! **Out of scope for [042]** (later work, deliberately *not* built here): the
+//! remaining `[043]`-`[044]` command families (the toolchain/diagnostics family —
+//! `rustup show`, toolchain/override/component/target commands, and `rustc`/
+//! `rustfmt`/`rustdoc` usage), the `[048]+` MCP tool/resource wiring, and any
+//! change to the ingestion pipeline (`crate::ingest`) — this module *defines* the
 //! catalog and its resolution seam and consumes the tested [`SectionIndex`].
 
 // The module is the transitional catalog seam: its items are exercised by the
@@ -168,12 +169,14 @@ fn key_error_reason(err: &crate::model::SchemaError) -> String {
 /// `plan.md` §6 — via [`CommandCatalog::setup_inspection`]. [040] adds the
 /// dependency and reproducibility family via [`CommandCatalog::dependencies`];
 /// [041] adds the implementation and verification family via
-/// [`CommandCatalog::implementation_verification`]; and
-/// [`CommandCatalog::combined`] concatenates all three. A catalog is a plain,
+/// [`CommandCatalog::implementation_verification`]; [042] adds the packaging and
+/// release-preparation family via [`CommandCatalog::packaging_release`]; and
+/// [`CommandCatalog::combined`] concatenates all four. A catalog is a plain,
 /// ordered, cloneable value (no interior mutability, no global): building it twice
 /// yields byte-identical entries, so lookups are pure and deterministic. The
-/// remaining families (`[042]`-`[044]`) are added as further catalogs or as a
-/// concatenation this module's lookup already handles.
+/// remaining families (`[043]`-`[044]`, the toolchain/diagnostics family) are
+/// added as further catalogs or as a concatenation this module's lookup already
+/// handles.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandCatalog {
     entries: Vec<CommandEntry>,
@@ -276,10 +279,33 @@ impl CommandCatalog {
         }
     }
 
-    /// The catalog as of `[041]`: the [setup and inspection](Self::setup_inspection),
-    /// [dependency and reproducibility](Self::dependencies), and [implementation and
-    /// verification](Self::implementation_verification) families, in that order — the
-    /// three families `plan.md` §6 names first.
+    /// The complete packaging and release-preparation family (`plan.md` §6):
+    /// `cargo package` and `cargo publish`, in that fixed order.
+    ///
+    /// Each entry cites its Cargo command chapter **and** the relevant
+    /// release-preparation reference chapter(s) — `packaging` for `cargo package`,
+    /// and `publishing` with `registry` for `cargo publish` (AC1's "release-
+    /// preparation references"). Each entry keeps its prerequisites, version/
+    /// stability qualifications, and the **separately labeled** effect notes in
+    /// distinct fields (AC2): the possible publication is
+    /// [`EffectKind::Publication`] (`cargo publish` uploads the package to the
+    /// registry), the produced `.crate` archive is
+    /// [`EffectKind::ArtifactWrite`], and the possible verification download is
+    /// [`EffectKind::DependencyDownload`]. A maintained note makes the effect
+    /// explicit while stating that this is *documentation lookup* that does not
+    /// authorize, request, or perform a publication — the calling agent decides
+    /// whether to run `cargo publish` through its own terminal tools.
+    pub fn packaging_release() -> CommandCatalog {
+        CommandCatalog {
+            entries: vec![cargo_package(), cargo_publish()],
+        }
+    }
+
+    /// The catalog as of `[042]`: the [setup and inspection](Self::setup_inspection),
+    /// [dependency and reproducibility](Self::dependencies), [implementation and
+    /// verification](Self::implementation_verification), and [packaging and release-
+    /// preparation](Self::packaging_release) families, in that order — the four
+    /// families `plan.md` §6 names first.
     ///
     /// This is the "a concatenation this module's lookup already handles" case:
     /// the lookup/resolve paths are unchanged by the concatenation, so every key
@@ -288,6 +314,7 @@ impl CommandCatalog {
         let mut entries = CommandCatalog::setup_inspection().entries;
         entries.extend(CommandCatalog::dependencies().entries);
         entries.extend(CommandCatalog::implementation_verification().entries);
+        entries.extend(CommandCatalog::packaging_release().entries);
         CommandCatalog { entries }
     }
 
@@ -665,6 +692,19 @@ fn registry_section() -> SectionId {
     cargo_section("registry")
 }
 
+/// The Cargo Book `packaging` reference chapter — the release-preparation
+/// reference a `cargo package` entry cites alongside its command chapter.
+fn packaging_section() -> SectionId {
+    cargo_section("packaging")
+}
+
+/// The Cargo Book `publishing` reference chapter — the release-preparation
+/// reference a `cargo publish` entry cites alongside its command chapter and the
+/// `registry` (package sources) reference.
+fn publishing_section() -> SectionId {
+    cargo_section("publishing")
+}
+
 fn cargo_add() -> CommandEntry {
     CommandEntry {
         key: CommandKey::new("cargo add").expect("`cargo add` is a well-formed key"),
@@ -908,6 +948,168 @@ fn cargo_fetch() -> CommandEntry {
 }
 
 // ---------------------------------------------------------------------------
+// The two packaging / release-preparation entries
+//
+// [042] adds the fourth family of `plan.md` §6: `cargo package` and
+// `cargo publish`, with the documented `--dry-run` behavior of `cargo publish`.
+// As with the earlier families, each entry is a faithful, compact distillation of
+// the Cargo Book section that documents the command, citing that command chapter
+// *and* the relevant release-preparation reference chapter(s) — `packaging` for
+// `cargo package`, `publishing` and `registry` for `cargo publish` (AC1). The
+// possible publication effects are made explicit via an `EffectKind::Publication`
+// note, and a separate maintained note states that this is *documentation lookup*
+// that does not authorize, request, or perform a publication (AC2 / `plan.md`
+// §6/§350). Upstream syntax/examples stay in their own fields. No entry here is
+// executed: the catalog selects documentation, and the calling agent runs these
+// commands through its own terminal tools.
+// ---------------------------------------------------------------------------
+
+/// `cargo package`: package the current package into a distributable `.crate`
+/// archive.
+///
+/// The *package* side of release preparation: it builds a distributable
+/// `target/<name>-<version>.crate` tarball and, by default, verifies the package
+/// is distributable. It packages but does *not* publish — uploading is
+/// `cargo publish`.
+fn cargo_package() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo package").expect("`cargo package` is a well-formed key"),
+        purpose: "Package the current package into a distributable `.crate` archive.".to_string(),
+        upstream_sections: vec![cargo_section("commands/cargo-package"), packaging_section()],
+        syntax: vec!["cargo package [OPTIONS]".to_string()],
+        examples: vec![
+            "`cargo package` verifies the current package and writes a distributable \
+             `.crate` tarball to `target/`; `cargo package --list` lists the files that \
+             would be included without creating the archive; `--no-verify` skips the \
+             verification build and `--allow-dirty` packs a working tree that has local \
+             changes."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Cargo package with a complete manifest (`Cargo.toml`) whose `name`, \
+             `version`, and license are set: packaging verifies these before producing \
+             the archive."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo package --help` for the version-specific option list. `--list` lists \
+             the files that would be packaged without creating the archive, `--no-verify` \
+             skips the verification build, and `--allow-dirty` packs a working tree with \
+             local or uncommitted changes."
+                .to_string(),
+            "`cargo package` produces the distributable `.crate` archive but does not \
+             publish or upload it — uploading is `cargo publish`. Retrieving this entry \
+             is documentation lookup: it surfaces packaging guidance and does not \
+             authorize, request, or perform a publication; the calling agent decides \
+             whether to run `cargo package` (and, later, `cargo publish`) through its own \
+             terminal tools."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::ArtifactWrite,
+                detail: "produces a distributable `.crate` tarball under `target/` \
+                         (the packaging artifact); it packages but does not publish or \
+                         upload — uploading is `cargo publish`."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "the default verification build may download dependencies that \
+                         are not yet cached; `--offline` (or `--frozen`) prevents any \
+                         download. `--no-verify` skips the verification build."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+/// `cargo publish`: package and upload the current package to the configured
+/// registry.
+///
+/// The *publish* side of release preparation: it packages the crate (as `cargo
+/// package` does) and, by default, uploads the resulting `.crate` to the
+/// configured registry — a publication. The documented `--dry-run` behavior is
+/// *prepare-only*: it performs the same packaging and verification but does not
+/// upload, reporting what would be published instead. The possible publication
+/// effect is made explicit via an `EffectKind::Publication` note, and a separate
+/// maintained note states that this is *documentation lookup* that does not
+/// authorize, request, or perform a publication (AC2).
+fn cargo_publish() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo publish").expect("`cargo publish` is a well-formed key"),
+        purpose: "Package and upload the current package to the configured registry.".to_string(),
+        upstream_sections: vec![
+            cargo_section("commands/cargo-publish"),
+            publishing_section(),
+            registry_section(),
+        ],
+        syntax: vec!["cargo publish [OPTIONS]".to_string()],
+        examples: vec![
+            "`cargo publish` packages the current package (as `cargo package` does) and \
+             uploads the resulting `.crate` to the configured registry; \
+             `cargo publish --dry-run` performs the same packaging and verification but \
+             does NOT upload — it reports what would be published."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A publishable package — a complete manifest, a valid version, and a registry \
+             name not already taken — plus registry authentication: a configured registry \
+             token or credential. The default registry is crates.io."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo publish --help` for the version-specific option list. The registry is \
+             selected with `--registry` and authenticated with `--token` (or a configured \
+             credential); `--no-verify` skips the verification build. `--dry-run` performs \
+             the packaging and verification but does NOT upload — it reports what would be \
+             published. Publishing is the *default* behavior: omitting `--dry-run` is what \
+             uploads, so `--dry-run` is the prepare-only form (there is no `--no-dry-run` \
+             flag — the default already publishes)."
+                .to_string(),
+            "Release-preparation guidance is documentation lookup: retrieving this entry \
+             surfaces documentation and does not authorize, request, or perform a \
+             publication. No registry upload happens as a result of this lookup; the \
+             calling agent decides whether to run `cargo publish` through its own terminal \
+             tools. The effect note below names the possible publication effect; it is not \
+             an authorization."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::Publication,
+                detail: "uploads the packaged `.crate` to the configured registry (by \
+                         default crates.io) — a publication that reaches the registry and \
+                         its downstream users. This is the *default* behavior; \
+                         `cargo publish --dry-run` performs the same packaging and \
+                         verification but does NOT upload, reporting what would be \
+                         published instead. This note names the possible publication effect; \
+                         it is documentation, not an authorization — the lookup neither \
+                         authorizes nor performs a publication."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::ArtifactWrite,
+                detail: "packages the crate into a distributable `.crate` archive under \
+                         `target/` (as `cargo package` does) before publishing; \
+                         `--no-verify` skips the default verification build."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "the verification build may download dependencies that are not yet \
+                         cached; `--offline` (or `--frozen`) prevents any download. A \
+                         `--dry-run` run still downloads for the verification but uploads \
+                         nothing."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The nine implementation/verification entries
 //
 // [041] adds the third family of `plan.md` §6: `cargo check`, `cargo build`,
@@ -922,6 +1124,18 @@ fn cargo_fetch() -> CommandEntry {
 // nightly qualifications — lives in the separate `compatibility` and `effect_notes`
 // fields (AC2 / `plan.md` §6/§350). Upstream syntax/examples stay in their own
 // fields. No entry here is executed.
+//
+// [042] adds the fourth family — packaging and release preparation:
+// `cargo package` and `cargo publish`, with the documented `--dry-run` behavior of
+// `cargo publish` (it packages and verifies but does not upload; publishing is the
+// default). Each entry cites its command chapter *and* the relevant
+// release-preparation reference chapters (`packaging` for `cargo package`,
+// `publishing` and `registry` for `cargo publish`). The possible publication
+// effects are made explicit via an [`EffectKind::Publication`] effect note, and a
+// separate maintained note states that this is *documentation lookup* that does
+// not authorize, request, or perform a publication — the calling agent decides
+// whether to run `cargo publish` through its own terminal tools. No entry here is
+// executed.
 // ---------------------------------------------------------------------------
 
 /// `cargo check`: compile to check for errors without producing final artifacts.
@@ -1551,6 +1765,9 @@ mod tests {
         "cargo fix",
     ];
 
+    /// The two packaging/release-preparation keys, in the catalog's fixed order.
+    const PKG_FAMILY_KEYS: &[&str] = &["cargo package", "cargo publish"];
+
     /// A fixture snapshot carrying exactly the sections the implementation/
     /// verification family cites: the eight Cargo command chapters (note there is
     /// no `commands/cargo-clippy` — `cargo clippy` cites the Clippy book instead),
@@ -1977,6 +2194,39 @@ mod tests {
                     clippy_chapter("configuration", "Clippy configuration"),
                     rustdoc_chapter("documentation-tests", "Documentation tests"),
                     rustdoc_chapter("cargo-integration", "Cargo integration"),
+                    command_section("commands/cargo-package", "cargo package"),
+                    command_section("commands/cargo-publish", "cargo publish"),
+                    command_section("packaging", "Packaging"),
+                    command_section("publishing", "Publishing"),
+                ],
+                sources: vec![],
+                checklist: vec![],
+                commands: vec![],
+                validation: Default::default(),
+                attribution: vec![],
+            },
+        }
+    }
+
+    /// A fixture snapshot carrying exactly the sections the packaging/release
+    /// family cites: the two command chapters and the two release-preparation
+    /// reference chapters (`packaging`, `publishing`), plus the `registry`
+    /// reference that `cargo publish` cites. This is the AC1 "sections RESOLVE in
+    /// a snapshot" seam for [042].
+    fn pkg_fixture_snapshot() -> SnapshotManifest {
+        use crate::model::SnapshotManifest;
+        SnapshotManifest {
+            schema_version: SchemaVersion::V1,
+            body: ManifestBody {
+                snapshot_id: SnapshotId::new("fixture-042").expect("a URI-safe snapshot id"),
+                created_at: Timestamp::new("2026-01-01T00:00:00Z").expect("a valid timestamp"),
+                parser_version: "test".to_string(),
+                sections: vec![
+                    command_section("commands/cargo-package", "cargo package"),
+                    command_section("commands/cargo-publish", "cargo publish"),
+                    command_section("packaging", "Packaging"),
+                    command_section("publishing", "Publishing"),
+                    command_section("registry", "Registry"),
                 ],
                 sources: vec![],
                 checklist: vec![],
@@ -2368,26 +2618,28 @@ mod tests {
 
     #[test]
     fn the_combined_catalog_resolves_every_family_entry() {
-        // `combined()` is the three families concatenated; the lookup/resolve paths
+        // `combined()` is the four families concatenated; the lookup/resolve paths
         // are unchanged, so every key from any family still resolves exactly as it
         // did in its own catalog.
         let catalog = CommandCatalog::combined();
-        // 5 setup/inspection + 5 dependency + 9 implementation/verification = 19.
+        // 5 setup/inspection + 5 dependency + 9 implementation/verification + 2
+        // packaging/release = 21.
         assert_eq!(
             catalog.len(),
-            19,
-            "combined is the three families concatenated"
+            21,
+            "combined is the four families concatenated"
         );
         let expected: Vec<String> = FAMILY_KEYS
             .iter()
             .chain(DEP_FAMILY_KEYS.iter())
             .chain(VERIFY_FAMILY_KEYS.iter())
+            .chain(PKG_FAMILY_KEYS.iter())
             .map(|key| key.to_string())
             .collect();
         assert_eq!(
             catalog.keys(),
             expected,
-            "combined keys are the three families, in order"
+            "combined keys are the four families, in order"
         );
         let manifest = combined_fixture_snapshot();
         for key in FAMILY_KEYS
@@ -2395,6 +2647,7 @@ mod tests {
             .copied()
             .chain(DEP_FAMILY_KEYS.iter().copied())
             .chain(VERIFY_FAMILY_KEYS.iter().copied())
+            .chain(PKG_FAMILY_KEYS.iter().copied())
         {
             let resolved = catalog.resolve(&manifest, key).unwrap_or_else(|err| {
                 panic!("`{key}` resolves in the combined catalog, got {err}")
@@ -2926,5 +3179,384 @@ mod tests {
         let check_a = a.get("cargo check").expect("cargo check resolves");
         let check_b = b.get("cargo check").expect("cargo check resolves");
         assert_eq!(check_a, check_b);
+    }
+
+    // ===========================================================
+    // [042] packaging / release-preparation family
+    // ===========================================================
+
+    // --- [042] AC1: exact keys and resolvable citations -------------------
+
+    #[test]
+    fn the_packaging_family_carries_the_two_exact_keys_in_order() {
+        let catalog = CommandCatalog::packaging_release();
+        assert_eq!(
+            catalog.keys(),
+            PKG_FAMILY_KEYS,
+            "the family is the two named keys, in order"
+        );
+        assert_eq!(catalog.len(), 2);
+    }
+
+    #[test]
+    fn every_packaging_key_looks_up_to_its_entry() {
+        let catalog = CommandCatalog::packaging_release();
+        for key in PKG_FAMILY_KEYS.iter().copied() {
+            let entry = catalog
+                .get(key)
+                .unwrap_or_else(|err| panic!("`{key}` should resolve to its entry, got {err}"));
+            assert_eq!(
+                entry.key.as_str(),
+                key,
+                "the entry's key is the exact key queried"
+            );
+        }
+    }
+
+    #[test]
+    fn every_packaging_entry_cites_a_resolvable_upstream_section() {
+        // AC1: every cited section resolves against a fixture snapshot (no
+        // fabricated section); the first resolved id is the entry's first cited id.
+        let catalog = CommandCatalog::packaging_release();
+        let manifest = pkg_fixture_snapshot();
+        for key in PKG_FAMILY_KEYS.iter().copied() {
+            let resolved = catalog
+                .resolve(&manifest, key)
+                .unwrap_or_else(|err| panic!("`{key}` should resolve, got {err}"));
+            assert!(
+                !resolved.sections.is_empty(),
+                "`{key}` resolved with at least one section"
+            );
+            assert_eq!(
+                resolved.sections[0].id, resolved.entry.upstream_sections[0],
+                "the first resolved section is the entry's first cited id"
+            );
+            // Every cited section resolved (none dropped or invented) and every
+            // resolved section is a cargo-source section (no fabricated
+            // placeholder).
+            assert_eq!(
+                resolved.sections.len(),
+                resolved.entry.upstream_sections.len(),
+                "every cited section resolved, none dropped or added"
+            );
+            for section in &resolved.sections {
+                assert_eq!(section.source_id.as_str(), "cargo");
+            }
+        }
+    }
+
+    #[test]
+    fn every_packaging_entry_cites_syntax_examples_and_prerequisites() {
+        // AC1: each entry cites syntax, prerequisites, and release-preparation
+        // references — the documented syntax/option excerpt, the documented
+        // prerequisites, and the cited upstream section(s) are all present.
+        let catalog = CommandCatalog::packaging_release();
+        for key in PKG_FAMILY_KEYS.iter().copied() {
+            let entry = catalog.get(key).expect("a packaging key resolves");
+            assert!(
+                !entry.syntax.is_empty(),
+                "`{key}` carries a documented syntax excerpt"
+            );
+            assert!(
+                !entry.examples.is_empty(),
+                "`{key}` carries a documented example excerpt"
+            );
+            assert!(
+                !entry.prerequisites.is_empty(),
+                "`{key}` carries documented prerequisites"
+            );
+            assert!(
+                !entry.compatibility.is_empty(),
+                "`{key}` carries version/stability qualifications"
+            );
+            assert!(
+                !entry.upstream_sections.is_empty(),
+                "`{key}` cites its upstream section(s)"
+            );
+        }
+    }
+
+    #[test]
+    fn every_packaging_entry_cites_release_preparation_references() {
+        // AC1: each entry cites its command chapter AND a release-preparation
+        // reference chapter — `packaging` for `cargo package`, `publishing` with
+        // `registry` for `cargo publish` — resolvable against the fixture.
+        let catalog = CommandCatalog::packaging_release();
+        let manifest = pkg_fixture_snapshot();
+
+        let package = catalog
+            .get("cargo package")
+            .expect("cargo package resolves");
+        assert!(
+            package
+                .upstream_sections
+                .iter()
+                .any(|id| *id == cargo_section("commands/cargo-package")),
+            "cargo package cites its command chapter"
+        );
+        assert!(
+            package
+                .upstream_sections
+                .iter()
+                .any(|id| *id == packaging_section()),
+            "cargo package cites the packaging release-preparation reference"
+        );
+
+        let publish = catalog
+            .get("cargo publish")
+            .expect("cargo publish resolves");
+        assert!(
+            publish
+                .upstream_sections
+                .iter()
+                .any(|id| *id == cargo_section("commands/cargo-publish")),
+            "cargo publish cites its command chapter"
+        );
+        assert!(
+            publish
+                .upstream_sections
+                .iter()
+                .any(|id| *id == publishing_section()),
+            "cargo publish cites the publishing release-preparation reference"
+        );
+        assert!(
+            publish
+                .upstream_sections
+                .iter()
+                .any(|id| *id == registry_section()),
+            "cargo publish cites the registry (package sources) reference"
+        );
+
+        // Every cited section of both entries resolves against the fixture.
+        for key in PKG_FAMILY_KEYS.iter().copied() {
+            catalog
+                .resolve(&manifest, key)
+                .unwrap_or_else(|err| panic!("`{key}` resolves, got {err}"));
+        }
+    }
+
+    // --- [042] AC2: explicit publication effects, never a permission -------
+
+    #[test]
+    fn cargo_publish_notes_an_explicit_publication_effect() {
+        // AC2 (effects explicit): `cargo publish` names its publication side
+        // effect — it uploads the package to the registry — via the
+        // `EffectKind::Publication` note, and the note names the concrete effect.
+        let catalog = CommandCatalog::packaging_release();
+        let publish = catalog
+            .get("cargo publish")
+            .expect("cargo publish resolves");
+        let publication = publish
+            .effect_notes
+            .iter()
+            .find(|note| note.kind == EffectKind::Publication)
+            .expect("cargo publish carries a Publication effect note");
+        let detail = &publication.detail;
+        assert!(
+            detail.contains("upload") && detail.contains("registry"),
+            "the Publication note names the upload-to-registry effect: {detail}"
+        );
+        // The note states that publishing is the default behavior.
+        assert!(
+            detail.contains("default"),
+            "the Publication note states publishing is the default: {detail}"
+        );
+    }
+
+    #[test]
+    fn cargo_package_notes_an_artifact_write_but_no_publication() {
+        // AC2 effect scoping: `cargo package` produces the `.crate` artifact but
+        // carries NO Publication effect — it packages, it does not publish.
+        let catalog = CommandCatalog::packaging_release();
+        let package = catalog
+            .get("cargo package")
+            .expect("cargo package resolves");
+        assert!(
+            package
+                .effect_notes
+                .iter()
+                .any(|note| note.kind == EffectKind::ArtifactWrite),
+            "cargo package notes the .crate artifact write"
+        );
+        assert!(
+            !package
+                .effect_notes
+                .iter()
+                .any(|note| note.kind == EffectKind::Publication),
+            "cargo package must NOT carry a Publication effect (it does not publish)"
+        );
+    }
+
+    #[test]
+    fn cargo_publish_documents_dry_run_as_prepare_only() {
+        // AC1/AC2: `cargo publish --dry-run` is documented as prepare-only — it
+        // packages and verifies and reports, but does NOT upload; publishing is
+        // the default.
+        let catalog = CommandCatalog::packaging_release();
+        let publish = catalog
+            .get("cargo publish")
+            .expect("cargo publish resolves");
+        let text = maintained_text(publish);
+        assert!(
+            text.contains("--dry-run"),
+            "cargo publish documents --dry-run"
+        );
+        assert!(
+            text.contains("does NOT upload"),
+            "cargo publish states --dry-run does NOT upload (prepare-only)"
+        );
+        assert!(
+            text.contains("reports what would be published"),
+            "cargo publish states --dry-run reports what would be published"
+        );
+        assert!(
+            text.contains("prepare-only"),
+            "cargo publish frames --dry-run as the prepare-only form"
+        );
+        assert!(
+            text.contains("default"),
+            "cargo publish states publishing is the default behavior"
+        );
+    }
+
+    #[test]
+    fn lookup_is_never_described_as_permission_to_publish() {
+        // AC2 (the safety boundary of the family): the guidance makes the
+        // publication effect explicit while stating plainly that this is
+        // *documentation lookup* that does not authorize, request, or perform a
+        // publication. The maintained text carries that explicit not-permission
+        // statement and carries NO permission-granting phrasing.
+        let catalog = CommandCatalog::packaging_release();
+        for key in PKG_FAMILY_KEYS.iter().copied() {
+            let entry = catalog.get(key).expect("a packaging key resolves");
+            let text = maintained_text(entry);
+            assert!(
+                text.contains("does not authorize"),
+                "`{key}` states lookup does not authorize a publication"
+            );
+            assert!(
+                text.contains("documentation lookup"),
+                "`{key}` frames the entry as documentation lookup"
+            );
+            // The guidance must not describe lookup as a permission/authorization
+            // to publish: none of these permission-granting phrases appear.
+            for forbidden in [
+                "permits publishing",
+                "permission to publish",
+                "authorized to publish",
+                "grants permission",
+                "authorizes publishing",
+                "allows publishing",
+                "entitled to publish",
+            ] {
+                assert!(
+                    !text.contains(forbidden),
+                    "`{key}` must not describe lookup as permission to publish (found \
+                     {forbidden:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packaging_upstream_excerpts_and_maintained_notes_are_separate() {
+        // AC2 (separation): a maintained effect-note's prose is kept out of the
+        // upstream syntax/example fields, mirroring the [039]/[040]/[041] pattern.
+        let catalog = CommandCatalog::packaging_release();
+        for key in PKG_FAMILY_KEYS.iter().copied() {
+            let entry = catalog.get(key).expect("a packaging key resolves");
+            for note in &entry.effect_notes {
+                assert!(
+                    !note.detail.trim().is_empty(),
+                    "`{key}` carries a non-trivial effect note"
+                );
+                for excerpt in entry.syntax.iter().chain(entry.examples.iter()) {
+                    assert!(
+                        !excerpt.contains(&note.detail),
+                        "`{key}` keeps effect-note prose out of the upstream excerpt"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_section_is_never_fabricated_for_a_packaging_key() {
+        // AC1 (dangling): a cited section absent from the active snapshot is an
+        // UnresolvedSection, never a fabricated section.
+        let catalog = CommandCatalog::packaging_release();
+        let empty = crate::model::SnapshotManifest {
+            schema_version: SchemaVersion::V1,
+            body: crate::model::ManifestBody {
+                snapshot_id: SnapshotId::new("empty-042").expect("a URI-safe snapshot id"),
+                created_at: Timestamp::new("2026-01-01T00:00:00Z").expect("a valid timestamp"),
+                parser_version: "test".to_string(),
+                sections: vec![],
+                sources: vec![],
+                checklist: vec![],
+                commands: vec![],
+                validation: Default::default(),
+                attribution: vec![],
+            },
+        };
+        // The first cited section of `cargo package` is its command chapter; with
+        // no sections in the snapshot it dangles rather than being fabricated.
+        let err = catalog
+            .resolve(&empty, "cargo package")
+            .expect_err("no section resolves in an empty snapshot");
+        match err {
+            LookupError::UnresolvedSection { key, section } => {
+                assert_eq!(key, "cargo package");
+                let expected = SectionId::derive(
+                    &SourceId::new("cargo").expect("registry id"),
+                    "commands/cargo-package",
+                    None,
+                    None,
+                )
+                .expect("a well-formed id");
+                assert_eq!(section, expected);
+            }
+            other => panic!("expected UnresolvedSection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_shell_operator_packaging_key_is_refused_not_executed() {
+        // The no-execution boundary holds for the packaging family too: a
+        // shell-operator key is refused at the key boundary, never interpolated
+        // into a process. The catalog selects documentation; it never executes.
+        let catalog = CommandCatalog::packaging_release();
+        for bad in [
+            "cargo publish ; rm -rf /",
+            "cargo package | xargs -n1 echo",
+            "cargo publish $(whoami)",
+        ] {
+            match catalog.get(bad) {
+                Err(LookupError::InvalidKey { requested, .. }) => {
+                    assert_eq!(requested, bad, "the refused request is preserved");
+                }
+                Err(other) => panic!("expected InvalidKey for `{bad}`, got {other:?}"),
+                Ok(_) => panic!("`{bad}` must not resolve: a shell-operator key is refused"),
+            }
+        }
+        // A clean packaging key still resolves: refusal is specific to operators.
+        assert!(
+            catalog.get("cargo publish").is_ok(),
+            "a clean packaging key resolves"
+        );
+    }
+
+    #[test]
+    fn packaging_catalogs_are_pure_and_deterministic() {
+        let a = CommandCatalog::packaging_release();
+        let b = CommandCatalog::packaging_release();
+        assert_eq!(
+            a, b,
+            "two packaging catalogs built from the same code are identical"
+        );
+        assert_eq!(a.keys(), b.keys());
+        let pub_a = a.get("cargo publish").expect("cargo publish resolves");
+        let pub_b = b.get("cargo publish").expect("cargo publish resolves");
+        assert_eq!(pub_a, pub_b);
     }
 }
