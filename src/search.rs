@@ -25,9 +25,12 @@
 //! ([036]), and the command catalog ([039]+). The index produces the ranked
 //! identities those consumers refine.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+use thiserror::Error;
 
 use crate::model::{Section, SectionId, SnapshotManifest};
+use crate::registry::SourceCollection;
 
 /// A single lexical token produced by [`tokenize`].
 ///
@@ -245,6 +248,37 @@ fn is_command_verb(s: &str) -> bool {
 const DEFAULT_K1: f64 = 1.2;
 const DEFAULT_B: f64 = 0.75;
 
+// --- Task [035]: exact-match boost tiers ----------------------------------
+//
+// The [034] ranking is a pure BM25 order. This task lifts an *exact* match
+// (guideline code / command name / lint id) above a weaker body match. The lift
+// is a deterministic `tier` that becomes the **primary** key of the ranking
+// sort, so an exact match always precedes a body-only match regardless of the
+// corpus's length statistics — the magnitude of the additive boost below only
+// makes the reported `score` grow with match strength; it is *not* what
+// guarantees the ordering (that is the tier).
+
+/// Exact-match rank tiers, highest priority first.
+///
+/// A section's tier is the highest exact-match category it achieves for a query;
+/// the tier is the primary key of the ranking sort, so a higher tier always
+/// precedes a lower one. Command usage outranks a lint entry, which outranks a
+/// guideline code, which outranks a body/heading-only match
+/// (`plan.md` §6 "Rank exact guideline-code, command-name, and lint-ID matches
+/// first … Keep a large lint catalog from crowding out command-usage answers").
+const EXACT_TIER_NONE: u8 = 0; // body / heading / identifier only
+const EXACT_TIER_CODE: u8 = 1; // an exact guideline-code match
+const EXACT_TIER_LINT: u8 = 2; // an exact lint-id match
+const EXACT_TIER_COMMAND: u8 = 3; // an exact command-name match
+
+/// The additive exact-match boosts, one per non-zero tier. Folded into the BM25
+/// score so a stronger match reports a higher [`Hit::score`]; the *ordering*
+/// guarantee itself is the tier (the primary sort key), not these magnitudes, so
+/// the boosts need not dominate the BM25 range.
+const EXACT_BOOST_CODE: f64 = 1.0;
+const EXACT_BOOST_LINT: f64 = 2.0;
+const EXACT_BOOST_COMMAND: f64 = 3.0;
+
 /// A ranked match returned by [`SectionIndex::search`].
 ///
 /// It carries the **retrievable section identity** ([`SectionId`], AC1) plus
@@ -273,6 +307,154 @@ impl Hit {
             .map(|h| h.section_id.as_str().to_string())
             .collect()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task [035]: source filtering + exact-match boosts
+//
+// The [034] ranking above returns the *retrievable section identities* in a
+// deterministic BM25 order. This task layers two things onto that same seam
+// without changing it: (1) **source filtering** — restrict the ranked hits to
+// the requested source(s), with an *unknown source value* as a clear
+// [`SearchError`] rather than a silent empty result; and (2) **exact-match
+// boosts** — an exact guideline-code / command-name / lint-id match lifts a
+// section above weaker body matches (and a command-usage section above the
+// individual lint entries a large catalog would otherwise crowd it under).
+// ---------------------------------------------------------------------------
+
+/// The eight canonical source ids as a single comma-joined list, used in
+/// [`SearchError::UnsupportedSource`] messages so a mistyped source names the
+/// valid alternatives. Guarded by `supported_sources_match_registry` so it can
+/// never drift from the [`SourceCollection`] registry.
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([037])
+const SUPPORTED_SOURCES: &str =
+    "api-guidelines, style-guide, cargo, rustc, rustup, rustfmt, clippy, rustdoc";
+
+/// A query-time search error.
+///
+/// Distinct from the corpus/schema errors: these are *query* validation
+/// failures — chiefly an unsupported source value — that must surface as a
+/// clear, typed error rather than a silent empty result. `plan.md` §6: "Unknown
+/// … and unsupported source values produce clear validation errors"; §11:
+/// "Source filters, … unknown IDs, invalid cursors, and oversized inputs behave
+/// predictably."
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([037])
+pub enum SearchError {
+    /// The requested source value is not one of the eight canonical source ids
+    /// (`api-guidelines`, `style-guide`, `cargo`, `rustc`, `rustup`, `rustfmt`,
+    /// `clippy`, `rustdoc`).
+    ///
+    /// The message lists the valid ids as *discoverable alternatives*
+    /// (`plan.md` §6 "Reject unsupported keys with discoverable alternatives"),
+    /// so a caller that mistyped a source can correct it from the error alone —
+    /// the caller distinguishes this from a successful zero-hit search.
+    #[error("unsupported source `{0}`: expected one of {SUPPORTED_SOURCES}")]
+    UnsupportedSource(String),
+}
+
+/// A source restriction for [`SectionIndex::search_in`] / [`search_source`].
+///
+/// `plan.md` §6 defines `search_docs`'s optional `source` as "one of the eight
+/// canonical ids …; omission searches all sources." This type is that
+/// restriction, **validated at construction** so an unknown/unsupported value is
+/// a clear [`SearchError`] (from [`SourceFilter::source`] / [`sources`]) rather
+/// than a silent empty result:
+///
+/// - [`SourceFilter::all`] (the default / an omitted source) imposes no
+///   restriction;
+/// - a non-empty set of canonical source ids (the [`SourceCollection`] ids) restricts hits to
+///   those source(s) — the filter supports one *or many*; the MVP tool passes at most
+///   one, but the seam is written for the general case.
+///
+/// A `SourceFilter` is *always valid*: it is built only through the fallible
+/// [`source`](Self::source) / [`sources`](Self::sources) constructors, which
+/// reject any id outside the eight canonical ids before a filter is returned, so
+/// a consumer that already holds a `SourceFilter` never needs to re-check it.
+/// `is_all` / [`contains`](Self::contains) are infallible.
+///
+/// The set is a `BTreeSet` so membership and iteration are deterministic (AC2),
+/// and duplicate ids collapse to one restriction.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([037])
+pub struct SourceFilter(Option<BTreeSet<&'static str>>);
+
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([037])
+impl SourceFilter {
+    /// No restriction — search every source (`plan.md` §6 "omission searches all
+    /// sources"). The default for the omitted `source` parameter.
+    pub fn all() -> Self {
+        SourceFilter(None)
+    }
+
+    /// Restrict to the single source whose canonical id is `id`.
+    ///
+    /// Fails with [`SearchError::UnsupportedSource`] if `id` is not one of the
+    /// eight canonical ids — a clear error, never a silent empty result.
+    pub fn source(id: impl AsRef<str>) -> Result<Self, SearchError> {
+        let canonical = resolve_source(id.as_ref())?;
+        Ok(SourceFilter(Some(BTreeSet::from([canonical]))))
+    }
+
+    /// Restrict to a set of sources, each identified by its canonical id.
+    ///
+    /// Duplicates collapse (the restriction is a set) and order is irrelevant.
+    /// Any id outside the eight canonical ids fails with
+    /// [`SearchError::UnsupportedSource`] *before* a filter is returned. An
+    /// empty iterable yields [`all`](Self::all) — the natural reading of "no
+    /// sources named" — rather than a vacuous "no sources" filter.
+    pub fn sources(ids: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Self, SearchError> {
+        let mut set = BTreeSet::new();
+        for id in ids {
+            set.insert(resolve_source(id.as_ref())?);
+        }
+        // An empty iterable means "no sources named": the unrestricted, all-sources
+        // filter (`all()`), not a vacuous "no sources" filter that would match
+        // nothing. This keeps the empty case in lock-step with the constructor's
+        // documented intent (F-035-3) and with `all()`. A blank/unknown id never
+        // collapses to empty here — it fails with `UnsupportedSource` above — so
+        // only a genuinely empty input yields the unrestricted filter.
+        Ok(if set.is_empty() {
+            SourceFilter::all()
+        } else {
+            SourceFilter(Some(set))
+        })
+    }
+
+    /// Whether this filter restricts to a *subset* of sources.
+    ///
+    /// `false` means [`all`](Self::all): every source is searched.
+    pub fn is_all(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// Whether the source with canonical id `source_id` is within this filter.
+    ///
+    /// An [`all`](Self::all) filter contains every source; a restricted filter
+    /// contains only its named collections. This is the membership test
+    /// [`SectionIndex::search_in`] uses to drop out-of-filter hits.
+    pub fn contains(&self, source_id: &str) -> bool {
+        match &self.0 {
+            None => true,
+            Some(set) => set.contains(source_id),
+        }
+    }
+}
+
+/// Resolve a source id string to its canonical [`SourceCollection`], failing
+/// clearly on a value outside the eight registry ids.
+///
+/// The match is by exact, case-sensitive id against the [`SourceCollection`]
+/// registry (`plan.md` §2/§6): no aliasing or case-folding, so a value like
+/// `cargo-book` or `CARGO` is *not* silently accepted — it is an
+/// [`UnsupportedSource`](SearchError::UnsupportedSource).
+#[allow(dead_code)] // transitional: unwired until the search_docs handler ([037])
+fn resolve_source(id: &str) -> Result<&'static str, SearchError> {
+    SourceCollection::ALL
+        .iter()
+        .find(|c| c.id() == id)
+        .map(|c| c.id())
+        .ok_or_else(|| SearchError::UnsupportedSource(id.to_string()))
 }
 
 /// The in-memory, deterministic BM25 index over an immutable corpus
@@ -390,21 +572,52 @@ impl SectionIndex {
         self.n_docs
     }
 
-    /// Rank the sections that contain any token of `query`, in descending
-    /// deterministic BM25 order.
+    /// Rank the sections that contain any token of `query` across **every**
+    /// source, in descending deterministic order.
     ///
-    /// Empty query, empty index, or no matches all return `Vec::new()` — a
-    /// successful search with zero hits (`plan.md` §6 "Empty results are a
-    /// successful search with zero hits"), never a panic. The ranking is a pure
-    /// function of the index and the query string, so repeated calls are
-    /// identical (AC2).
+    /// This is the all-sources convenience entry (`plan.md` §6: "omission
+    /// searches all sources"); it is [`search_in`](Self::search_in) with no
+    /// source restriction. Empty query, empty index, or no matches all return
+    /// `Vec::new()` — a successful search with zero hits (`plan.md` §6 "Empty
+    /// results are a successful search with zero hits"), never a panic. The
+    /// ranking is a pure function of the index and the query string, so repeated
+    /// calls are identical (AC2).
     pub fn search(&self, query: &str) -> Vec<Hit> {
+        self.search_in(query, &SourceFilter::all())
+    }
+
+    /// Rank the sections that contain any token of `query` and belong to the
+    /// sources named by `filter`, in descending deterministic order.
+    ///
+    /// This is the filtered entry point that the `search_docs` handler will map
+    /// its optional `source` onto ([037]). The filter is validated at
+    /// construction ([`SourceFilter::source`] / [`SourceFilter::sources`]), so a
+    /// value that is *not* one of the eight canonical source ids fails there
+    /// with a [`SearchError`] — never as a silent empty result here. A *valid*
+    /// filter that matches no section yields an empty `Vec` (a successful search
+    /// with zero hits), which is distinct from that construction error.
+    ///
+    /// The ranking is a pure function of the index, the query, and the filter,
+    /// so repeated calls are identical (AC2). Filtering is a post-ranking
+    /// restriction: the BM25 statistics (idf, average length) are computed over
+    /// the whole corpus, and the filter only drops hits outside the requested
+    /// source(s) — the source filter never reshapes the ranking, only which of
+    /// the ranked hits are returned.
+    pub fn search_in(&self, query: &str, filter: &SourceFilter) -> Vec<Hit> {
         // A query with no tokens cannot match; return the empty (successful)
         // result up front. This also covers an empty/whitespace-only query.
         let query_tokens = tokenize(query);
         if query_tokens.is_empty() || self.n_docs == 0 {
             return Vec::new();
         }
+
+        // Group the query's exact-match tokens by kind: a token that *exactly*
+        // equals one of a section's structured fields (guideline code / command
+        // key / lint id) lifts that section to the matching rank tier
+        // (`plan.md` §6 "Rank exact guideline-code, command-name, and lint-ID
+        // matches first"). Word/flag tokens are the "weaker" body matches the
+        // boost sits above, so they contribute no tier.
+        let (codes, commands, lints) = split_exact(&query_tokens);
 
         // Sum BM25 over the distinct query terms. Deduplicating on the token
         // string (via the `BTreeMap` accumulator below) keeps scoring
@@ -424,23 +637,60 @@ impl SectionIndex {
             }
         }
 
-        // Collect and sort by (score desc, section id asc). Section ids are
-        // unique, so `section id asc` alone yields a total, deterministic
-        // order; no additional tie-break is needed.
-        let mut hits: Vec<Hit> = scored
+        // Restrict to the requested source(s) *after* ranking, then apply the
+        // exact-match boost. The sort key is (tier desc, score desc, section id
+        // asc):
+        //
+        //   * `tier` is the categorical guarantee that an exact match precedes a
+        //     body-only match — so a large lint catalog cannot crowd out a
+        //     command-usage answer when the query names the command (AC2);
+        //   * within a tier, the boosted `score` refines the order;
+        //   * `section id asc` is the total, deterministic tie-break (section
+        //     ids are unique), preserving [034]'s deterministic total order.
+        //
+        // The ranking signal is computed over the whole corpus; the source
+        // filter only decides which of the ranked hits are returned.
+        let mut ranked: Vec<(u8, Hit)> = scored
             .into_iter()
-            .map(|(doc, score)| Hit {
-                section_id: self.sections[doc].id.clone(),
-                score,
+            .filter(|(doc, _)| filter.contains(self.sections[*doc].source_id.as_str()))
+            .map(|(doc, bm25)| {
+                let section = &self.sections[doc];
+                let (tier, boost) = section_boost(section, &codes, &commands, &lints);
+                (
+                    tier,
+                    Hit {
+                        section_id: section.id.clone(),
+                        score: bm25 + boost,
+                    },
+                )
             })
             .collect();
-        hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.section_id.as_str().cmp(b.section_id.as_str()))
+        ranked.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| {
+                    b.1.score
+                        .partial_cmp(&a.1.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.1.section_id.as_str().cmp(b.1.section_id.as_str()))
         });
-        hits
+        ranked.into_iter().map(|(_, hit)| hit).collect()
+    }
+
+    /// Rank the sections that contain any token of `query` within a single
+    /// source named by `source` (its canonical id), in descending deterministic
+    /// order.
+    ///
+    /// This is the fallible, single-source entry the `search_docs` handler's
+    /// optional `source` maps onto: a `source` value that is **not** one of the
+    /// eight canonical source ids fails with [`SearchError::UnsupportedSource`]
+    /// (a clear, typed error with the valid ids as discoverable alternatives —
+    /// `plan.md` §6 "unsupported source values produce clear validation
+    /// errors"), **not** a silent empty result. A valid source that matches no
+    /// section returns `Ok` of an empty `Vec` (a successful zero-hit search).
+    pub fn search_source(&self, query: &str, source: &str) -> Result<Vec<Hit>, SearchError> {
+        let filter = SourceFilter::source(source)?;
+        Ok(self.search_in(query, &filter))
     }
 
     /// The corpus-wide inverse-document-frequency factor for a term seen in
@@ -495,6 +745,84 @@ fn section_tokens(section: &Section) -> Vec<Token> {
         }
     }
     tokenize(&buf)
+}
+
+/// Split a query's tokens into the three exact-match sets (guideline codes,
+/// command keys, lint ids), each a `BTreeSet` for deterministic membership.
+///
+/// Only the structured-field token kinds contribute: [`Token::Word`] and
+/// [`Token::Flag`] are the "weaker" body/heading/identifier matches that sit
+/// *below* an exact match (`plan.md` §6 "then boost headings and identifier
+/// matches over body text"), so they lift no section's tier. The sets dedupe
+/// and order the payloads, which keeps the boost (and therefore the ranking)
+/// independent of the order a repeated exact term appears in the query.
+fn split_exact(query_tokens: &[Token]) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
+    let mut codes = BTreeSet::new();
+    let mut commands = BTreeSet::new();
+    let mut lints = BTreeSet::new();
+    for token in query_tokens {
+        match token {
+            Token::GuidelineCode(s) => {
+                codes.insert(s.clone());
+            }
+            Token::Command(s) => {
+                commands.insert(s.clone());
+            }
+            Token::LintId(s) => {
+                lints.insert(s.clone());
+            }
+            Token::Word(_) | Token::Flag(_) => {}
+        }
+    }
+    (codes, commands, lints)
+}
+
+/// The exact-match rank `tier` and additive `boost` for `section` given the
+/// query's exact-match sets (see [`split_exact`]).
+///
+/// The tier is the *highest-priority* exact match the section achieves: a
+/// command-key match ([`EXACT_TIER_COMMAND`]) outranks a lint-id match
+/// ([`EXACT_TIER_LINT`]), which outranks a guideline-code match
+/// ([`EXACT_TIER_CODE`]); no exact match is [`EXACT_TIER_NONE`] (body/heading
+/// only). The boost is the matching tier's additive score, folded into the BM25
+/// score so the reported [`Hit::score`] grows with match strength. The
+/// *ordering guarantee*, however, is the tier itself (the primary sort key in
+/// [`SectionIndex::search_in`]), not these magnitudes — so an exact match
+/// always precedes a body-only match regardless of the corpus's length
+/// statistics, and a command-usage section is never crowded out by the
+/// individual lint entries of a large catalog.
+///
+/// The match is exact string equality between a query token's payload and a
+/// section's structured field, so `cargo clippy` matches a `command_keys` entry
+/// of `"cargo clippy"` but not `"clippy"`, and `clippy::unwrap_used` matches a
+/// `lint_ids` entry of the same but not a body mention of the words.
+fn section_boost(
+    section: &Section,
+    codes: &BTreeSet<String>,
+    commands: &BTreeSet<String>,
+    lints: &BTreeSet<String>,
+) -> (u8, f64) {
+    // Command usage outranks the individual lint entries it would otherwise be
+    // crowded out by (`plan.md` §6: "Keep a large lint catalog from crowding
+    // out command-usage answers when the query names a command").
+    if section
+        .command_keys
+        .iter()
+        .any(|k| commands.contains(k.as_str()))
+    {
+        return (EXACT_TIER_COMMAND, EXACT_BOOST_COMMAND);
+    }
+    if section.lint_ids.iter().any(|l| lints.contains(l.as_str())) {
+        return (EXACT_TIER_LINT, EXACT_BOOST_LINT);
+    }
+    if section
+        .guideline_codes
+        .iter()
+        .any(|c| codes.contains(c.as_str()))
+    {
+        return (EXACT_TIER_CODE, EXACT_BOOST_CODE);
+    }
+    (EXACT_TIER_NONE, 0.0)
 }
 
 #[cfg(test)]
@@ -1207,6 +1535,409 @@ mod tests {
         assert_eq!(
             texts(&tokenize("A B C-CONV clippy::x cargo test --f")),
             vec!["A", "B", "C-CONV", "clippy::x", "cargo test", "--f"]
+        );
+    }
+
+    // --- Task [035]: exact-match boosts -----------------------------------
+
+    /// AC1: an exact guideline-code match ranks its canonical section first,
+    /// above a body-only mention of the same code — even when the body-only
+    /// section mentions the code far more often.
+    ///
+    /// The corpus is built so the queried code is *rare*: it appears in only
+    /// two of the many sections, so its BM25 idf is **positive** and raw
+    /// frequency decides the plain ranking — the high-frequency body-only
+    /// section wins on raw score. The exact match is lifted to first by its
+    /// *tier* (the primary sort key), not by raw frequency, so this assertion
+    /// **fails if the tier logic is removed**: with no tier the higher-frequency
+    /// body-only section would rank first. This is the discriminating case the
+    /// plain two-document version was not: under a negative idf the
+    /// higher-frequency body-only section already ranked last without any tier.
+    /// The large lint-catalog test below keeps the crowding case.
+    #[test]
+    fn exact_guideline_code_ranks_above_body_only_mention() {
+        // Carries "C-CONV" as a structured guideline code; its body does not
+        // mention the code, so its only "C-CONV" occurrence is the exact field.
+        let exact = section(
+            "api-guidelines",
+            "about",
+            "alphacode",
+            "prefers From and Into for conversions between types",
+            &["C-CONV".to_string()],
+            &[],
+            &[],
+        );
+        // Mentions "C-CONV" many times in prose, with no structured field: a
+        // stronger frequency match that a plain (tier-free) ranking puts first,
+        // because the code is rare enough for a positive idf.
+        let body_only = section(
+            "api-guidelines",
+            "style",
+            "betabody",
+            "C-CONV C-CONV C-CONV C-CONV C-CONV C-CONV",
+            &[],
+            &[],
+            &[],
+        );
+        // Noise sections that share no term with the query: they keep "C-CONV"
+        // rare (df < n_docs / 2, a positive idf) so raw frequency — not the
+        // tier — decides the plain ranking, and frequency favors body_only.
+        let mut corpus = vec![body_only.clone(), exact.clone()];
+        for i in 0..10 {
+            corpus.push(section(
+                "style-guide",
+                &format!("noise/{i}"),
+                &format!("noise{i}"),
+                "general whitespace and comment style notes",
+                &[],
+                &[],
+                &[],
+            ));
+        }
+        let index = SectionIndex::build(&snapshot(corpus));
+        let hits = index.search("C-CONV");
+        assert_eq!(
+            hits.len(),
+            2,
+            "only the two sections that mention the code match"
+        );
+        assert_eq!(
+            hits[0].section_id, exact.id,
+            "the exact-code section must rank first above the higher-frequency body mention (via its tier)"
+        );
+        assert_eq!(hits[1].section_id, body_only.id);
+    }
+
+    /// AC1: an exact lint-id match ranks its canonical entry first, above a
+    /// body-only mention of the same lint id. As with the guideline-code case,
+    /// the corpus is built so the lint id is *rare* (it appears in only two of
+    /// the many sections), giving it a **positive** idf so raw frequency decides
+    /// the plain ranking and favors the high-frequency body-only section. The
+    /// exact match is lifted to first by its *tier*; the assertion **fails if the
+    /// tier logic is removed** (the higher-frequency body-only section would then
+    /// rank first).
+    #[test]
+    fn exact_lint_id_ranks_above_body_only_mention() {
+        // Carries "clippy::unwrap_used" as a structured lint id; its body uses
+        // the bare word `unwrap_used` but not the qualified id as a field.
+        let exact = section(
+            "clippy",
+            "lints/unwrap-used",
+            "alphalint",
+            "the unwrap_used lint flags unwrap calls in production code",
+            &[],
+            &[],
+            &["clippy::unwrap_used".to_string()],
+        );
+        // Mentions "clippy::unwrap_used" many times in prose as a qualified
+        // lint id, with no structured field: a stronger frequency match that a
+        // plain (tier-free) ranking puts first.
+        let body_only = section(
+            "clippy",
+            "style",
+            "betabody",
+            "clippy::unwrap_used clippy::unwrap_used clippy::unwrap_used clippy::unwrap_used",
+            &[],
+            &[],
+            &[],
+        );
+        // Noise sections that share no term with the query: they keep the lint id
+        // rare (df < n_docs / 2, a positive idf) so raw frequency — not the tier
+        // — decides the plain ranking, and frequency favors body_only.
+        let mut corpus = vec![body_only.clone(), exact.clone()];
+        for i in 0..10 {
+            corpus.push(section(
+                "clippy",
+                &format!("noise/{i}"),
+                &format!("noise{i}"),
+                "general whitespace and comment style notes",
+                &[],
+                &[],
+                &[],
+            ));
+        }
+        let index = SectionIndex::build(&snapshot(corpus));
+        let hits = index.search("clippy::unwrap_used");
+        assert_eq!(
+            hits.len(),
+            2,
+            "only the two sections that mention the lint id match"
+        );
+        assert_eq!(
+            hits[0].section_id, exact.id,
+            "the exact lint-id entry must rank first above the higher-frequency body mention (via its tier)"
+        );
+        assert_eq!(hits[1].section_id, body_only.id);
+    }
+
+    /// AC2: a large lint catalog must not crowd out a command-usage answer when
+    /// the query names the command. Five clippy lint entries all mention the
+    /// command in prose (a catalog a plain ranking could let dominate); one
+    /// usage section carries the command as an exact key and must rank first.
+    #[test]
+    fn exact_command_not_crowded_out_by_large_lint_catalog() {
+        // Each lint entry mentions "cargo clippy" in prose, so a plain ranking
+        // of the catalog could bury the usage answer.
+        let mut corpus = Vec::new();
+        for i in 0..5 {
+            corpus.push(section(
+                "clippy",
+                &format!("lints/lint-{i}"),
+                &format!("beta{i}"),
+                "run cargo clippy to find this clippy lint in the source",
+                &[],
+                &[],
+                &[format!("clippy::lint_{i}")],
+            ));
+        }
+        let usage = section(
+            "clippy",
+            "commands/cargo-clippy",
+            "alphacargo",
+            "cargo clippy runs the clippy lints over your crate",
+            &[],
+            &["cargo clippy".to_string()],
+            &[],
+        );
+        corpus.push(usage.clone());
+        let index = SectionIndex::build(&snapshot(corpus));
+        let hits = index.search("cargo clippy");
+        assert!(!hits.is_empty(), "the command query must retrieve sections");
+        assert_eq!(
+            hits[0].section_id, usage.id,
+            "the exact command-usage section must rank first, not be crowded out by the catalog"
+        );
+    }
+
+    /// `search_in` with the empty (all-sources) filter is exactly the public
+    /// `search`: the ranking path is shared, so an unfiltered search is a
+    /// filtered one over every source — the boost layer does not distort it.
+    #[test]
+    fn search_in_all_filter_matches_public_search() {
+        let index = SectionIndex::build(&sample_snapshot());
+        for query in [
+            "cargo build",
+            "C-CONV",
+            "clippy::unwrap_used",
+            "",
+            "no-such-term",
+        ] {
+            assert_eq!(
+                index.search(query),
+                index.search_in(query, &SourceFilter::all()),
+                "an all-sources filter must equal the public search for {query:?}"
+            );
+        }
+    }
+
+    // --- Task [035]: source filtering --------------------------------------
+
+    /// AC2: a source filter restricts the ranked hits to the requested source.
+    /// Three sections in three sources all contain the query term; filtering to
+    /// one source returns only that source's section.
+    #[test]
+    fn source_filter_restricts_to_one_source() {
+        let cargo = section(
+            "cargo",
+            "a",
+            "probe1",
+            "the common term here",
+            &[],
+            &[],
+            &[],
+        );
+        let rustc = section(
+            "rustc",
+            "b",
+            "probe2",
+            "the common term here",
+            &[],
+            &[],
+            &[],
+        );
+        let clippy = section(
+            "clippy",
+            "c",
+            "probe3",
+            "the common term here",
+            &[],
+            &[],
+            &[],
+        );
+        let index = SectionIndex::build(&snapshot(vec![
+            cargo.clone(),
+            rustc.clone(),
+            clippy.clone(),
+        ]));
+
+        // No filter: all three match.
+        assert_eq!(index.search("common").len(), 3);
+        // Filter to cargo: only cargo's section.
+        let filter = SourceFilter::source("cargo").expect("cargo is a valid source");
+        let hits = index.search_in("common", &filter);
+        assert_eq!(hits.len(), 1, "only the cargo section is returned");
+        assert_eq!(hits[0].section_id, cargo.id);
+    }
+
+    /// An empty filter (or the public `search`) spans every source.
+    #[test]
+    fn source_filter_empty_means_all_sources() {
+        let cargo = section("cargo", "a", "p1", "the common term here", &[], &[], &[]);
+        let rustc = section("rustc", "b", "p2", "the common term here", &[], &[], &[]);
+        let index = SectionIndex::build(&snapshot(vec![cargo.clone(), rustc.clone()]));
+        assert_eq!(index.search_in("common", &SourceFilter::all()).len(), 2);
+    }
+
+    /// A filter may name several sources at once; only those sources are
+    /// returned, in the ranked order.
+    #[test]
+    fn source_filter_accepts_multiple_sources() {
+        let cargo = section("cargo", "a", "p1", "the common term here", &[], &[], &[]);
+        let _rustc = section("rustc", "b", "p2", "the common term here", &[], &[], &[]);
+        let clippy = section("clippy", "c", "p3", "the common term here", &[], &[], &[]);
+        let index = SectionIndex::build(&snapshot(vec![cargo.clone(), _rustc, clippy.clone()]));
+        let filter = SourceFilter::sources(["cargo", "clippy"]).expect("both ids are valid");
+        let hits = index.search_in("common", &filter);
+        let ids: Vec<&str> = hits.iter().map(|h| h.section_id.as_str()).collect();
+        assert_eq!(hits.len(), 2, "only the two requested sources are returned");
+        assert!(ids.iter().any(|id| *id == cargo.id.as_str()));
+        assert!(ids.iter().any(|id| *id == clippy.id.as_str()));
+    }
+
+    /// F-035-3: an *empty* iterable passed to [`SourceFilter::sources`] means
+    /// "no sources named": it yields the unrestricted [`all`](SourceFilter::all)
+    /// filter — matching every source — rather than a vacuous "no sources" filter
+    /// that would match nothing. This pins the constructor's documented intent so
+    /// the empty case cannot silently regress to a matching-nothing filter.
+    #[test]
+    fn source_filter_empty_iterable_means_all_sources() {
+        // A genuinely empty input is the unrestricted filter, not "no sources".
+        let empty = SourceFilter::sources(Vec::<&str>::new()).expect("an empty iterable is valid");
+        assert!(
+            empty.is_all(),
+            "an empty iterable must yield the all-sources filter"
+        );
+        assert_eq!(
+            empty,
+            SourceFilter::all(),
+            "an empty iterable must equal `all()`"
+        );
+        // It therefore contains every source, verified through `contains`.
+        for id in [
+            "api-guidelines",
+            "style-guide",
+            "cargo",
+            "rustc",
+            "rustup",
+            "rustfmt",
+            "clippy",
+            "rustdoc",
+        ] {
+            assert!(
+                empty.contains(id),
+                "the all-sources filter must contain {id}"
+            );
+        }
+        // End-to-end: an empty-iterable filter spans the whole corpus, exactly
+        // like the public `search` and an explicit `all()` filter.
+        let cargo = section("cargo", "a", "p1", "the common term here", &[], &[], &[]);
+        let rustc = section("rustc", "b", "p2", "the common term here", &[], &[], &[]);
+        let clippy = section("clippy", "c", "p3", "the common term here", &[], &[], &[]);
+        let index = SectionIndex::build(&snapshot(vec![cargo, rustc, clippy]));
+        assert_eq!(
+            index.search_in("common", &empty).len(),
+            3,
+            "an empty-iterable filter spans every source"
+        );
+    }
+
+    /// AC2: an *unsupported* source is a typed error that names the bad value
+    /// and lists the valid ids as discoverable alternatives — never a silent
+    /// empty result.
+    #[test]
+    fn search_source_unsupported_is_a_typed_error() {
+        let cargo = section("cargo", "a", "p1", "the common term here", &[], &[], &[]);
+        let index = SectionIndex::build(&snapshot(vec![cargo]));
+        let err = index
+            .search_source("common", "not-a-real-source")
+            .expect_err("an unknown source must be a typed error, not an empty Vec");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not-a-real-source"),
+            "the error names the bad value; got {msg:?}"
+        );
+        // The valid ids are surfaced as discoverable alternatives.
+        for id in [
+            "api-guidelines",
+            "style-guide",
+            "cargo",
+            "rustc",
+            "rustup",
+            "rustfmt",
+            "clippy",
+            "rustdoc",
+        ] {
+            assert!(
+                msg.contains(id),
+                "the error lists the valid source id {id}; got {msg:?}"
+            );
+        }
+    }
+
+    /// A valid source that matches no section returns `Ok` of an empty `Vec` — a
+    /// successful zero-hit search, distinct from the unsupported-source error.
+    #[test]
+    fn search_source_valid_source_no_match_is_empty() {
+        let cargo = section("cargo", "a", "p1", "the common term here", &[], &[], &[]);
+        let index = SectionIndex::build(&snapshot(vec![cargo]));
+        // "rustc" is a valid source but has no section matching "common" here.
+        let hits = index
+            .search_source("common", "rustc")
+            .expect("rustc is a valid source");
+        assert!(
+            hits.is_empty(),
+            "a valid source with no match is an empty, successful result"
+        );
+    }
+
+    /// Drift guard for [`SUPPORTED_SOURCES`]: the eight ids the
+    /// [`SearchError::UnsupportedSource`] message advertises as the valid
+    /// alternatives must equal the eight canonical ids of the
+    /// [`SourceCollection`] registry, each via [`SourceCollection::id`]. If the
+    /// constant and the registry ever disagree — an added, removed, renamed, or
+    /// duplicated id, or a stray/blank token in the list — this fails, so the
+    /// error message can never silently fall out of sync with the registry.
+    #[test]
+    fn supported_sources_match_registry() {
+        // Parse the advertised, comma-joined list into its constituent ids.
+        let advertised: Vec<&'static str> = SUPPORTED_SOURCES
+            .split(", ")
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .collect();
+        // The registry's canonical ids.
+        let registry: Vec<&'static str> = SourceCollection::ALL
+            .iter()
+            .map(SourceCollection::id)
+            .collect();
+
+        // The same set of ids, no more and no fewer (catches an added/removed/
+        // renamed source and any stray or blank token in the list).
+        let advertised_set: BTreeSet<&'static str> = advertised.iter().copied().collect();
+        let registry_set: BTreeSet<&'static str> = registry.iter().copied().collect();
+        assert_eq!(
+            advertised_set, registry_set,
+            "the advertised source list must equal the registry's ids"
+        );
+        assert_eq!(
+            advertised.len(),
+            registry.len(),
+            "the advertised list must list exactly the registry's sources, no duplicates"
+        );
+        assert_eq!(
+            registry_set.len(),
+            8,
+            "the registry has exactly the eight approved sources"
         );
     }
 }
