@@ -206,15 +206,20 @@ impl CommandCatalog {
     /// [`EffectKind::SourceChange`], and the possible registry download
     /// [`EffectKind::DependencyDownload`].
     ///
-    /// The `--offline`/`--locked` scoping (AC2) is per command: `--offline` is
-    /// documented for all five (a universal cache-only flag for these
-    /// registry-touching commands), while `--locked` — the "the lockfile will not
-    /// change" assertion — is documented only for the four commands whose purpose
+    /// The `--offline`/`--locked` scoping (AC2) is a per-command *editorial*
+    /// choice, not a claim about which flags `cargo` accepts: `--offline` is
+    /// documented for all five because it is the cache-only flag central to these
+    /// registry-touching commands, while `--locked` — the "the lockfile will not
+    /// change" assertion — is highlighted only for the four commands whose purpose
     /// is to write or resolve the lockfile (`cargo add`, `cargo remove`,
-    /// `cargo update`, `cargo generate-lockfile`). `cargo fetch`'s purpose is to
-    /// refresh/download, the inverse of that assertion, so its entry describes
-    /// `--offline` and points to `--help` for the version-specific flag list
-    /// rather than claiming `--locked`.
+    /// `cargo update`, `cargo generate-lockfile`). `cargo fetch` *does* accept
+    /// `--locked` (Cargo parses it and raises a semantic lockfile error when the
+    /// lockfile would change), but its purpose is to refresh and download, so its
+    /// entry *chooses to highlight* `--offline` — the flag central to fetch's
+    /// primary purpose — and defers the full, version-specific flag list (which
+    /// includes `--locked`) to `cargo fetch --help` rather than documenting it
+    /// inline. Omitting `--locked` from fetch's entry is therefore a design
+    /// choice, not a claim that the flag is unsupported or inapplicable.
     pub fn dependencies() -> CommandCatalog {
         CommandCatalog {
             entries: vec![
@@ -538,7 +543,10 @@ fn cargo_tree() -> CommandEntry {
 // relevant configuration sections (AC1). The lockfile/source effect, the possible
 // registry download, and the `--offline`/`--locked` scoping are maintainer notes
 // in separate fields (AC2 / `plan.md` §6/§350): `--offline` is documented for all
-// five, `--locked` only for the four that write or resolve the lockfile.
+// five; `--locked` is highlighted for the four that write or resolve the lockfile.
+// `cargo fetch` accepts `--locked` too, but its entry highlights `--offline` and
+// defers the full flag list to `cargo fetch --help` — the omission is a design
+// choice, not a claim that `--locked` is unsupported.
 // ---------------------------------------------------------------------------
 
 /// The Cargo Book reference chapters the dependency family cites as its
@@ -785,7 +793,8 @@ fn cargo_fetch() -> CommandEntry {
             EffectNote {
                 kind: EffectKind::DependencyDownload,
                 detail: "downloads the package's dependencies into the local cache; \
-                         `--offline` makes the fetch use the cache only (no network)."
+                         `--offline` (or `--frozen`) makes the fetch use the cache \
+                         only (no network)."
                     .to_string(),
             },
             EffectNote {
@@ -1409,11 +1418,15 @@ mod tests {
 
     #[test]
     fn cargo_fetch_describes_offline_but_not_locked() {
-        // AC2 (the per-command scoping): `--offline` is universal, but `--locked`
-        // — the "the lockfile will not change" assertion — is NOT applied to
-        // `cargo fetch`, whose purpose is to refresh and download the lockfile
-        // (the inverse of that assertion). This is the proof that a flag is not
-        // claimed for a command that does not document it.
+        // AC2 (the per-command scoping): `--offline` is universal, but the
+        // `--locked` "the lockfile will not change" assertion is *not highlighted*
+        // on `cargo fetch`. `cargo fetch` accepts `--locked` (Cargo parses it and
+        // raises a semantic lockfile error if the lockfile would change), but its
+        // purpose is to refresh and download, so its entry *chooses to highlight*
+        // `--offline` and defers the full, version-specific flag list — which
+        // includes `--locked` — to `cargo fetch --help`. This proves that a flag is
+        // not *documented* for a command that does not document it, without
+        // claiming the flag is unsupported or inapplicable.
         let catalog = CommandCatalog::dependencies();
         let fetch = catalog.get("cargo fetch").expect("cargo fetch resolves");
         let text = maintained_text(fetch);
@@ -1423,7 +1436,8 @@ mod tests {
         );
         assert!(
             !text.contains("--locked"),
-            "cargo fetch must NOT document --locked: it is the inverse of fetch's purpose"
+            "cargo fetch's entry omits --locked by design (deferred to --help), \
+             not because --locked is inapplicable"
         );
         // `--locked` never leaks into fetch's upstream excerpt fields either.
         for excerpt in fetch.syntax.iter().chain(fetch.examples.iter()) {
