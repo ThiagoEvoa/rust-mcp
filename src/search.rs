@@ -472,11 +472,11 @@ fn resolve_source(id: &str) -> Result<&'static str, SearchError> {
 /// `n_docs` and `avg_doc_len` are the corpus-wide statistics BM25 needs;
 /// `doc_lens` is the per-document (length-normalized) term count.
 ///
-/// All public items are unwired until the section reads / `search_docs` handler
-/// land ([036]/[037]); the `#[allow(dead_code)]` mirrors the precedent in
-/// [`crate::model`], [`crate::registry`], and [`crate::runtime`], and is
-/// lifted the moment a consumer is wired in.
-#[allow(dead_code)] // transitional: unwired until [036]/[037]
+/// Task [036] wires the section read through [`SectionIndex::get`], which
+/// resolves a server-issued [`SectionId`] to its full [`Section`] record. The
+/// `#[allow(dead_code)]` remains for the BM25 ranking path, which stays unwired
+/// until `search_docs` lands ([037]); it is lifted as each consumer is wired in.
+#[allow(dead_code)] // transitional: ranking unwired until [037]; `get` wired by [036]
 pub struct SectionIndex {
     sections: Vec<Section>,
     postings: BTreeMap<String, BTreeMap<usize, usize>>,
@@ -675,6 +675,19 @@ impl SectionIndex {
                 .then_with(|| a.1.section_id.as_str().cmp(b.1.section_id.as_str()))
         });
         ranked.into_iter().map(|(_, hit)| hit).collect()
+    }
+
+    /// Resolve a server-issued [`SectionId`] to the full [`Section`] it names,
+    /// or `None` when the snapshot carries no such section.
+    ///
+    /// This is the resolution primitive the [036] section read
+    /// (`crate::reads::get_section`) builds on: a hit is a section the server
+    /// can return in full, and a miss is the read's `UnknownSection` error. It
+    /// scans the index's section store — the index already holds every section,
+    /// so no manifest re-scan or re-parse is needed. Total: it never panics on a
+    /// malformed or oversized ID, returning `None` instead.
+    pub fn get(&self, id: &SectionId) -> Option<&Section> {
+        self.sections.iter().find(|section| &section.id == id)
     }
 
     /// Rank the sections that contain any token of `query` within a single
