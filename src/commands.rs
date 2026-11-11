@@ -301,11 +301,50 @@ impl CommandCatalog {
         }
     }
 
-    /// The catalog as of `[042]`: the [setup and inspection](Self::setup_inspection),
+    /// The complete toolchain and direct-tool family (`plan.md` §6): `rustup
+    /// show`, `rustup toolchain`, `rustup override`, `rustup component`, `rustup
+    /// target`, `rustc`, `rustfmt`, and `rustdoc`, in that fixed order.
+    ///
+    /// The rustup subcommand entries cite the rustup Book chapter that documents
+    /// the command (`toolchains`, `overrides` + `toolchain-file`, `components`,
+    /// `targets`, and the `index` introduction for `rustup show`) and the
+    /// toolchain/component/target *mutations* are made explicit via a
+    /// [`EffectKind::ToolchainChange`] effect note (the override, component,
+    /// and target changes write into the user's rustup state — a possible
+    /// toolchain change that is *not* a permission to make it). `rustup show` is
+    /// an inspection command and carries no effect note. The direct-tool entries
+    /// (`rustc`, `rustfmt`, `rustdoc`) cite the compiler/rustfmt/rustdoc
+    /// reference chapters they defer to (the rustc `command-line-arguments`
+    /// chapter, the rustfmt `README.md`/`Configurations.md` reference, and the
+    /// rustdoc `commands`/`documentation-tests` chapters). Each entry keeps its
+    /// prerequisites, version/stability qualifications, and effect notes in
+    /// **separate** fields (AC2): the help/version mechanism
+    /// (`--help`/`--version`/`rustup show --active-toolchain`), the
+    /// stable/nightly/unknown compatibility qualifications, and the effect notes
+    /// are maintained metadata that survives separately from the upstream
+    /// excerpts — a documented nightly-only option keeps its "nightly"/"unstable"
+    /// qualification rather than being flattened to an unconditional claim, and
+    /// an unknown/undocumented-version note keeps its qualification too.
+    pub fn toolchain_direct_tools() -> CommandCatalog {
+        CommandCatalog {
+            entries: vec![
+                rustup_show(),
+                rustup_toolchain(),
+                rustup_override(),
+                rustup_component(),
+                rustup_target(),
+                rustc_usage(),
+                rustfmt_usage(),
+                rustdoc_usage(),
+            ],
+        }
+    }
+
+    /// The catalog as of `[043]`: the [setup and inspection](Self::setup_inspection),
     /// [dependency and reproducibility](Self::dependencies), [implementation and
-    /// verification](Self::implementation_verification), and [packaging and release-
-    /// preparation](Self::packaging_release) families, in that order — the four
-    /// families `plan.md` §6 names first.
+    /// verification](Self::implementation_verification), [packaging and release-
+    /// preparation](Self::packaging_release), and [toolchain and direct-tool](Self::toolchain_direct_tools)
+    /// families, in that order — the five families `plan.md` §6 names.
     ///
     /// This is the "a concatenation this module's lookup already handles" case:
     /// the lookup/resolve paths are unchanged by the concatenation, so every key
@@ -315,6 +354,7 @@ impl CommandCatalog {
         entries.extend(CommandCatalog::dependencies().entries);
         entries.extend(CommandCatalog::implementation_verification().entries);
         entries.extend(CommandCatalog::packaging_release().entries);
+        entries.extend(CommandCatalog::toolchain_direct_tools().entries);
         CommandCatalog { entries }
     }
 
@@ -506,6 +546,49 @@ fn rustfmt_section(file: &str) -> SectionId {
 fn rustdoc_section(chapter: &str) -> SectionId {
     SectionId::derive(&rustdoc_source(), chapter, None, None)
         .expect("a well-formed rustdoc chapter path derives a section id")
+}
+
+// ---------------------------------------------------------------------------
+// The rustup / rustc source helpers
+//
+// The toolchain and direct-tool family (`[043]`) cites the *toolchain* chapters
+// of the rustup Book (ingested by `crate::ingest::rustup`: `installation`,
+// `toolchains`, `overrides`, `components`, `targets`, `toolchain-file`, and the
+// `index` introduction) and the *compiler* chapters of the rustc Book (ingested
+// by `crate::ingest::rustc`: `command-line-arguments`, `index`). These helpers
+// derive the same section ids the ingestion stages do (the chapter file stem
+// under each book's boundary, per `crate::ingest::<book>::chapter_path`), so a
+// cited section resolves against a real snapshot rather than a fabricated
+// placeholder.
+// ---------------------------------------------------------------------------
+
+/// The rustup source id — The rustup Book (`rust-lang.github.io/rustup/`).
+fn rustup_source() -> SourceId {
+    SourceId::new("rustup").expect("`rustup` is a registry source id")
+}
+
+/// The rustc source id — The rustc Book (`doc.rust-lang.org/rustc/`).
+fn rustc_source() -> SourceId {
+    SourceId::new("rustc").expect("`rustc` is a registry source id")
+}
+
+/// Derive the section id for a rustup Book chapter (`installation`, `toolchains`,
+/// `overrides`, `components`, `targets`, `toolchain-file`, `index`), the way
+/// `crate::ingest::rustup::chapter_path` derives it (the chapter file stem under
+/// the `rustup` boundary), so the citation resolves against a real rustup
+/// section.
+fn rustup_chapter(chapter: &str) -> SectionId {
+    SectionId::derive(&rustup_source(), chapter, None, None)
+        .expect("a well-formed rustup chapter path derives a section id")
+}
+
+/// Derive the section id for a rustc Book chapter (`command-line-arguments`,
+/// `index`, …), the way `crate::ingest::rustc::chapter_path` derives it (the
+/// chapter file stem under the `rustc` boundary), so the citation resolves
+/// against a real rustc section.
+fn rustc_chapter(chapter: &str) -> SectionId {
+    SectionId::derive(&rustc_source(), chapter, None, None)
+        .expect("a well-formed rustc chapter path derives a section id")
 }
 
 fn cargo_new() -> CommandEntry {
@@ -1106,6 +1189,484 @@ fn cargo_publish() -> CommandEntry {
                     .to_string(),
             },
         ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The eight toolchain and direct-tool entries
+//
+// [043] adds the fifth and final family of `plan.md` §6: the toolchain
+// installer and diagnostics commands (`rustup show`, `rustup toolchain`,
+// `rustup override`, `rustup component`, `rustup target`) and the direct-tool
+// usage entries (`rustc`, `rustfmt`, `rustdoc`). As with the earlier families,
+// each entry is a faithful, compact distillation of the upstream chapter that
+// documents the command, citing that chapter (AC1) and keeping its
+// prerequisites, version/stability qualifications, and effect notes in
+// **separate** maintained fields (AC2 / `plan.md` §6/§350).
+//
+// The rustup *mutation* commands — `rustup toolchain` (install/link/use),
+// `rustup override` (directory overrides), `rustup component` (add/remove
+// components), and `rustup target` (add/list/remove host targets) — each carry a
+// [`EffectKind::ToolchainChange`] effect note: they write into the user's rustup
+// state. `rustup show` is an inspection command and carries no effect note. The
+// direct-tool entries cite the reference chapters the tool defers to (the rustc
+// `command-line-arguments` chapter, the rustfmt `README.md`/`Configurations.md`
+// reference, and the rustdoc `commands`/`documentation-tests` chapters).
+//
+// The help/version mechanism and the stable/nightly/unknown compatibility
+// qualification are maintained metadata that survives *separately* from the
+// upstream excerpts: a documented nightly-only/unstable option keeps its
+// "nightly"/"unstable" qualification rather than being flattened to an
+// unconditional claim, and an unknown/undocumented-version note keeps its
+// qualification too. No entry here is executed: the catalog selects
+// documentation, and the calling agent runs these tools through its own terminal
+// tools.
+// ---------------------------------------------------------------------------
+
+/// `rustup show`: display the active toolchain, the installed toolchains, and
+/// the active override for the current directory.
+///
+/// The *inspection* side of the rustup family — like `cargo metadata` it reports
+/// the installed state without changing it, so it carries no effect note. Its
+/// help/version mechanism (`rustup show --help`, `rustup --version`, and the
+/// `rustup show --active-toolchain` query) and its version qualification are
+/// maintained separately from the upstream excerpt.
+fn rustup_show() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("rustup show").expect("`rustup show` is a well-formed key"),
+        purpose: "Display the active toolchain, the installed toolchains, and the \
+                  active override for the current directory."
+            .to_string(),
+        upstream_sections: vec![rustup_chapter("index")],
+        syntax: vec!["rustup show [OPTIONS]".to_string()],
+        examples: vec![
+            "`rustup show` prints the active toolchain (channel, host, release), the \
+             installed toolchains, and any directory override in force; \
+             `rustup show --active-toolchain` prints only the active toolchain name."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "`rustup` is installed (the Rust toolchain installer); the active toolchain \
+             is the one the installer selected or pinned for the directory."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `rustup`; run \
+             `rustup show --help` for the version-specific option list. The \
+             help/version mechanism is `rustup --help`, `rustup --version`, and \
+             `rustup show --active-toolchain` (which reports the toolchain name for \
+             the current directory)."
+                .to_string(),
+            "When the active toolchain's version is unknown or differs from the \
+             documented baseline, report the version `rustup show` actually returns \
+             rather than assuming a documented version applies; that \
+             version-qualification is preserved, not flattened to an unconditional \
+             claim. Retrieving this entry is documentation lookup: it surfaces \
+             toolchain-inspection guidance and does not change the toolchain; the \
+             calling agent decides whether to run `rustup show` through its own \
+             terminal tools."
+                .to_string(),
+        ],
+        // Inspection command: it reports the installed/active state without
+        // changing it, so it carries no maintained effect note.
+        effect_notes: vec![],
+    }
+}
+
+/// `rustup toolchain`: install, link, list, or use Rust toolchains.
+///
+/// The *install/link* side of the rustup family: it changes which toolchains are
+/// available and which is active, so it carries a [`EffectKind::ToolchainChange`]
+/// effect note (a *possible* change to the user's rustup state, not a permission
+/// to make it). `rustup toolchain use` changes the active toolchain; the
+/// `install`/`link` forms add toolchains.
+fn rustup_toolchain() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("rustup toolchain").expect("`rustup toolchain` is a well-formed key"),
+        purpose: "Install, link, list, or set the active Rust toolchain.".to_string(),
+        upstream_sections: vec![rustup_chapter("toolchains")],
+        syntax: vec![
+            "rustup toolchain install <NAME> [OPTIONS]".to_string(),
+            "rustup toolchain link <NAME> <PATH>".to_string(),
+            "rustup toolchain list".to_string(),
+            "rustup toolchain use <NAME>".to_string(),
+        ],
+        examples: vec![
+            "`rustup toolchain install stable` installs the stable toolchain; \
+             `rustup toolchain install nightly` installs a nightly channel; \
+             `rustup toolchain link my-toolchain /path/to/rustc` registers a local \
+             toolchain; `rustup toolchain use stable` makes a channel the active \
+             toolchain for the current directory."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "`rustup` is installed; installing or linking a toolchain may fetch it \
+             from a configured toolchain source."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `rustup`; run \
+             `rustup toolchain --help` for the version-specific option list. The \
+             help/version mechanism is `rustup toolchain --help` (and \
+             `rustup --version` for the installer version); channel availability \
+             (for example `nightly`) is documented per channel, and the \
+             stable/nightly qualification is preserved, not flattened to \
+             unconditional."
+                .to_string(),
+            "Retrieving this entry is documentation lookup: it surfaces \
+             toolchain-management guidance and does not install, link, or switch a \
+             toolchain. No toolchain is changed as a result of this lookup; the \
+             calling agent decides whether to run `rustup toolchain` through its \
+             own terminal tools."
+                .to_string(),
+        ],
+        effect_notes: vec![EffectNote {
+            kind: EffectKind::ToolchainChange,
+            detail: "changes the user's rustup toolchain state: `install`/`link` \
+                     add a toolchain (a possible download of the toolchain \
+                     sources), and `use`/`override` change the active toolchain for \
+                     a directory. This note names the possible toolchain change; \
+                     it is documentation, not a permission to make the change."
+                .to_string(),
+        }],
+    }
+}
+
+/// `rustup override`: set or inspect the directory toolchain override.
+///
+/// A *mutation* of the user's rustup state: `rustup override set <NAME>` pins the
+/// toolchain for the current directory (written to rustup's override store, or
+/// equivalently via a `rust-toolchain.toml` file), so it carries a
+/// [`EffectKind::ToolchainChange`] effect note. It cites both the `overrides`
+/// chapter and the `toolchain-file` chapter, which documents the
+/// `rust-toolchain.toml` form.
+fn rustup_override() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("rustup override").expect("`rustup override` is a well-formed key"),
+        purpose: "Set, list, or remove the directory toolchain override.".to_string(),
+        upstream_sections: vec![
+            rustup_chapter("overrides"),
+            rustup_chapter("toolchain-file"),
+        ],
+        syntax: vec![
+            "rustup override set <TOOLCHAIN>".to_string(),
+            "rustup override list".to_string(),
+            "rustup override unset [PATH]".to_string(),
+        ],
+        examples: vec![
+            "`rustup override set nightly` pins the current directory to the nightly \
+             toolchain; `rustup override list` shows the directory overrides; \
+             `rustup override unset` removes them. A `rust-toolchain.toml` file in \
+             the directory pins the toolchain, overrides, and components in place."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "`rustup` is installed; `rustup override set` requires the referenced \
+             toolchain to be installed (or it is fetched)."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `rustup`; run \
+             `rustup override --help` for the version-specific option list. The \
+             help/version mechanism is `rustup override --help`; the override \
+             channel (for example `nightly`) is documented per channel and its \
+             stable/nightly qualification is preserved, not flattened."
+                .to_string(),
+            "Retrieving this entry is documentation lookup: it surfaces \
+             override-management guidance and does not set, list, or remove an \
+             override. No directory override is changed as a result of this lookup; \
+             the calling agent decides whether to run `rustup override` through its \
+             own terminal tools."
+                .to_string(),
+        ],
+        effect_notes: vec![EffectNote {
+            kind: EffectKind::ToolchainChange,
+            detail: "`rustup override set` writes a directory override into rustup's \
+                     override store (or a `rust-toolchain.toml` file), changing which \
+                     toolchain runs in that directory; `unset` removes it. This note \
+                     names the possible toolchain change; it is documentation, not a \
+                     permission to make the change."
+                .to_string(),
+        }],
+    }
+}
+
+/// `rustup component`: add, remove, or list toolchain components.
+///
+/// A *mutation* of the user's rustup state: `rustup component add`/`remove`
+/// change which components (for example `rustfmt`, `clippy`, `rust-src`,
+/// `rust-docs`) are installed for a toolchain, so it carries a
+/// [`EffectKind::ToolchainChange`] effect note.
+fn rustup_component() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("rustup component").expect("`rustup component` is a well-formed key"),
+        purpose: "Add, remove, or list the components of a toolchain.".to_string(),
+        upstream_sections: vec![rustup_chapter("components")],
+        syntax: vec![
+            "rustup component add <NAME> [OPTIONS]".to_string(),
+            "rustup component remove <NAME>".to_string(),
+            "rustup component list [OPTIONS]".to_string(),
+        ],
+        examples: vec![
+            "`rustup component add rustfmt clippy` installs the rustfmt and Clippy \
+             components for the active toolchain; `rustup component list` shows the \
+             installed, available, and up-to-date components; `rustup component \
+             remove rustfmt` uninstalls a component."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "`rustup` is installed with an active toolchain; adding a component may \
+             fetch it from the configured component source."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `rustup`; run \
+             `rustup component --help` for the version-specific option list. The \
+             help/version mechanism is `rustup component --help`; component \
+             availability varies by channel and host, and that qualification is \
+             preserved, not flattened to unconditional."
+                .to_string(),
+            "Retrieving this entry is documentation lookup: it surfaces \
+             component-management guidance and does not add or remove a component. \
+             No component is installed or removed as a result of this lookup; the \
+             calling agent decides whether to run `rustup component` through its own \
+             terminal tools."
+                .to_string(),
+        ],
+        effect_notes: vec![EffectNote {
+            kind: EffectKind::ToolchainChange,
+            detail: "`rustup component add`/`remove` change which components are \
+                     installed for the active toolchain (a possible download when \
+                     adding). This note names the possible toolchain change; it is \
+                     documentation, not a permission to make the change."
+                .to_string(),
+        }],
+    }
+}
+
+/// `rustup target`: add, list, or remove host/target triples for a toolchain.
+///
+/// A *mutation* of the user's rustup state: `rustup target add`/`remove` change
+/// which target triples are available for a toolchain, so it carries a
+/// [`EffectKind::ToolchainChange`] effect note.
+fn rustup_target() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("rustup target").expect("`rustup target` is a well-formed key"),
+        purpose: "Add, list, or remove target triples for a toolchain.".to_string(),
+        upstream_sections: vec![rustup_chapter("targets")],
+        syntax: vec![
+            "rustup target add <TARGET> [OPTIONS]".to_string(),
+            "rustup target list [OPTIONS]".to_string(),
+            "rustup target remove <TARGET>".to_string(),
+        ],
+        examples: vec![
+            "`rustup target add x86_64-unknown-linux-gnu` makes a target triple \
+             available for cross-compilation; `rustup target list --installed` shows \
+             the installed targets; `rustup target remove x86_64-unknown-linux-gnu` \
+             removes one."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "`rustup` is installed with an active toolchain; adding a target may \
+             fetch it from the configured target source."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `rustup`; run \
+             `rustup target --help` for the version-specific option list. The \
+             help/version mechanism is `rustup target --help`; which target triples \
+             are available varies by host and channel, and that qualification is \
+             preserved, not flattened to unconditional."
+                .to_string(),
+            "Retrieving this entry is documentation lookup: it surfaces \
+             target-management guidance and does not add or remove a target. No \
+             target triple is changed as a result of this lookup; the calling agent \
+             decides whether to run `rustup target` through its own terminal tools."
+                .to_string(),
+        ],
+        effect_notes: vec![EffectNote {
+            kind: EffectKind::ToolchainChange,
+            detail: "`rustup target add`/`remove` change which target triples are \
+                     available for the active toolchain (a possible download when \
+                     adding). This note names the possible toolchain change; it is \
+                     documentation, not a permission to make the change."
+                .to_string(),
+        }],
+    }
+}
+
+/// `rustc`: the Rust compiler — documented usage, options, and flags.
+///
+/// A *direct-tool* entry: the catalog documents how the calling agent runs
+/// `rustc` through its own terminal tools, citing the rustc Book's
+/// `command-line-arguments` chapter (and the `index` introduction). The
+/// documented syntax/options (for example `rustc --edition 2021`) are upstream;
+/// the help/version mechanism and the stable/nightly/unknown qualification are
+/// maintained separately. `rustc` produces a compilation artifact but does not
+/// run the project's own code as its defining effect, so it carries an
+/// [`EffectKind::ArtifactWrite`] note.
+fn rustc_usage() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("rustc").expect("`rustc` is a well-formed key"),
+        purpose: "The Rust compiler; document its usage, options, and flags.".to_string(),
+        upstream_sections: vec![
+            rustc_chapter("command-line-arguments"),
+            rustc_chapter("index"),
+        ],
+        syntax: vec!["rustc [OPTIONS] <input>".to_string()],
+        examples: vec![
+            "`rustc main.rs --edition 2021` compiles `main.rs` using edition 2021; \
+             `rustc --version` prints the compiler version; `rustc --help` (and \
+             `rustc -Z help` on a nightly build) lists the options."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Rust compiler (`rustc`) is installed, typically as part of a toolchain \
+             managed by `rustup`; the edition and options used must be supported by \
+             the installed compiler."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `rustc`; run \
+             `rustc --help` for the version-specific option list. The help/version \
+             mechanism is `rustc --help` and `rustc --version`; `--edition` selects \
+             the language edition the compiler supports."
+                .to_string(),
+            "Some `rustc` options are unstable or nightly-only; the documentation \
+             marks them as such and `rustc -Z help` (on a nightly build) lists the \
+             unstable options. A documented unstable/nightly-only option keeps its \
+             `nightly`/`unstable` qualification — it is not flattened to an \
+             unconditional claim that it is available on every build. When the \
+             installed compiler's version is unknown or differs from the documented \
+             baseline, consult the version that is installed rather than assuming the \
+             documented options apply; that version-qualification is preserved."
+                .to_string(),
+        ],
+        effect_notes: vec![EffectNote {
+            kind: EffectKind::ArtifactWrite,
+            detail: "`rustc` compiles its input and writes the compilation output \
+                     (a binary, object file, or library — a build artifact) under \
+                     the working directory or `target/`. It compiles a single \
+                     crate; it does not execute the project's own code as its \
+                     defining effect. This note names the possible artifact write; \
+                     it is documentation, not a permission to run `rustc`."
+                .to_string(),
+        }],
+    }
+}
+
+/// `rustfmt`: the Rust code formatter — documented usage and configuration.
+///
+/// A *direct-tool* entry that cites the same rustfmt reference the `cargo fmt`
+/// entry cites (the `README.md` usage and `Configurations.md` configuration
+/// reference). The documented syntax/options (for example `rustfmt --check`,
+/// `--config`) are upstream; the help/version mechanism and the stable/unstable
+/// qualification are maintained separately. `rustfmt` formats source in place
+/// (a source change), except `--check` mode, which only checks.
+fn rustfmt_usage() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("rustfmt").expect("`rustfmt` is a well-formed key"),
+        purpose: "The Rust code formatter; document its usage and configuration.".to_string(),
+        upstream_sections: vec![
+            rustfmt_section("README.md"),
+            rustfmt_section("Configurations.md"),
+        ],
+        syntax: vec!["rustfmt [OPTIONS] [FILES...]".to_string()],
+        examples: vec![
+            "`rustfmt src/main.rs` formats the file in place; `rustfmt --check \
+             src/main.rs` reports formatting differences without writing; a \
+             `rustfmt.toml` file (or `--config`) sets per-project options."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "The `rustfmt` binary is installed, typically as the `rustfmt` component \
+             of a toolchain (for example via `rustup component add rustfmt`)."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `rustfmt`; run \
+             `rustfmt --help` for the version-specific option list. The \
+             help/version mechanism is `rustfmt --help` and `rustfmt --version`; \
+             `--check` runs in check mode and `--config` selects an option."
+                .to_string(),
+            "Unstable rustfmt options require a nightly `rustfmt` (selected via \
+             `RUSTUP_TOOLCHAIN=nightly` or `RUSTC_BOOTSTRAP=1`); a documented \
+             unstable option keeps its `unstable`/`nightly` qualification — it is \
+             not flattened to an unconditional claim that it works on a stable \
+             `rustfmt`. When the installed `rustfmt`'s version is unknown or differs \
+             from the documented baseline, consult the version that is installed; \
+             that version-qualification is preserved."
+                .to_string(),
+        ],
+        effect_notes: vec![EffectNote {
+            kind: EffectKind::SourceChange,
+            detail: "`rustfmt` reformats the target source files in place (a source \
+                     change); `rustfmt --check` only checks formatting and does not \
+                     write. This note names the possible source change; it is \
+                     documentation, not a permission to run `rustfmt`."
+                .to_string(),
+        }],
+    }
+}
+
+/// `rustdoc`: the Rust documentation generator — documented usage and
+/// configuration.
+///
+/// A *direct-tool* entry that cites the rustdoc Book's `commands` chapter (the
+/// documented options) and the `documentation-tests` chapter (the doctests
+/// `rustdoc` and `cargo test --doc` run). The documented syntax/options (for
+/// example `rustdoc --document-private-items`) are upstream; the help/version
+/// mechanism and the stable/nightly/unknown qualification are maintained
+/// separately. `rustdoc` produces an HTML documentation tree (an artifact).
+fn rustdoc_usage() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("rustdoc").expect("`rustdoc` is a well-formed key"),
+        purpose: "The Rust documentation generator; document its usage and \
+                  configuration."
+            .to_string(),
+        upstream_sections: vec![
+            rustdoc_section("commands"),
+            rustdoc_section("documentation-tests"),
+        ],
+        syntax: vec!["rustdoc [OPTIONS] <INPUT>".to_string()],
+        examples: vec![
+            "`rustdoc src/lib.rs` generates HTML documentation; `rustdoc \
+             --document-private-items` also documents private items; `rustdoc \
+             --check` runs the documentation tests (doctests) only, and `cargo \
+             test --doc` does the same for a package."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "The `rustdoc` binary is installed, typically as part of a toolchain \
+             (the `rust-docs` component enables rendering of intra-doc links); a \
+             library or binary crate is documented as input."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `rustdoc`; run \
+             `rustdoc --help` for the version-specific option list. The \
+             help/version mechanism is `rustdoc --help` and `rustdoc --version`; \
+             `--document-private-items` is documented and stable, while some other \
+             rustdoc options are unstable."
+                .to_string(),
+            "Some rustdoc options are unstable and require a nightly toolchain (for \
+             example via `RUSTC_BOOTSTRAP=1` or `RUSTUP_TOOLCHAIN=nightly`); a \
+             documented unstable/nightly-only option keeps its `nightly`/`unstable` \
+             qualification — it is not flattened to an unconditional claim that it is \
+             available on a stable build. When the installed `rustdoc`'s version is \
+             unknown or differs from the documented baseline, consult the version that \
+             is installed; that version-qualification is preserved."
+                .to_string(),
+        ],
+        effect_notes: vec![EffectNote {
+            kind: EffectKind::ArtifactWrite,
+            detail: "`rustdoc` writes an HTML documentation tree under `target/doc` \
+                     (a documentation artifact); with `--check` it runs the \
+                     documentation tests and reports without writing the tree. This \
+                     note names the possible artifact write; it is documentation, not \
+                     a permission to run `rustdoc`."
+                .to_string(),
+        }],
     }
 }
 
@@ -1752,6 +2313,41 @@ mod tests {
         .expect("a well-formed section")
     }
 
+    /// Build a section for a rustup Book chapter (`installation`, `toolchains`,
+    /// `overrides`, `components`, `targets`, `toolchain-file`, `index`), the way
+    /// `crate::ingest::rustup` derives it (the chapter file stem under the
+    /// `rustup` boundary), so its derived id matches the id a `rustup …` entry
+    /// cites.
+    fn rustup_book_section(chapter: &str, title: &str) -> Section {
+        SectionBuilder::new(
+            SourceId::new("rustup").expect("`rustup` is a registry source id"),
+            title,
+            chapter,
+            Url::new(format!("https://rust-lang.github.io/rustup/{chapter}.html"))
+                .expect("a valid canonical URL"),
+            format!("{title}: a short, faithful excerpt from the rustup book."),
+        )
+        .build()
+        .expect("a well-formed section")
+    }
+
+    /// Build a section for a rustc Book chapter (`command-line-arguments`,
+    /// `index`, …), the way `crate::ingest::rustc` derives it (the chapter file
+    /// stem under the `rustc` boundary), so its derived id matches the id a
+    /// `rustc` entry cites.
+    fn rustc_book_section(chapter: &str, title: &str) -> Section {
+        SectionBuilder::new(
+            SourceId::new("rustc").expect("`rustc` is a registry source id"),
+            title,
+            chapter,
+            Url::new(format!("https://doc.rust-lang.org/rustc/{chapter}.html"))
+                .expect("a valid canonical URL"),
+            format!("{title}: a short, faithful excerpt from the rustc book."),
+        )
+        .build()
+        .expect("a well-formed section")
+    }
+
     /// The nine implementation/verification keys, in the catalog's fixed order.
     const VERIFY_FAMILY_KEYS: &[&str] = &[
         "cargo check",
@@ -1767,6 +2363,18 @@ mod tests {
 
     /// The two packaging/release-preparation keys, in the catalog's fixed order.
     const PKG_FAMILY_KEYS: &[&str] = &["cargo package", "cargo publish"];
+
+    /// The eight toolchain and direct-tool keys, in the catalog's fixed order.
+    const TOOLCHAIN_FAMILY_KEYS: &[&str] = &[
+        "rustup show",
+        "rustup toolchain",
+        "rustup override",
+        "rustup component",
+        "rustup target",
+        "rustc",
+        "rustfmt",
+        "rustdoc",
+    ];
 
     /// A fixture snapshot carrying exactly the sections the implementation/
     /// verification family cites: the eight Cargo command chapters (note there is
@@ -2198,6 +2806,15 @@ mod tests {
                     command_section("commands/cargo-publish", "cargo publish"),
                     command_section("packaging", "Packaging"),
                     command_section("publishing", "Publishing"),
+                    rustup_book_section("index", "Introduction"),
+                    rustup_book_section("toolchains", "Toolchains"),
+                    rustup_book_section("overrides", "Overrides"),
+                    rustup_book_section("toolchain-file", "The toolchain file"),
+                    rustup_book_section("components", "Components"),
+                    rustup_book_section("targets", "Targets"),
+                    rustc_book_section("command-line-arguments", "Command-line arguments"),
+                    rustc_book_section("index", "Introduction"),
+                    rustdoc_chapter("commands", "Commands"),
                 ],
                 sources: vec![],
                 checklist: vec![],
@@ -2227,6 +2844,44 @@ mod tests {
                     command_section("packaging", "Packaging"),
                     command_section("publishing", "Publishing"),
                     command_section("registry", "Registry"),
+                ],
+                sources: vec![],
+                checklist: vec![],
+                commands: vec![],
+                validation: Default::default(),
+                attribution: vec![],
+            },
+        }
+    }
+
+    /// A fixture snapshot carrying exactly the sections the toolchain and
+    /// direct-tool family cites: the rustup Book chapters (`index`, `toolchains`,
+    /// `overrides`, `toolchain-file`, `components`, `targets`), the rustc Book
+    /// chapters (`command-line-arguments`, `index`), the rustfmt reference
+    /// (`README.md`, `Configurations.md`), and the rustdoc Book chapters
+    /// (`commands`, `documentation-tests`). This is the AC1 "sections RESOLVE in
+    /// a snapshot" seam for [043].
+    fn toolchain_fixture_snapshot() -> SnapshotManifest {
+        use crate::model::SnapshotManifest;
+        SnapshotManifest {
+            schema_version: SchemaVersion::V1,
+            body: ManifestBody {
+                snapshot_id: SnapshotId::new("fixture-043").expect("a URI-safe snapshot id"),
+                created_at: Timestamp::new("2026-01-01T00:00:00Z").expect("a valid timestamp"),
+                parser_version: "test".to_string(),
+                sections: vec![
+                    rustup_book_section("index", "Introduction"),
+                    rustup_book_section("toolchains", "Toolchains"),
+                    rustup_book_section("overrides", "Overrides"),
+                    rustup_book_section("toolchain-file", "The toolchain file"),
+                    rustup_book_section("components", "Components"),
+                    rustup_book_section("targets", "Targets"),
+                    rustc_book_section("command-line-arguments", "Command-line arguments"),
+                    rustc_book_section("index", "Introduction"),
+                    rustfmt_file("README.md", "rustfmt"),
+                    rustfmt_file("Configurations.md", "rustfmt configuration"),
+                    rustdoc_chapter("commands", "Commands"),
+                    rustdoc_chapter("documentation-tests", "Documentation tests"),
                 ],
                 sources: vec![],
                 checklist: vec![],
@@ -2618,28 +3273,29 @@ mod tests {
 
     #[test]
     fn the_combined_catalog_resolves_every_family_entry() {
-        // `combined()` is the four families concatenated; the lookup/resolve paths
+        // `combined()` is the five families concatenated; the lookup/resolve paths
         // are unchanged, so every key from any family still resolves exactly as it
         // did in its own catalog.
         let catalog = CommandCatalog::combined();
         // 5 setup/inspection + 5 dependency + 9 implementation/verification + 2
-        // packaging/release = 21.
+        // packaging/release + 8 toolchain/direct-tool = 29.
         assert_eq!(
             catalog.len(),
-            21,
-            "combined is the four families concatenated"
+            29,
+            "combined is the five families concatenated"
         );
         let expected: Vec<String> = FAMILY_KEYS
             .iter()
             .chain(DEP_FAMILY_KEYS.iter())
             .chain(VERIFY_FAMILY_KEYS.iter())
             .chain(PKG_FAMILY_KEYS.iter())
+            .chain(TOOLCHAIN_FAMILY_KEYS.iter())
             .map(|key| key.to_string())
             .collect();
         assert_eq!(
             catalog.keys(),
             expected,
-            "combined keys are the four families, in order"
+            "combined keys are the five families, in order"
         );
         let manifest = combined_fixture_snapshot();
         for key in FAMILY_KEYS
@@ -2648,6 +3304,7 @@ mod tests {
             .chain(DEP_FAMILY_KEYS.iter().copied())
             .chain(VERIFY_FAMILY_KEYS.iter().copied())
             .chain(PKG_FAMILY_KEYS.iter().copied())
+            .chain(TOOLCHAIN_FAMILY_KEYS.iter().copied())
         {
             let resolved = catalog.resolve(&manifest, key).unwrap_or_else(|err| {
                 panic!("`{key}` resolves in the combined catalog, got {err}")
@@ -3558,5 +4215,376 @@ mod tests {
         let pub_a = a.get("cargo publish").expect("cargo publish resolves");
         let pub_b = b.get("cargo publish").expect("cargo publish resolves");
         assert_eq!(pub_a, pub_b);
+    }
+
+    // ===========================================================
+    // [043] toolchain and direct-tool family
+    // ===========================================================
+
+    // --- [043] AC1: exact keys and resolvable citations -------------------
+
+    #[test]
+    fn the_toolchain_family_carries_the_eight_exact_keys_in_order() {
+        let catalog = CommandCatalog::toolchain_direct_tools();
+        assert_eq!(
+            catalog.keys(),
+            TOOLCHAIN_FAMILY_KEYS,
+            "the family is the eight named keys, in order"
+        );
+        assert_eq!(catalog.len(), 8);
+    }
+
+    #[test]
+    fn every_toolchain_key_looks_up_to_its_entry() {
+        let catalog = CommandCatalog::toolchain_direct_tools();
+        for key in TOOLCHAIN_FAMILY_KEYS.iter().copied() {
+            let entry = catalog
+                .get(key)
+                .unwrap_or_else(|err| panic!("`{key}` should resolve to its entry, got {err}"));
+            assert_eq!(
+                entry.key.as_str(),
+                key,
+                "the entry's key is the exact key queried"
+            );
+        }
+    }
+
+    #[test]
+    fn every_toolchain_entry_cites_a_resolvable_upstream_section() {
+        // AC1: every cited section resolves against a fixture snapshot (no
+        // fabricated section); the first resolved id is the entry's first cited
+        // id, and no section is dropped or invented.
+        let catalog = CommandCatalog::toolchain_direct_tools();
+        let manifest = toolchain_fixture_snapshot();
+        for key in TOOLCHAIN_FAMILY_KEYS.iter().copied() {
+            let resolved = catalog
+                .resolve(&manifest, key)
+                .unwrap_or_else(|err| panic!("`{key}` should resolve, got {err}"));
+            assert!(
+                !resolved.sections.is_empty(),
+                "`{key}` resolved with at least one section"
+            );
+            assert_eq!(
+                resolved.sections[0].id, resolved.entry.upstream_sections[0],
+                "the first resolved section is the entry's first cited id"
+            );
+            assert_eq!(
+                resolved.sections.len(),
+                resolved.entry.upstream_sections.len(),
+                "every cited section resolved, none dropped or added"
+            );
+            // No fabricated placeholder: each resolved section belongs to a real
+            // registry source (rustup/rustc/rustfmt/rustdoc), never an empty one.
+            for section in &resolved.sections {
+                assert!(!section.source_id.as_str().is_empty());
+            }
+        }
+    }
+
+    // --- [043] AC1: toolchain/component/target changes documented w/ links --
+
+    #[test]
+    fn toolchain_mutation_entries_document_changes_with_source_links() {
+        // AC1: each rustup mutation entry cites its rustup Book chapter
+        // (resolvable against the fixture) and carries a `ToolchainChange` effect
+        // note naming the possible change — the "toolchain/component/target
+        // changes … documented with source links" of the acceptance criteria.
+        let catalog = CommandCatalog::toolchain_direct_tools();
+        let manifest = toolchain_fixture_snapshot();
+        let mutators: &[(&str, &str)] = &[
+            ("rustup toolchain", "toolchains"),
+            ("rustup override", "overrides"),
+            ("rustup component", "components"),
+            ("rustup target", "targets"),
+        ];
+        for (key, chapter) in mutators {
+            let entry = catalog.get(key).expect("a rustup mutation resolves");
+            let cited = rustup_chapter(chapter);
+            assert!(
+                entry.upstream_sections.contains(&cited),
+                "`{key}` cites the rustup `{chapter}` chapter"
+            );
+            assert!(
+                entry
+                    .effect_notes
+                    .iter()
+                    .any(|note| note.kind == EffectKind::ToolchainChange),
+                "`{key}` carries a ToolchainChange effect note"
+            );
+            // The cited chapter resolves: the source link is real, not dangling.
+            catalog
+                .resolve(&manifest, key)
+                .unwrap_or_else(|err| panic!("`{key}` resolves, got {err}"));
+        }
+        // `rustup override` additionally cites the `toolchain-file` chapter (the
+        // `rust-toolchain.toml` form of a directory override).
+        let override_entry = catalog
+            .get("rustup override")
+            .expect("rustup override resolves");
+        assert!(
+            override_entry
+                .upstream_sections
+                .iter()
+                .any(|id| *id == rustup_chapter("toolchain-file")),
+            "rustup override cites the toolchain-file chapter"
+        );
+    }
+
+    #[test]
+    fn direct_tool_entries_document_prerequisites_with_source_links() {
+        // AC1: each direct-tool entry (`rustc`, `rustfmt`, `rustdoc`) cites its
+        // reference chapter(s), carries documented prerequisites, and resolves
+        // against the fixture — the "direct-tool prerequisites documented with
+        // source links" of the acceptance criteria.
+        let catalog = CommandCatalog::toolchain_direct_tools();
+        let manifest = toolchain_fixture_snapshot();
+        for (key, expected) in [
+            ("rustc", rustc_chapter("command-line-arguments")),
+            ("rustfmt", rustfmt_section("README.md")),
+            ("rustdoc", rustdoc_section("commands")),
+        ] {
+            let entry = catalog.get(key).expect("a direct-tool entry resolves");
+            assert!(
+                !entry.prerequisites.is_empty(),
+                "`{key}` carries documented prerequisites"
+            );
+            assert!(
+                entry.upstream_sections.contains(&expected),
+                "`{key}` cites its reference chapter"
+            );
+            // The cited chapter resolves: the source link is real, not dangling.
+            catalog
+                .resolve(&manifest, key)
+                .unwrap_or_else(|err| panic!("`{key}` resolves, got {err}"));
+        }
+        // `rustup show` is the inspection entry: it documents the active/
+        // installed toolchain (a prerequisite) and carries no effect note.
+        let show = catalog.get("rustup show").expect("rustup show resolves");
+        assert!(
+            !show.prerequisites.is_empty(),
+            "rustup show carries prerequisites"
+        );
+        assert!(
+            show.effect_notes.is_empty(),
+            "rustup show is read-only and carries no effect note"
+        );
+    }
+
+    #[test]
+    fn every_toolchain_entry_cites_syntax_examples_and_prerequisites() {
+        let catalog = CommandCatalog::toolchain_direct_tools();
+        for key in TOOLCHAIN_FAMILY_KEYS.iter().copied() {
+            let entry = catalog.get(key).expect("a toolchain key resolves");
+            assert!(
+                !entry.syntax.is_empty(),
+                "`{key}` carries a documented syntax excerpt"
+            );
+            assert!(
+                !entry.examples.is_empty(),
+                "`{key}` carries a documented example excerpt"
+            );
+            assert!(
+                !entry.prerequisites.is_empty(),
+                "`{key}` carries documented prerequisites"
+            );
+            assert!(
+                !entry.compatibility.is_empty(),
+                "`{key}` carries version/stability qualifications"
+            );
+            assert!(
+                !entry.upstream_sections.is_empty(),
+                "`{key}` cites its upstream section(s)"
+            );
+        }
+    }
+
+    // --- [043] AC2: help/version and stable/nightly/unknown qualifications --
+
+    #[test]
+    fn help_and_version_mechanisms_are_documented_per_entry() {
+        // AC2: the help/version mechanism is documented for every entry — each
+        // names its `--help` (and the family documents `--version` and
+        // `rustup show --active-toolchain`), kept as maintained metadata
+        // separate from the upstream excerpts.
+        let catalog = CommandCatalog::toolchain_direct_tools();
+        for key in TOOLCHAIN_FAMILY_KEYS.iter().copied() {
+            let entry = catalog.get(key).expect("a toolchain key resolves");
+            assert!(
+                maintained_text(entry).contains("--help"),
+                "`{key}` documents its --help mechanism"
+            );
+        }
+        // The family collectively documents a version query and the active-
+        // toolchain inspection.
+        let show = catalog.get("rustup show").expect("rustup show resolves");
+        let show_text = maintained_text(show);
+        assert!(
+            show_text.contains("--version"),
+            "the family documents a --version query"
+        );
+        assert!(
+            show_text.contains("active-toolchain"),
+            "rustup show documents the --active-toolchain inspection"
+        );
+        // A direct tool documents its own version query.
+        let rustc = catalog.get("rustc").expect("rustc resolves");
+        assert!(
+            maintained_text(rustc).contains("--version"),
+            "rustc documents its --version query"
+        );
+    }
+
+    #[test]
+    fn nightly_only_qualifications_are_retained_not_flattened() {
+        // AC2: a documented nightly-only/unstable option keeps its qualification
+        // rather than being flattened to an unconditional claim — the rustc,
+        // rustfmt, and rustdoc entries each preserve the "nightly"/"unstable"
+        // wording and state the qualification is not flattened.
+        let catalog = CommandCatalog::toolchain_direct_tools();
+        for key in ["rustc", "rustfmt", "rustdoc"] {
+            let entry = catalog.get(key).expect("a direct-tool entry resolves");
+            let text = maintained_text(entry);
+            assert!(
+                text.contains("nightly") || text.contains("unstable"),
+                "`{key}` preserves the nightly/unstable qualification"
+            );
+            assert!(
+                text.contains("not flattened"),
+                "`{key}` states the qualification is not flattened to unconditional"
+            );
+            // The qualification is not flattened: the entry does not claim every
+            // option is unconditionally available on a stable build.
+            assert!(
+                !text.contains("available on every stable build"),
+                "`{key}` does not flatten to an unconditional stable-build claim"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_version_notes_keep_their_qualification() {
+        // AC2: the "unknown/undocumented version" note keeps its qualification —
+        // the guidance says to consult the installed version and preserves the
+        // qualification rather than asserting the documented options apply.
+        let catalog = CommandCatalog::toolchain_direct_tools();
+        for key in ["rustc", "rustfmt", "rustdoc", "rustup show"] {
+            let entry = catalog.get(key).expect("a toolchain key resolves");
+            let text = maintained_text(entry);
+            assert!(
+                text.contains("unknown"),
+                "`{key}` carries the unknown-version note"
+            );
+            assert!(
+                text.contains("preserved"),
+                "`{key}` preserves the version-qualification"
+            );
+        }
+    }
+
+    // --- [043] AC2: separation and no-execution ---------------------------
+
+    #[test]
+    fn toolchain_and_direct_tool_excerpts_and_maintained_notes_are_separate() {
+        // AC2 (separation): a maintained effect-note's prose is kept out of the
+        // upstream syntax/example fields, mirroring the [039]-[042] pattern.
+        let catalog = CommandCatalog::toolchain_direct_tools();
+        for key in TOOLCHAIN_FAMILY_KEYS.iter().copied() {
+            let entry = catalog.get(key).expect("a toolchain key resolves");
+            for note in &entry.effect_notes {
+                assert!(
+                    !note.detail.trim().is_empty(),
+                    "`{key}` carries a non-trivial effect note"
+                );
+                for excerpt in entry.syntax.iter().chain(entry.examples.iter()) {
+                    assert!(
+                        !excerpt.contains(&note.detail),
+                        "`{key}` keeps effect-note prose out of the upstream excerpt"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_section_is_never_fabricated_for_a_toolchain_key() {
+        // AC1 (dangling): a cited section absent from the active snapshot is an
+        // UnresolvedSection, never a fabricated section.
+        let catalog = CommandCatalog::toolchain_direct_tools();
+        let empty = crate::model::SnapshotManifest {
+            schema_version: SchemaVersion::V1,
+            body: crate::model::ManifestBody {
+                snapshot_id: SnapshotId::new("empty-043").expect("a URI-safe snapshot id"),
+                created_at: Timestamp::new("2026-01-01T00:00:00Z").expect("a valid timestamp"),
+                parser_version: "test".to_string(),
+                sections: vec![],
+                sources: vec![],
+                checklist: vec![],
+                commands: vec![],
+                validation: Default::default(),
+                attribution: vec![],
+            },
+        };
+        // The first cited section of `rustup show` is the rustup `index`
+        // chapter; with no sections in the snapshot it dangles rather than being
+        // fabricated.
+        let err = catalog
+            .resolve(&empty, "rustup show")
+            .expect_err("no section resolves in an empty snapshot");
+        match err {
+            LookupError::UnresolvedSection { key, section } => {
+                assert_eq!(key, "rustup show");
+                let expected = SectionId::derive(
+                    &SourceId::new("rustup").expect("registry id"),
+                    "index",
+                    None,
+                    None,
+                )
+                .expect("a well-formed id");
+                assert_eq!(section, expected);
+            }
+            other => panic!("expected UnresolvedSection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_shell_operator_toolchain_key_is_refused_not_executed() {
+        // The no-execution boundary holds for the toolchain/direct-tool family
+        // too: a shell-operator key is refused at the key boundary, never
+        // interpolated into a process. The catalog selects documentation; it
+        // never executes.
+        let catalog = CommandCatalog::toolchain_direct_tools();
+        for bad in [
+            "rustup toolchain install nightly ; rm -rf /",
+            "rustup override set stable | xargs -n1 echo",
+            "rustc $(whoami)",
+            "rustfmt && echo pwned",
+        ] {
+            match catalog.get(bad) {
+                Err(LookupError::InvalidKey { requested, .. }) => {
+                    assert_eq!(requested, bad, "the refused request is preserved");
+                }
+                Err(other) => panic!("expected InvalidKey for `{bad}`, got {other:?}"),
+                Ok(_) => panic!("`{bad}` must not resolve: a shell-operator key is refused"),
+            }
+        }
+        // A clean toolchain key still resolves: refusal is specific to operators.
+        assert!(
+            catalog.get("rustc").is_ok(),
+            "a clean toolchain key resolves"
+        );
+    }
+
+    #[test]
+    fn toolchain_catalogs_are_pure_and_deterministic() {
+        let a = CommandCatalog::toolchain_direct_tools();
+        let b = CommandCatalog::toolchain_direct_tools();
+        assert_eq!(
+            a, b,
+            "two toolchain catalogs built from the same code are identical"
+        );
+        assert_eq!(a.keys(), b.keys());
+        let a_show = a.get("rustup show").expect("rustup show resolves");
+        let b_show = b.get("rustup show").expect("rustup show resolves");
+        assert_eq!(a_show, b_show);
     }
 }
