@@ -75,7 +75,14 @@ use crate::model::{
     CommandEntry, CommandKey, EffectKind, EffectNote, Section, SectionId, SnapshotId,
     SnapshotManifest, SourceId,
 };
+use crate::pagination::{
+    clamp_query_limit, paginate_items, Cursor, CursorError, FilterKey, Item, Operation,
+    ResponsePage, MAX_RESPONSE_BYTES,
+};
+use crate::provenance::{Instant, StaleThreshold};
+use crate::reads::{get_section, ReadError, SectionRead};
 use crate::search::SectionIndex;
+use serde::Serialize;
 
 // ---------------------------------------------------------------------------
 // Catalog error
@@ -2225,6 +2232,385 @@ fn cargo_fix() -> CommandEntry {
             },
         ],
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task [044][M3]: the bounded command-guidance lookup and command inventory
+//
+// This is the *serving* side of the command catalog that `[039]`-`[043]` built.
+// A bounded `get_command_guidance` lookup and a discoverable command inventory
+// are *composed* from the already-tested seams rather than reinvented:
+//
+//   * the `[039]`-`[043]` [`CommandCatalog`] + [`CommandCatalog::resolve`] gives
+//     the exact-key entry and proves every cited upstream section resolves in the
+//     active snapshot (AC1's "source-backed sections"); a dangling citation is a
+//     typed [`LookupError::UnresolvedSection`] — no section is ever fabricated;
+//   * the `[036]` `crate::reads::get_section` seam turns each resolved section
+//     into a complete [`SectionRead`] (Markdown body + heading breadcrumb +
+//     citations + freshness + snapshot identity);
+//   * the `[037]` `crate::pagination` seam — [`paginate_items`] / [`Cursor`] /
+//     [`CursorError`] under the reserved [`Operation::Catalog`] — bounds the
+//     assembled response to [`MAX_RESPONSE_BYTES`] with an *explicit* continuation
+//     cursor and a truncation flag, so a clipped response is never silent and the
+//     pages reassemble into the whole;
+//
+// while the `[007]` [`CommandKey`] boundary rejects an unsupported key (with the
+// catalog's supported keys as the discoverable alternatives) and a shell-operator
+// key. The lookup therefore has **no subprocess-execution path**: it returns
+// guidance only, and the calling agent runs a command through its own terminal
+// tools. No entry here is ever executed.
+//
+// ## No process-execution path (AC2)
+//
+// This module contains no `std::process`, no `Command::new`, no `.spawn(`, and
+// no `.exec(`: the catalog *selects documentation*, it never interpolates a key
+// into a process. A source-scan test (`command_lookup_has_no_subprocess_
+// execution_path`) enforces this guarantee against this very module — a documented
+// grep guarantee the compiler-independent way.
+//
+// ## The two seams and their bounds
+//
+// * `command_guidance` — resolve the exact key, compose each cited section into a
+//   [`SectionRead`] via `[036]`, and page those section reads via `[037]` under
+//   `Operation::Catalog` bound to the command key. The entry's metadata
+//   (`syntax` / `examples` / `prerequisites` / `compatibility`) and its
+//   separately-labeled [`EffectNote`]s ride on every page (they are small and
+//   always fit); the section *content* is the bulk the cap bounds.
+// * `command_inventory` — the discoverable catalog: the supported keys, paged via
+//   the `[037]` [`Cursor`] / [`CursorError`] / [`MAX_RESPONSE_BYTES`] primitives
+//   under `Operation::Catalog`, snapshot-bound (a cursor from another snapshot is
+//   a [`CursorError::Mismatch`]) so a caller enumerates every key across pages
+//   rather than receiving a silent full dump.
+// ---------------------------------------------------------------------------
+
+/// A failure to serve command guidance, mapping each composed seam's error into
+/// one typed boundary so a caller reacts to the right cause.
+///
+/// * [`Lookup`](CommandGuidanceError::Lookup) — the `[039]`-`[043]` catalog
+///   boundary refused the request: a shell-operator / empty / padded key
+///   ([`LookupError::InvalidKey`], AC2), an unsupported key
+///   ([`LookupError::UnknownKey`] carrying the discoverable alternatives, AC2),
+///   or a dangling citation ([`LookupError::UnresolvedSection`], AC1 — the
+///   guidance is not fabricated).
+/// * [`Cursor`](CommandGuidanceError::Cursor) — the `[037]` continuation was
+///   malformed or a mismatched token (a foreign operation/filter/snapshot).
+/// * [`Read`](CommandGuidanceError::Read) — the `[036]` section read failed; a
+///   defensive arm, because [`resolve`](CommandCatalog::resolve) already proves
+///   every cited section resolves before a read is attempted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandGuidanceError {
+    /// The command-key / citation boundary refused the request (AC1/AC2).
+    Lookup(LookupError),
+    /// The continuation cursor was malformed or mismatched (AC1).
+    Cursor(CursorError),
+    /// A section read failed (defensive; a resolved citation cannot be unknown).
+    Read(ReadError),
+}
+
+impl fmt::Display for CommandGuidanceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lookup(err) => write!(f, "{err}"),
+            Self::Cursor(err) => write!(f, "{err}"),
+            Self::Read(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for CommandGuidanceError {}
+
+impl From<LookupError> for CommandGuidanceError {
+    fn from(err: LookupError) -> Self {
+        Self::Lookup(err)
+    }
+}
+
+impl From<CursorError> for CommandGuidanceError {
+    fn from(err: CursorError) -> Self {
+        Self::Cursor(err)
+    }
+}
+
+impl From<ReadError> for CommandGuidanceError {
+    fn from(err: ReadError) -> Self {
+        Self::Read(err)
+    }
+}
+
+/// One bounded page of `get_command_guidance` output: the command's entry
+/// (metadata + separately-labeled effect notes) together with a `[037]`
+/// [`ResponsePage`] of its source-backed section reads.
+///
+/// The entry rides on every page — it is small and carries the command's
+/// `syntax` / `examples` / `prerequisites` / `compatibility` and its
+/// [`EffectNote`]s (kept distinct from the upstream sections, AC2) — while the
+/// section *content* is what the cap bounds and paginates. A clipped page
+/// carries an explicit [`next_cursor`](ResponsePage::next_cursor) and a
+/// [`truncated`](ResponsePage::truncated) flag (the truncation reason); resuming
+/// that cursor reproduces the remaining sections, so the pages reassemble into
+/// the whole.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandGuidance {
+    /// The resolved command entry: metadata plus the separately-labeled effect
+    /// notes.
+    pub entry: CommandEntry,
+    /// The snapshot the guidance was served under (provenance for the resume).
+    pub snapshot_id: SnapshotId,
+    /// The `[037]` cap-bounded page of the command's section reads, with its
+    /// explicit continuation.
+    pub page: ResponsePage,
+}
+
+impl CommandGuidance {
+    /// The section reads on this page, in the command's citation order.
+    ///
+    /// Each is a complete [`SectionRead`] from the `[036]` seam — the Markdown
+    /// body, heading breadcrumb, citations, freshness, and snapshot identity —
+    /// never a clipped excerpt without its remainder.
+    pub fn sections(&self) -> impl Iterator<Item = &SectionRead> + '_ {
+        self.page.items.iter().filter_map(|item| match item {
+            Item::Section(read) => Some(read.as_ref()),
+            _ => None,
+        })
+    }
+
+    /// Whether more section reads follow that this page did not return.
+    pub fn has_more(&self) -> bool {
+        self.page.truncated
+    }
+}
+
+/// Serve the bounded, source-backed guidance for an exact command `key`.
+///
+/// This is the `get_command_guidance` lookup of `plan.md` §6 / §11, composed from
+/// the `[036]` + `[037]` + `[039]`-`[043]` seams:
+///
+/// 1. **Resolve the exact key** through [`CommandCatalog::resolve`], which
+///    validates the key at the `[007]` boundary (a shell operator / empty / padded
+///    request is [`LookupError::InvalidKey`, never executed — AC2], an unsupported
+///    request is [`LookupError::UnknownKey`] with the discoverable alternatives —
+///    AC2) and proves every cited section resolves in `manifest` (a dangling
+///    citation is [`LookupError::UnresolvedSection`], AC1).
+/// 2. **Compose each resolved section** into a [`SectionRead`] via the `[036]`
+///    [`get_section`] seam, as an [`Item::Section`].
+/// 3. **Page the section reads** with the `[037]` [`paginate_items`] seam under
+///    `Operation::Catalog`, bound to the command key via
+///    [`FilterKey::category`] (the command key occupies the cursor's filter slot,
+///    disjoint from checklist categories, which live under `Operation::Checklist`),
+///    so the assembled response stays within [`MAX_RESPONSE_BYTES`] with an
+///    explicit continuation.
+///
+/// Total: it returns a typed error (never panics) and is pure (a fixed catalog
+/// and snapshot yield a fixed page). It touches no network, no filesystem, and no
+/// process — it returns guidance only. `as_of` / `threshold` feed the `[036]`
+/// section-read freshness; the entry metadata and effect notes are returned whole
+/// on every page, and only the section *content* is clipped across continuations.
+pub fn command_guidance(
+    catalog: &CommandCatalog,
+    manifest: &SnapshotManifest,
+    as_of: Instant,
+    threshold: StaleThreshold,
+    key: &str,
+    limit: Option<usize>,
+    cursor: Option<&str>,
+) -> Result<CommandGuidance, CommandGuidanceError> {
+    // AC1/AC2 at the catalog boundary: resolve the exact key and prove every
+    // cited section resolves in this snapshot. A shell operator / empty / padded
+    // key, an unsupported key, or a dangling citation is refused here — never
+    // executed, never fabricated.
+    let resolved = catalog.resolve(manifest, key)?;
+    let snapshot_id = resolved.snapshot_id.clone();
+
+    // Compose each resolved section into a complete [036] SectionRead. `resolve`
+    // already proved every cited section resolves, so each read succeeds; the
+    // `Read` arm is defensive only.
+    let mut items = Vec::with_capacity(resolved.sections.len());
+    for section in &resolved.sections {
+        let read = get_section(manifest, &section.id, as_of, threshold)?;
+        items.push(Item::Section(Box::new(read)));
+    }
+
+    // Page the section reads under Operation::Catalog, bound to the command key
+    // so a continuation is specific to this command's section stream. The [037]
+    // seam enforces the cap and the explicit continuation.
+    let filter = FilterKey::category(key);
+    let page = paginate_items(Operation::Catalog, &filter, &snapshot_id, &items, limit, cursor)?;
+
+    Ok(CommandGuidance {
+        entry: resolved.entry,
+        snapshot_id,
+        page,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The discoverable command inventory
+// ---------------------------------------------------------------------------
+
+/// A cap-bounded page of the command catalog's supported keys — the discoverable
+/// "Resources" catalog a caller enumerates across pages rather than receiving in
+/// one silent full dump.
+///
+/// The page is snapshot-bound (its [`Cursor`] binds the active snapshot, so a
+/// cursor minted under another snapshot is a [`CursorError::Mismatch`]) and
+/// bounded on two counts a caller cannot bypass: the item `limit` (via the shared
+/// [`clamp_query_limit`]) and the [`MAX_RESPONSE_BYTES`] cap measured on the
+/// complete serialized page. A non-final page carries an explicit
+/// [`next_cursor`](CommandInventory::next_cursor) that resumes after the last
+/// returned key; a final page carries `None`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandInventory {
+    /// The snapshot the inventory was served under (the cursor's binding).
+    pub snapshot_id: SnapshotId,
+    /// The keys returned on this page, in catalog order.
+    pub keys: Vec<String>,
+    /// The number of keys returned (`== keys.len()`).
+    pub returned: usize,
+    /// Whether more keys follow that this page did not return.
+    pub truncated: bool,
+    /// The cursor to resume this exact stream, or `None` when this is the last
+    /// page.
+    pub next_cursor: Option<String>,
+}
+
+impl CommandInventory {
+    /// The complete serialized size of this page in bytes — the measurement AC1
+    /// enforces: every page this seam produces is `<=` [`MAX_RESPONSE_BYTES`].
+    pub fn serialized_bytes(&self) -> usize {
+        inventory_page_bytes(
+            self.snapshot_id.as_str(),
+            &self.keys,
+            self.truncated,
+            self.next_cursor.as_deref(),
+        )
+    }
+
+    /// Whether more keys follow that this page did not return.
+    pub fn has_more(&self) -> bool {
+        self.truncated
+    }
+}
+
+/// The exact serialized page envelope `command_inventory` bounds — mirroring the
+/// `[037]` `serialized_page_bytes` discipline (snapshot identity, operation,
+/// counts, truncation flag, next cursor, and the keys in full) so the cap is
+/// measured on the complete response a server would send, not on the keys alone.
+#[derive(Serialize)]
+struct SerializedInventoryPage {
+    snapshot_id: String,
+    operation: Operation,
+    returned: usize,
+    truncated: bool,
+    next_cursor: Option<String>,
+    keys: Vec<String>,
+}
+
+/// The complete serialized byte length of an inventory page holding `keys`, the
+/// way AC1 measures it — over the whole JSON a server would send. On the
+/// (impossible) serialization failure the page is treated as over the cap so the
+/// caller never lets an unmeasured page through.
+fn inventory_page_bytes(
+    snapshot_id: &str,
+    keys: &[String],
+    truncated: bool,
+    next_cursor: Option<&str>,
+) -> usize {
+    let page = SerializedInventoryPage {
+        snapshot_id: snapshot_id.to_string(),
+        operation: Operation::Catalog,
+        returned: keys.len(),
+        truncated,
+        next_cursor: next_cursor.map(str::to_string),
+        keys: keys.to_vec(),
+    };
+    serde_json::to_vec(&page)
+        .map(|bytes| bytes.len())
+        .unwrap_or(MAX_RESPONSE_BYTES + 1)
+}
+
+/// Serve a cap-bounded, snapshot-bound page of the command catalog's supported
+/// keys — the discoverable "Resources" inventory of `plan.md` §6 / §11.
+///
+/// The keys come from `catalog.keys()` (the `[039]`-`[043]` catalog's fixed
+/// order) and are paged under the `[037]` [`Cursor`] / [`CursorError`] / [`FilterKey`]
+/// / [`MAX_RESPONSE_BYTES`] primitives, bound to `Operation::Catalog` and the
+/// active snapshot, so a caller walks every key across pages with an explicit
+/// continuation rather than receiving a silent full dump. A cursor minted under
+/// another operation/filter/snapshot is a [`CursorError::Mismatch`]; a malformed
+/// token is [`CursorError::Malformed`] — never a panic, never a wrong page.
+///
+/// Total and pure: it returns a typed [`CursorError`] (never panics) and a fixed
+/// catalog plus snapshot yields a fixed page. It touches no network, no
+/// filesystem, and no process.
+pub fn command_inventory(
+    catalog: &CommandCatalog,
+    manifest: &SnapshotManifest,
+    limit: Option<usize>,
+    cursor: Option<&str>,
+) -> Result<CommandInventory, CursorError> {
+    let snapshot_id = manifest.body.snapshot_id.clone();
+    let op = Operation::Catalog;
+    let filter = FilterKey::all();
+
+    // AC1/AC2: resume from a cursor this layer minted, rejecting a foreign /
+    // malformed one; `None` is the first page (offset 0).
+    let start = match cursor {
+        None => 0,
+        Some(token) => {
+            let cursor = Cursor::from_token(token)?;
+            cursor.verify(op, &filter, &snapshot_id)?
+        }
+    };
+
+    let all = catalog.keys();
+    let remaining = all.get(start..).unwrap_or(&[]);
+    // The item count: default and clamp via the shared [037] rule so the
+    // inventory and the [038] `search_docs` request agree. `0` yields an empty
+    // page; a request above the cap is clamped to the cap.
+    let count_limit = clamp_query_limit(limit);
+
+    // Greedily fill keys until the complete serialized page would exceed the cap,
+    // stopping short of the key that would push it over — never silently
+    // dropping it. This mirrors `[037]` `paginate_items`'s cap discipline over
+    // the key stream (whose items are too small to page through `Item` directly).
+    let mut chosen: Vec<String> = Vec::with_capacity(count_limit.min(remaining.len()));
+    let mut k = 0;
+    while k < remaining.len() && chosen.len() < count_limit {
+        let would_truncate = (k + 1) < remaining.len();
+        let next_cursor = if would_truncate {
+            Some(Cursor::mint(op, &filter, &snapshot_id, start + k + 1).to_token())
+        } else {
+            None
+        };
+        let mut candidate = chosen.clone();
+        candidate.push(remaining[k].clone());
+        if inventory_page_bytes(
+            snapshot_id.as_str(),
+            &candidate,
+            would_truncate,
+            next_cursor.as_deref(),
+        ) > MAX_RESPONSE_BYTES
+        {
+            break; // this key would exceed the cap; stop here
+        }
+        chosen = candidate;
+        k += 1;
+    }
+
+    let truncated = k < remaining.len();
+    let next_cursor = if truncated {
+        Some(Cursor::mint(op, &filter, &snapshot_id, start + k).to_token())
+    } else {
+        None
+    };
+
+    Ok(CommandInventory {
+        snapshot_id,
+        returned: chosen.len(),
+        keys: chosen,
+        truncated,
+        next_cursor,
+    })
 }
 
 // ---------------------------------------------------------------------------
