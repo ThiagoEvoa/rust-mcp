@@ -3,11 +3,16 @@
 //! This module is the *catalog* side of `plan.md` §6 ("Build and validate the
 //! source-backed command catalog, including citations, compatibility
 //! qualifications, and effect notes"): the fixed, human-reviewable set of
-//! [`CommandEntry`]s that a later task (`[040]`-`[044]`) grows into the full
+//! [`CommandEntry`]s that the milestone (`[039]`-`[044]`) grows into the full
 //! command families and that the `get_command_guidance` / catalog resource
-//! (`[048]+`) serves. [039] seeds the **project setup and inspection** family —
+//! (`[048]+`) serves. [039] seeded the **project setup and inspection** family —
 //! `cargo new`, `cargo init`, `cargo metadata`, `cargo locate-project`, and
-//! `cargo tree` — the family `plan.md` §6 names first.
+//! `cargo tree` — the family `plan.md` §6 names first. [040] adds the
+//! **dependency and reproducibility** family — `cargo add`, `cargo remove`,
+//! `cargo update`, `cargo generate-lockfile`, and `cargo fetch`, each citing its
+//! command section *and* the relevant dependency/feature/lockfile reference
+//! sections — and a [`CommandCatalog::combined`] that concatenates the two
+//! families.
 //!
 //! ## Two acceptance criteria (`plan.md` §5/§6/§350, issue [#39])
 //!
@@ -44,10 +49,11 @@
 //! section resolvable — with no upstream ingestion, network call, or
 //! real-client/agent trial.
 //!
-//! **Out of scope for [039]** (later work, deliberately *not* built here): the
-//! `[040]`-`[044]` command families, the `[048]+` MCP tool/resource wiring, and
-//! any change to the ingestion pipeline (`crate::ingest`) — this module *defines*
-//! the catalog and its resolution seam and consumes the tested [`SectionIndex`].
+//! **Out of scope for [040]** (later work, deliberately *not* built here): the
+//! remaining `[041]`-`[044]` command families, the `[048]+` MCP tool/resource
+//! wiring, and any change to the ingestion pipeline (`crate::ingest`) — this
+//! module *defines* the catalog and its resolution seam and consumes the tested
+//! [`SectionIndex`].
 
 // The module is the transitional catalog seam: its items are exercised by the
 // tests below and by `crate::coverage`'s record-level inspections, but are not
@@ -152,11 +158,13 @@ fn key_error_reason(err: &crate::model::SchemaError) -> String {
 
 /// A fixed, ordered catalog of [`CommandEntry`]s.
 ///
-/// [039] ships one family — the project setup and inspection commands of
-/// `plan.md` §6 — via [`CommandCatalog::setup_inspection`]. A catalog is a plain,
+/// [039] shipped one family — the project setup and inspection commands of
+/// `plan.md` §6 — via [`CommandCatalog::setup_inspection`]. [040] adds the
+/// dependency and reproducibility family via [`CommandCatalog::dependencies`] and
+/// a [`CommandCatalog::combined`] that concatenates the two. A catalog is a plain,
 /// ordered, cloneable value (no interior mutability, no global): building it twice
 /// yields byte-identical entries, so lookups are pure and deterministic. The
-/// later families (`[040]`-`[044]`) are added as further catalogs or as a
+/// remaining families (`[041]`-`[044]`) are added as further catalogs or as a
 /// concatenation this module's lookup already handles.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandCatalog {
@@ -182,6 +190,54 @@ impl CommandCatalog {
                 cargo_tree(),
             ],
         }
+    }
+
+    /// The complete dependency and reproducibility family (`plan.md` §6):
+    /// `cargo add`, `cargo remove`, `cargo update`, `cargo generate-lockfile`, and
+    /// `cargo fetch`, in that fixed order.
+    ///
+    /// Each entry cites the Cargo Book command section that documents it
+    /// **and** the relevant dependency/feature/lockfile reference sections
+    /// (`features`, `manifest`, `registry`) — AC1's "command-specific options and
+    /// relevant configuration sections". Each entry keeps its prerequisites,
+    /// version/stability qualifications, and the **separately labeled** effect
+    /// notes in distinct fields (AC2): the lockfile/source effect is
+    /// [`EffectKind::LockfileChange`], the source-tree edit
+    /// [`EffectKind::SourceChange`], and the possible registry download
+    /// [`EffectKind::DependencyDownload`].
+    ///
+    /// The `--offline`/`--locked` scoping (AC2) is per command: `--offline` is
+    /// documented for all five (a universal cache-only flag for these
+    /// registry-touching commands), while `--locked` — the "the lockfile will not
+    /// change" assertion — is documented only for the four commands whose purpose
+    /// is to write or resolve the lockfile (`cargo add`, `cargo remove`,
+    /// `cargo update`, `cargo generate-lockfile`). `cargo fetch`'s purpose is to
+    /// refresh/download, the inverse of that assertion, so its entry describes
+    /// `--offline` and points to `--help` for the version-specific flag list
+    /// rather than claiming `--locked`.
+    pub fn dependencies() -> CommandCatalog {
+        CommandCatalog {
+            entries: vec![
+                cargo_add(),
+                cargo_remove(),
+                cargo_update(),
+                cargo_generate_lockfile(),
+                cargo_fetch(),
+            ],
+        }
+    }
+
+    /// The catalog as of `[040]`: the [setup and inspection](Self::setup_inspection)
+    /// family concatenated with the [dependency and reproducibility](Self::dependencies)
+    /// family, in that order — the two families `plan.md` §6 names first.
+    ///
+    /// This is the "a concatenation this module's lookup already handles" case:
+    /// the lookup/resolve paths are unchanged by the concatenation, so every key
+    /// from either family still resolves exactly as it did in its own catalog.
+    pub fn combined() -> CommandCatalog {
+        let mut entries = CommandCatalog::setup_inspection().entries;
+        entries.extend(CommandCatalog::dependencies().entries);
+        CommandCatalog { entries }
     }
 
     /// Whether the catalog has no entries.
@@ -467,6 +523,283 @@ fn cargo_tree() -> CommandEntry {
         // Inspection command: it reads the resolved dependency graph without
         // building, running, or downloading. No maintained effect note.
         effect_notes: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The five dependency/reproducibility entries
+//
+// [040] adds the second family of `plan.md` §6: `cargo add`, `cargo remove`,
+// `cargo update`, `cargo generate-lockfile`, and `cargo fetch`. As with the
+// setup/inspection family, each entry is a faithful, compact distillation of the
+// Cargo Book section that documents the command, citing that command section
+// *and* the relevant dependency/feature/lockfile reference sections (`features`,
+// `manifest`, `registry`) so it carries both the command-specific options and the
+// relevant configuration sections (AC1). The lockfile/source effect, the possible
+// registry download, and the `--offline`/`--locked` scoping are maintainer notes
+// in separate fields (AC2 / `plan.md` §6/§350): `--offline` is documented for all
+// five, `--locked` only for the four that write or resolve the lockfile.
+// ---------------------------------------------------------------------------
+
+/// The Cargo Book reference chapters the dependency family cites as its
+/// "relevant configuration sections" (AC1): the feature-resolution reference,
+/// the `Cargo.toml` manifest reference, and the package-sources/lockfile
+/// reference. These are real top-level Cargo Book chapters, distinct from the
+/// per-command `commands/cargo-<name>` chapters.
+fn features_section() -> SectionId {
+    cargo_section("features")
+}
+
+fn manifest_section() -> SectionId {
+    cargo_section("manifest")
+}
+
+fn registry_section() -> SectionId {
+    cargo_section("registry")
+}
+
+fn cargo_add() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo add").expect("`cargo add` is a well-formed key"),
+        purpose: "Add a dependency to one of this package's manifest groups.".to_string(),
+        upstream_sections: vec![
+            cargo_section("commands/cargo-add"),
+            features_section(),
+            manifest_section(),
+        ],
+        syntax: vec!["cargo add <SPEC> [OPTIONS]".to_string()],
+        examples: vec![
+            "`cargo add serde` adds `serde` to the `[dependencies]` group of the \
+             current package's `Cargo.toml`, resolving it against the configured \
+             sources and recording the chosen version in `Cargo.lock`."
+                .to_string(),
+            "`cargo add serde --features derive` records the `derive` feature in the \
+             manifest's feature selection for the dependency."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Cargo package or workspace: a manifest (`Cargo.toml`) is present in the \
+             working directory or an ancestor of it."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo add --help` for the version-specific option list. The flags \
+             `--offline` and `--locked` are documented for this command: `--offline` \
+             resolves from the local cache only, and `--locked` asserts the \
+             lockfile will not be changed."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::SourceChange,
+                detail: "writes the new dependency into `Cargo.toml` (a source \
+                         change); it does not touch a package's own source files."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::LockfileChange,
+                detail: "updates `Cargo.lock` with the resolved version; `--locked` \
+                         asserts the lockfile will not be changed and errors \
+                         otherwise, and `--offline` resolves from the local cache only."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "may download the new dependency from a configured source; \
+                         `--offline` (or `--frozen`) prevents any download."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+fn cargo_remove() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo remove")
+            .expect("`cargo remove` is a well-formed key"),
+        purpose: "Remove dependencies from the manifest.".to_string(),
+        upstream_sections: vec![cargo_section("commands/cargo-remove"), manifest_section()],
+        syntax: vec!["cargo remove <SPEC>... [OPTIONS]".to_string()],
+        examples: vec![
+            "`cargo remove serde` removes `serde` from the `[dependencies]` group of \
+             the current package's `Cargo.toml`."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Cargo package or workspace: a manifest (`Cargo.toml`) is present in the \
+             working directory or an ancestor of it."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo remove --help` for the version-specific option list. The flags \
+             `--offline` and `--locked` are documented for this command: `--offline` \
+             resolves from the local cache only, and `--locked` asserts the \
+             lockfile will not be changed."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::SourceChange,
+                detail: "removes the dependency entry from `Cargo.toml` (a source \
+                         change); it does not touch a package's own source files."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::LockfileChange,
+                detail: "may rewrite `Cargo.lock` to drop the removed package; \
+                         `--locked` asserts the lockfile will not be changed and \
+                         errors otherwise, and `--offline` resolves from the local \
+                         cache only."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "may download the remaining or replacement dependencies while \
+                         re-resolving; `--offline` (or `--frozen`) prevents any \
+                         download."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+fn cargo_update() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo update").expect("`cargo update` is a well-formed key"),
+        purpose: "Update dependencies as specified by the `Cargo.lock` file."
+            .to_string(),
+        upstream_sections: vec![cargo_section("commands/cargo-update"), registry_section()],
+        syntax: vec!["cargo update [SPEC]... [OPTIONS]".to_string()],
+        examples: vec![
+            "`cargo update` refreshes `Cargo.lock` to the newest versions the \
+             manifest's requirements allow; `cargo update --precise 1.0.0` pins a \
+             specific dependency to `1.0.0` in the lockfile."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Cargo package or workspace with a manifest; a `Cargo.lock` is read or \
+             created when re-resolving."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo update --help` for the version-specific option list. The flags \
+             `--offline` and `--locked` are documented for this command: `--offline` \
+             resolves from the local cache only, and `--locked` asserts the \
+             lockfile will not be changed."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::LockfileChange,
+                detail: "rewrites `Cargo.lock` with the newly resolved versions (a \
+                         lockfile change; it does not edit `Cargo.toml`); `--locked` \
+                         asserts the lockfile will not be changed and errors \
+                         otherwise, and `--offline` resolves from the local cache only."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "may download the newly resolved sources; `--offline` \
+                         (or `--frozen`) prevents any download."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+fn cargo_generate_lockfile() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo generate-lockfile")
+            .expect("`cargo generate-lockfile` is a well-formed key"),
+        purpose: "Generate a `Cargo.lock` lockfile without building.".to_string(),
+        upstream_sections: vec![
+            cargo_section("commands/cargo-generate-lockfile"),
+            registry_section(),
+        ],
+        syntax: vec!["cargo generate-lockfile [OPTIONS]".to_string()],
+        examples: vec![
+            "`cargo generate-lockfile` resolves the package's dependencies against the \
+             configured sources and writes `Cargo.lock` without building or running \
+             any code."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Cargo package or workspace: a manifest (`Cargo.toml`) is present in the \
+             working directory or an ancestor of it."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo generate-lockfile --help` for the version-specific option list. \
+             The flags `--offline` and `--locked` are documented for this command: \
+             `--offline` resolves from the local cache only, and `--locked` asserts \
+             the lockfile will not be changed."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::LockfileChange,
+                detail: "creates or refreshes `Cargo.lock` by resolving the manifest \
+                         against the sources (a lockfile change; it does not edit \
+                         `Cargo.toml`); `--locked` asserts the lockfile will not be \
+                         changed and errors otherwise, and `--offline` resolves from \
+                         the local cache only."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "may download sources during resolution; `--offline` \
+                         (or `--frozen`) prevents any download."
+                    .to_string(),
+            },
+        ],
+    }
+}
+
+fn cargo_fetch() -> CommandEntry {
+    CommandEntry {
+        key: CommandKey::new("cargo fetch").expect("`cargo fetch` is a well-formed key"),
+        purpose: "Fetch all dependencies into the local cache.".to_string(),
+        upstream_sections: vec![cargo_section("commands/cargo-fetch"), registry_section()],
+        syntax: vec!["cargo fetch [OPTIONS]".to_string()],
+        examples: vec![
+            "`cargo fetch` downloads every dependency the manifest resolves into the \
+             local cache, so later `cargo build` / `cargo check` / `cargo test` can \
+             run offline."
+                .to_string(),
+        ],
+        prerequisites: vec![
+            "A Cargo package or workspace: a manifest (`Cargo.toml`) is present in the \
+             working directory or an ancestor of it."
+                .to_string(),
+        ],
+        compatibility: vec![
+            "Syntax and options are documented for the installed `cargo`; run \
+             `cargo fetch --help` for the version-specific option list. The flag \
+             `--offline` is documented for this command: it makes the fetch use the \
+             local cache only. `cargo fetch` refreshes and downloads the lockfile, \
+             the inverse of the `--locked` assertion that the lockfile will not \
+             change, so `--locked` is not documented on this entry."
+                .to_string(),
+        ],
+        effect_notes: vec![
+            EffectNote {
+                kind: EffectKind::DependencyDownload,
+                detail: "downloads the package's dependencies into the local cache; \
+                         `--offline` makes the fetch use the cache only (no network)."
+                    .to_string(),
+            },
+            EffectNote {
+                kind: EffectKind::LockfileChange,
+                detail: "may update `Cargo.lock` to match the manifest when the \
+                         lockfile is missing or out of date (a lockfile change; it \
+                         does not edit `Cargo.toml`)."
+                    .to_string(),
+            },
+        ],
     }
 }
 
