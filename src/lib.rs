@@ -47,6 +47,7 @@ mod ingest;
 mod logging;
 mod mcp;
 mod model;
+mod pagination;
 mod provenance;
 mod reads;
 mod registry;
