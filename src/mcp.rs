@@ -70,6 +70,14 @@ pub mod protocol_error;
 /// response from the active snapshot.
 pub mod list_sources;
 
+/// The `search_docs` MCP tool ([050][M4]): answers a query/source/limit/cursor
+/// request against the active snapshot by composing the [034]/[035] ranked,
+/// exact-match, source-filtered search, the [037] bounded/cursor-paginated page,
+/// the [038] query validation and "useful empty" guidance, and the [036] section
+/// reads for excerpts and citations, mapping failures through the [048]
+/// `ProtocolError` mapping, and assembling the result as a `CallToolResult`.
+pub mod search_docs;
+
 /// The typed MCP tool/resource schemas for task `[048][M4]` (AC1): the
 /// request/response shapes and catalog/section resource payloads that the five
 /// tools and two resources speak, plus a conformance check that a value
