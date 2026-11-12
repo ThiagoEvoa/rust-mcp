@@ -29,6 +29,8 @@
 //!   threshold (`[030]`),
 //! - [`search`] — tokenization, ranking, pagination (`[033]`-`[047]`),
 //! - [`commands`] — source-backed command catalog/guidance (`[039]`-`[044]`),
+//! - [`consistency`] — the offline cross-reference / identity verification that
+//!   the retrieval operations all refer to one immutable snapshot (`[047]`),
 //! - [`eval`] — the independent retrieval evaluation corpus (`[045]`),
 //! - [`mcp`] — tool/resource handlers and protocol errors (`[048]`-`[059]`).
 //!
@@ -41,6 +43,10 @@
 pub mod bundled;
 mod cli;
 mod commands;
+// `[047]` verification harness: a `#[cfg(test)]` module with no production
+// caller, so it compiles only for the test target.
+#[cfg(test)]
+mod consistency;
 mod corpus;
 mod coverage;
 mod error;
