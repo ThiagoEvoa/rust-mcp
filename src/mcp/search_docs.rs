@@ -628,8 +628,8 @@ mod tests {
         };
         let err = search(&m, &req).unwrap_err();
         match err {
-            SearchDocsError::Query(SearchError::QueryTooLarge(cap)) => {
-                assert_eq!(cap, MAX_QUERY_BYTES);
+            SearchDocsError::Query(SearchError::QueryTooLarge { limit, .. }) => {
+                assert_eq!(limit, MAX_QUERY_BYTES);
             }
             other => panic!("expected QueryTooLarge, got {other:?}"),
         }
@@ -773,27 +773,34 @@ mod tests {
     /// `search_docs` (the [037] foreign-cursor contract).
     #[test]
     fn foreign_cursor_is_rejected() {
-        use crate::pagination::{Cursor, FilterKey};
         let m = manifest();
-        // A cursor minted for `list_sources` (a different operation).
-        let foreign = Cursor::mint(FilterKey::all(), &m.body.snapshot_id, 5);
+        // A cursor minted for a *different* operation (here `Checklist`, not
+        // `Search`) cannot be replayed against `search_docs`: the [037] cursor
+        // contract rejects it as an operation mismatch.
+        let foreign = Cursor::mint(Operation::Checklist, &FilterKey::all(), &m.body.snapshot_id, 5);
         let req = SearchDocsRequest {
             query: "the".to_string(),
             source: None,
             limit: Some(1),
-            cursor: Some(foreign.encode()),
+            cursor: Some(foreign.to_token()),
         };
         let err = search(&m, &req).unwrap_err();
-        assert_eq!(err, SearchDocsError::Cursor(CursorError::Mismatch(
-            "operation list_sources does not match the current request".to_string()
-        )));
+        // The mismatch names the field and both values: the call expected the
+        // `Search` operation but the cursor carried `Checklist`.
+        assert_eq!(
+            err,
+            SearchDocsError::Cursor(CursorError::Mismatch {
+                field: MismatchField::Operation,
+                expected: "Search".to_string(),
+                found: "Checklist".to_string(),
+            })
+        );
     }
 
     /// AC2: a malformed cursor is a typed error (the [037] malformed-cursor
     /// contract), never a panic.
     #[test]
     fn malformed_cursor_is_a_typed_error() {
-        use crate::error::CursorError;
         let m = manifest();
         let req = SearchDocsRequest {
             query: "the".to_string(),
@@ -802,9 +809,13 @@ mod tests {
             cursor: Some("not-a-valid-cursor".to_string()),
         };
         let err = search(&m, &req).unwrap_err();
-        assert_eq!(err, SearchDocsError::Cursor(CursorError::Malformed(
-            "cursor must be a base64url string".to_string()
-        )));
+        // A non-cursor token is a typed [`CursorError::Malformed`] (the [037]
+        // malformed-cursor contract), never a panic. The inner reason echoes the
+        // offending token, so match the variant rather than pin the message.
+        assert!(matches!(
+            err,
+            SearchDocsError::Cursor(CursorError::Malformed(_))
+        ));
     }
 
     /// AC2: a query that matches nothing is a *successful* search with zero hits,
@@ -968,21 +979,27 @@ mod tests {
     /// internal path or stack-trace.
     #[test]
     fn error_mapping_leaks_no_internal_detail() {
-        use crate::mcp::protocol_error;
-        use crate::mcp::schema::ProtocolVersion;
         let cases: Vec<SearchDocsError> = vec![
             SearchDocsError::Cursor(CursorError::Malformed(
-                "cursor must be a base64url string".to_string(),
+                "not-a-valid-cursor".to_string(),
             )),
-            SearchDocsError::Cursor(CursorError::Mismatch(
-                "filter key does not match the cursor's".to_string(),
-            )),
+            SearchDocsError::Cursor(CursorError::Mismatch {
+                field: MismatchField::Filter,
+                expected: "all".to_string(),
+                found: "source:frobnicate".to_string(),
+            }),
             SearchDocsError::Query(SearchError::UnsupportedSource("frobnicate".to_string())),
             SearchDocsError::Query(SearchError::BlankQuery),
         ];
-        for version in [Some(ProtocolVersion::V20250618), Some(ProtocolVersion::V20260728), None] {
+        for version in [
+            Some(ProtocolVersion::V_2025_06_18),
+            Some(ProtocolVersion::V_2026_07_28),
+            None,
+        ] {
             for err in &cases {
-                let data = protocol_error::map(err, version);
+                // `map` consumes the error by value; clone each case so every
+                // version is checked against the same set.
+                let data = protocol_error::map(err.clone(), version.as_ref());
                 let text = format!("{}{}", data.message, data.data.unwrap_or_default());
                 for forbidden in ["/src/", "at ", "panic", "SearchError", "CursorError", "search_docs.rs"] {
                     assert!(
