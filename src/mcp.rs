@@ -66,6 +66,10 @@ use crate::error::{AppError, AppResult};
 /// error-code upgrade.
 pub mod protocol_error;
 
+/// The `list_sources` MCP tool ([049][M4]): builds the catalog entry-point
+/// response from the active snapshot.
+pub mod list_sources;
+
 /// The typed MCP tool/resource schemas for task `[048][M4]` (AC1): the
 /// request/response shapes and catalog/section resource payloads that the five
 /// tools and two resources speak, plus a conformance check that a value
