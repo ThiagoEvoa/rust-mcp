@@ -85,15 +85,23 @@
 // is lifted when the handler consumes them.
 #![allow(dead_code)]
 
-use rmcp::model::Resource;
+use rmcp::model::{CallToolResult, ContentBlock, Resource};
 
 use crate::commands::{CommandCatalog, command_inventory};
 use crate::error::AppError;
-use crate::mcp::schema::{CatalogResourceView, CommandEntryView, SourceStatusView};
-use crate::model::SnapshotManifest;
+use crate::mcp::protocol_error::{ErrorClass, ProtocolError};
+use crate::mcp::schema::{
+    CatalogResourceView, CommandEntryView, SectionResourceView, SectionView, SourceStatusView,
+};
+use crate::model::{SectionId, SnapshotId, SnapshotManifest};
 use crate::pagination::{CursorError, MAX_RESPONSE_BYTES};
 use crate::provenance::{Instant, StaleThreshold};
+use crate::reads::ReadError;
 use crate::status::{SourceStatus, build_report};
+use serde::Serialize;
+use serde_json::{Value, json};
+use std::fmt;
+use std::str::FromStr;
 
 // ---------------------------------------------------------------------------
 // Resource URIs + builders
@@ -122,6 +130,19 @@ pub fn command_page_uri(snapshot_id: &str) -> String {
     format!("rust-docs://snapshots/{snapshot_id}/commands")
 }
 
+/// The canonical prefix of a section resource URI:
+/// `rust-docs://snapshots/{snapshot_id}/sections/{section_id}`.
+///
+/// A single shared prefix keeps the [`section_uri`] producer and the
+/// [`parse_section_resource_uri`] consumer in agreement on the exact canonical
+/// form ([055], resolving [054]'s F-054-2): a section resource is always named
+/// under the active snapshot, never a bare `rust-docs://section/<id>`. The
+/// snapshot id is a validated [`SnapshotId`](crate::model::SnapshotId) (URI-safe,
+/// so it carries no `/`), and the section id is a validated
+/// [`SectionId`](crate::model::SectionId) whose only raw `/` is the source
+/// separator — so the three structural `/`s in the form are unambiguous.
+pub const SECTION_RESOURCE_PREFIX: &str = "rust-docs://snapshots/";
+
 /// Build the concrete section resource URI for `snapshot_id` / `section_id`,
 /// `rust-docs://snapshots/{snapshot_id}/sections/{section_id}`.
 ///
@@ -129,9 +150,462 @@ pub fn command_page_uri(snapshot_id: &str) -> String {
 /// ([`SnapshotId`](crate::model::SnapshotId) /
 /// [`SectionId::as_str`](crate::model::SectionId::as_str)), so the result is
 /// URI-safe by construction. The `section_id` is always drawn from the catalog's
-/// own cited sections, never a caller-supplied path.
+/// own cited sections, never a caller-supplied path. The builder shares the
+/// [`SECTION_RESOURCE_PREFIX`] the parser enforces, so a produced URI always
+/// round-trips through [`parse_section_resource_uri`].
 pub fn section_uri(snapshot_id: &str, section_id: &str) -> String {
-    format!("rust-docs://snapshots/{snapshot_id}/sections/{section_id}")
+    format!("{SECTION_RESOURCE_PREFIX}{snapshot_id}/sections/{section_id}")
+}
+
+// ---------------------------------------------------------------------------
+// Section resources ([055]): immutable reads + paginated discovery
+// ---------------------------------------------------------------------------
+
+/// The error a section-resource read or discovery surfaces. Every variant maps
+/// through the [048] [`ProtocolError`] contract to a version-aware error code
+/// without leaking an internal path or the raw client token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SectionResourceError {
+    /// The URI is not of the exact canonical form
+    /// `rust-docs://snapshots/{snapshot_id}/sections/{section_id}` — a missing
+    /// prefix, a non-`sections` segment, or an id that does not parse. Maps to
+    /// `INVALID_PARAMS`.
+    MalformedUri { uri: String },
+    /// The URI names a snapshot other than the one the manifest serves. Maps to
+    /// `INVALID_PARAMS`.
+    MismatchedSnapshot { uri: String },
+    /// The section id parses but is absent from the active snapshot. Maps to
+    /// `RESOURCE_NOT_FOUND` (pre-2026-07-28), upgraded to `INVALID_PARAMS` by the
+    /// version-aware contract for a newer peer — the same mapping `get_section`
+    /// ([051]) uses, so a resource read and a tool read fail identically.
+    UnknownSection { section_id: String },
+    /// A continuation cursor was malformed or does not match this discovery call.
+    /// Delegates to the [037] [`CursorError`] mapping (`INVALID_PARAMS`); this is
+    /// the [054] F-054-1 fix — the section-resource path surfaces a cursor error
+    /// as a typed `INVALID_PARAMS` through [`impl ProtocolError for CursorError`],
+    /// never the lossy [`cursor_to_app_error`] `INTERNAL_ERROR` route.
+    Cursor(CursorError),
+}
+
+impl fmt::Display for SectionResourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MalformedUri { uri } => write!(
+                f,
+                "'{}' is not a canonical section resource URI; expected \
+                 {}{{snapshot}}/sections/{{section_id}}",
+                uri, SECTION_RESOURCE_PREFIX
+            ),
+            Self::MismatchedSnapshot { uri } => write!(
+                f,
+                "section resource URI '{}' names a snapshot other than the active one",
+                uri
+            ),
+            Self::UnknownSection { section_id } => write!(
+                f,
+                "section '{section_id}' is not in this snapshot; list the available \
+                 sections with `list_sources`, `search_docs`, or the catalog resource"
+            ),
+            Self::Cursor(inner) => write!(f, "{inner}"),
+        }
+    }
+}
+
+impl std::error::Error for SectionResourceError {}
+
+impl ProtocolError for SectionResourceError {
+    fn error_class(&self) -> ErrorClass {
+        match self {
+            Self::MalformedUri { .. } | Self::MismatchedSnapshot { .. } => {
+                ErrorClass::InvalidParams
+            }
+            Self::UnknownSection { .. } => ErrorClass::ResourceNotFound,
+            // F-054-1: a cursor error is a typed INVALID_PARAMS through the
+            // contract, not a lossy INTERNAL_ERROR.
+            Self::Cursor(inner) => inner.error_class(),
+        }
+    }
+
+    fn message(&self) -> String {
+        self.to_string()
+    }
+
+    fn data(&self) -> Option<Value> {
+        match self {
+            Self::MalformedUri { uri } => Some(json!({ "uri": uri.clone() })),
+            Self::MismatchedSnapshot { uri } => Some(json!({ "uri": uri.clone() })),
+            Self::UnknownSection { section_id } => {
+                Some(json!({ "section_id": section_id.clone() }))
+            }
+            Self::Cursor(inner) => inner.data(),
+        }
+    }
+}
+
+/// Parse a canonical section resource URI into its `(snapshot_id, section_id)`
+/// components, enforcing the exact form `rust-docs://snapshots/{snapshot}/sections/{id}`.
+///
+/// This is the consumer half of [054]'s F-054-2 canonicalization: it rejects
+/// anything not of the canonical form without touching the filesystem — a missing
+/// or extra prefix, a non-`sections` segment, a path-traversal id, or an
+/// id that fails the [`SectionId`] / [`SnapshotId`] grammar is a
+/// [`SectionResourceError::MalformedUri`] (`INVALID_PARAMS`), never a fabricated
+/// read. Because the snapshot id is URI-safe (no `/`) and the section id's only
+/// raw `/` is its source separator, the three structural `/`s are unambiguous:
+/// the first ends the snapshot, the second opens `sections/`, and the rest is
+/// the section id.
+pub fn parse_section_resource_uri(
+    uri: &str,
+) -> Result<(SnapshotId, SectionId), SectionResourceError> {
+    fn malformed(uri: &str) -> SectionResourceError {
+        SectionResourceError::MalformedUri {
+            uri: uri.to_string(),
+        }
+    }
+    // 1. The exact prefix. A bare `rust-docs://section/…` or a filesystem path
+    //    fails here — the form is always snapshot-scoped.
+    let rest = uri
+        .strip_prefix(SECTION_RESOURCE_PREFIX)
+        .ok_or_else(|| malformed(uri))?;
+    // 2. The snapshot id is URI-safe (no `/`), so the first `/` ends it.
+    let (snapshot_part, tail) = rest.split_once('/').ok_or_else(|| malformed(uri))?;
+    let snapshot_id = SnapshotId::from_str(snapshot_part).map_err(|_| malformed(uri))?;
+    // 3. The remainder is exactly `sections/{section_id}`; any other segment (a
+    //    second path component, a `commands` segment, …) is not the form.
+    let section_part = tail
+        .strip_prefix("sections/")
+        .ok_or_else(|| malformed(uri))?;
+    // 4. The section id must parse through its grammar, which rejects a literal
+    //    `/` after the source separator (the path-traversal guard) and an
+    //    incomplete percent-escape.
+    let section_id = SectionId::from_str(section_part).map_err(|_| malformed(uri))?;
+    Ok((snapshot_id, section_id))
+}
+
+/// Read a section resource by its canonical URI, serving the identical
+/// [`SectionView`] the `get_section` tool ([051]) serves for the same section
+/// (AC1: resource reads and tool reads agree on content and provenance).
+///
+/// The read composes the [036] section read and the [051] [`view_from`]
+/// projection (`crate::mcp::get_section::view_from`), so the resource serves
+/// *exactly* the view the tool produces — no second, drifting derivation. It
+/// first parses the canonical URI ([`parse_section_resource_uri`]) and rejects a
+/// URI naming a snapshot other than the one `manifest` serves
+/// ([`SectionResourceError::MismatchedSnapshot`]); a section the snapshot does
+/// not carry is [`SectionResourceError::UnknownSection`]. No filesystem, process,
+/// or network is touched.
+///
+/// `as_of` / `threshold` feed the [036] read's freshness verdict, passed through
+/// verbatim — the read never invents a freshness.
+pub fn read_section_resource(
+    manifest: &SnapshotManifest,
+    uri: &str,
+    as_of: Instant,
+    threshold: StaleThreshold,
+) -> Result<SectionView, SectionResourceError> {
+    let (snapshot_id, section_id) = parse_section_resource_uri(uri)?;
+
+    // A section resource is named under the snapshot the manifest serves; a URI
+    // naming another snapshot is a mismatch, not a read. The mismatch is checked
+    // *before* any read, so a foreign-snapshot URI never resolves.
+    if snapshot_id != manifest.body.snapshot_id {
+        return Err(SectionResourceError::MismatchedSnapshot {
+            uri: uri.to_string(),
+        });
+    }
+
+    // Read the full record through the [036] section read and project it through
+    // the [051] `view_from` seam, so the resource serves the identical `SectionView`
+    // the tool does (AC1). A not-found / not-well-formed id maps to the same
+    // not-found the tool maps — never a fabricated section.
+    let read = match crate::reads::get_section(manifest, &section_id, as_of, threshold) {
+        Ok(read) => read,
+        Err(ReadError::UnknownSection(id)) => {
+            return Err(SectionResourceError::UnknownSection {
+                section_id: id.as_str().to_string(),
+            });
+        }
+        // `UnknownCategory` and `DanglingExplanation` are checklist-read errors
+        // only; a section read yields `UnknownSection` on a miss. Keep the read
+        // total and panic-free by mapping any other variant to the same not-found.
+        Err(_) => {
+            return Err(SectionResourceError::UnknownSection {
+                section_id: section_id.as_str().to_string(),
+            });
+        }
+    };
+
+    Ok(crate::mcp::get_section::view_from(&read))
+}
+
+/// Assemble the final `rmcp` [`CallToolResult`] for a section-resource read: a
+/// human-readable text block plus the structured [`SectionResourceView`]
+/// payload, with a defensive cap check mirroring the tool `result` assemblers.
+pub fn section_resource_result(view: &SectionView) -> Result<CallToolResult, AppError> {
+    let structured = serde_json::to_value(SectionResourceView {
+        section: view.clone(),
+    })
+    .map_err(|e| {
+        AppError::runtime_start(
+            "encode section resource structured output",
+            Some(Box::new(e)),
+        )
+    })?;
+
+    let text = render_section_resource(view);
+    let structured_bytes = serde_json::to_string(&structured)
+        .map_err(|e| {
+            AppError::runtime_start(
+                "measure section resource structured output",
+                Some(Box::new(e)),
+            )
+        })?
+        .len();
+
+    // Defensive cap check: the section body is already bounded by the [037] cap
+    // upstream of any over-cap path, so a well-formed read fits; this is the
+    // safety net.
+    let byte_len = structured_bytes.max(text.len());
+    if byte_len > MAX_RESPONSE_BYTES {
+        return Err(AppError::runtime_start(
+            format!(
+                "section resource ({byte_len} bytes) exceeds the {MAX_RESPONSE_BYTES}-byte \
+                 response cap"
+            ),
+            None,
+        ));
+    }
+
+    let mut call = CallToolResult::success(vec![ContentBlock::text(text)]);
+    call.structured_content = Some(structured);
+    Ok(call)
+}
+
+/// Render a section-resource read as a concise, human-readable text block that
+/// agrees with the structured [`SectionResourceView`] payload: the section
+/// identity, its source, the canonical URL, the freshness verdict, and the body.
+fn render_section_resource(view: &SectionView) -> String {
+    let mut lines = Vec::with_capacity(8 + view.citations.len());
+    lines.push(format!(
+        "section {} ({} · snapshot {} · freshness {})",
+        view.id, view.doc_title, view.snapshot_id, view.freshness
+    ));
+    if !view.heading_path.is_empty() {
+        lines.push(format!("  heading: {}", view.heading_path.join(" › ")));
+    }
+    lines.push(format!("  source: {}", view.source));
+    if !view.canonical_url.is_empty() {
+        lines.push(format!("  canonical: {}", view.canonical_url));
+    }
+    if !view.citations.is_empty() {
+        lines.push("  citations:".to_string());
+        for citation in &view.citations {
+            lines.push(format!(
+                "  ↳ {}",
+                citation.note.as_deref().unwrap_or_default()
+            ));
+        }
+    }
+    lines.push(format!("  body:\n{}", view.body));
+    lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// Section-resource discovery ([055] AC2): paginated listing of section URIs
+// ---------------------------------------------------------------------------
+
+/// One cap-bounded page of the section-resource discovery: the concrete section
+/// resource URIs (`rust-docs://snapshots/{snapshot}/sections/{id}`) on the page,
+/// in a deterministic order, with an explicit continuation.
+///
+/// Mirrors the [043] [`crate::commands::CommandInventory`] the catalog resource
+/// serves, but over the snapshot's section ids instead of the command catalog's
+/// keys, so a caller discovers every section resource across pages rather than
+/// receiving one silent full dump. The page is snapshot-bound (its [`Cursor`]
+/// ([`crate::pagination::Cursor`]) binds the active snapshot, so a cursor minted
+/// under another snapshot or operation is a [`CursorError::Mismatch`]) and
+/// bounded on two counts a caller cannot bypass: the item `limit` (via the shared
+/// [`crate::pagination::clamp_query_limit`]) and the [`MAX_RESPONSE_BYTES`] cap
+/// measured on the complete serialized page. A non-final page carries an explicit
+/// `next_cursor` that resumes after the last returned URI; a final page carries
+/// `None`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionResourceInventory {
+    /// The snapshot the inventory was served under (the cursor's binding).
+    pub snapshot_id: SnapshotId,
+    /// The section resource URIs returned on this page, in deterministic order.
+    pub uris: Vec<String>,
+    /// The number of URIs returned (`== uris.len()`).
+    pub returned: usize,
+    /// Whether more URIs follow that this page did not return.
+    pub truncated: bool,
+    /// The cursor to resume this exact stream, or `None` when this is the last
+    /// page.
+    pub next_cursor: Option<String>,
+}
+
+impl SectionResourceInventory {
+    /// The complete serialized size of this page in bytes — the measurement AC2
+    /// enforces: every page this seam produces is `<=` [`MAX_RESPONSE_BYTES`].
+    pub fn serialized_bytes(&self) -> usize {
+        section_resource_page_bytes(
+            self.snapshot_id.as_str(),
+            &self.uris,
+            self.truncated,
+            self.next_cursor.as_deref(),
+        )
+    }
+
+    /// Whether more section resources follow that this page did not return.
+    pub fn has_more(&self) -> bool {
+        self.truncated
+    }
+}
+
+/// The exact serialized page envelope [`section_resource_inventory`] bounds —
+/// mirroring the `[043]` `SerializedInventoryPage` discipline (snapshot identity,
+/// operation, counts, truncation flag, next cursor, and the URIs in full) so the
+/// cap is measured on the complete response a server would send, not on the URIs
+/// alone.
+#[derive(Serialize)]
+struct SerializedSectionResourcePage {
+    snapshot_id: String,
+    operation: crate::pagination::Operation,
+    returned: usize,
+    truncated: bool,
+    next_cursor: Option<String>,
+    uris: Vec<String>,
+}
+
+/// The complete serialized byte length of a section-resource page holding `uris`,
+/// the way AC2 measures it — over the whole JSON a server would send. On the
+/// (impossible) serialization failure the page is treated as over the cap so the
+/// caller never lets an unmeasured page through.
+fn section_resource_page_bytes(
+    snapshot_id: &str,
+    uris: &[String],
+    truncated: bool,
+    next_cursor: Option<&str>,
+) -> usize {
+    use crate::pagination::Operation;
+    let page = SerializedSectionResourcePage {
+        snapshot_id: snapshot_id.to_string(),
+        operation: Operation::Catalog,
+        returned: uris.len(),
+        truncated,
+        next_cursor: next_cursor.map(str::to_string),
+        uris: uris.to_vec(),
+    };
+    serde_json::to_vec(&page)
+        .map(|bytes| bytes.len())
+        .unwrap_or(MAX_RESPONSE_BYTES + 1)
+}
+
+/// Serve a cap-bounded, snapshot-bound page of the section-resource discovery —
+/// the paginated "resource discovery" of `plan.md` §6 / §11 for section
+/// resources.
+///
+/// The URIs come from the snapshot's own [`Section`]s (each a validated
+/// [`SectionId`], so URI-safe by construction) and are paged under the `[037]`
+/// [`Cursor`] / [`CursorError`] / [`FilterKey`] / [`MAX_RESPONSE_BYTES`] primitives,
+/// bound to `Operation::Catalog` with a `sections` filter (disjoint from the
+/// command-catalog page, which uses the `all` filter) and the active snapshot, so
+/// a caller walks every section resource across pages with an explicit
+/// continuation rather than receiving a silent full dump. A cursor minted under
+/// another operation / filter / snapshot is a [`CursorError::Mismatch`]; a
+/// malformed token is [`CursorError::Malformed`] — never a panic, never a wrong
+/// page. Both surface as a typed `INVALID_PARAMS` through
+/// [`impl ProtocolError for CursorError`], the [054] F-054-1 fix.
+///
+/// Total and pure: it returns a typed [`CursorError`] (never panics) and a fixed
+/// snapshot plus `limit` plus cursor yield a fixed page. It touches no network, no
+/// filesystem, and no process.
+pub fn section_resource_inventory(
+    manifest: &SnapshotManifest,
+    limit: Option<usize>,
+    cursor: Option<&str>,
+) -> Result<SectionResourceInventory, CursorError> {
+    use crate::pagination::{Cursor, FilterKey, Operation, clamp_query_limit};
+
+    let snapshot_id = manifest.body.snapshot_id.clone();
+    let op = Operation::Catalog;
+    // A `sections` filter disjoint from the command-catalog page's `all` filter,
+    // so a cursor from one stream never resumes the other.
+    let filter = FilterKey::category("sections");
+
+    // AC2: resume from a cursor this layer minted, rejecting a foreign / malformed
+    // one; `None` is the first page (offset 0). The typed `CursorError` is the
+    // F-054-1 fix — a mismatch is a `INVALID_PARAMS` through the contract, not a
+    // lossy `INTERNAL_ERROR`.
+    let start = match cursor {
+        None => 0,
+        Some(token) => {
+            let cursor = Cursor::from_token(token)?;
+            cursor.verify(op, &filter, &snapshot_id)?
+        }
+    };
+
+    // Deterministic order: the snapshot's section ids sorted by their URI-safe
+    // identity, so two builds of the same snapshot yield the same page sequence.
+    let mut ids: Vec<SectionId> = manifest
+        .body
+        .sections
+        .iter()
+        .map(|s| s.id.clone())
+        .collect();
+    // `SectionId` is out of scope to derive `Ord`, so sort by its URI-safe
+    // string identity — a deterministic, total order over the string form.
+    ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    let remaining = ids.get(start..).unwrap_or(&[]);
+    // The item count: default and clamp via the shared [037] rule so the
+    // discovery and the [038] request agree. `0` yields an empty page; a request
+    // above the cap is clamped to the cap.
+    let count_limit = clamp_query_limit(limit);
+
+    // Greedily fill URIs until the complete serialized page would exceed the cap,
+    // stopping short of the URI that would push it over — never silently dropping
+    // it. This mirrors `[043]` `command_inventory`'s cap discipline over the URI
+    // stream (whose items are too small to page through `Item` directly).
+    let mut chosen: Vec<String> = Vec::with_capacity(count_limit.min(remaining.len()));
+    let mut k = 0;
+    while k < remaining.len() && chosen.len() < count_limit {
+        let would_truncate = (k + 1) < remaining.len();
+        let next_cursor = if would_truncate {
+            Some(Cursor::mint(op, &filter, &snapshot_id, start + k + 1).to_token())
+        } else {
+            None
+        };
+        let mut candidate = chosen.clone();
+        candidate.push(section_uri(snapshot_id.as_str(), remaining[k].as_str()));
+        if section_resource_page_bytes(
+            snapshot_id.as_str(),
+            &candidate,
+            would_truncate,
+            next_cursor.as_deref(),
+        ) > MAX_RESPONSE_BYTES
+        {
+            break; // this URI would exceed the cap; stop here
+        }
+        chosen = candidate;
+        k += 1;
+    }
+
+    let truncated = k < remaining.len();
+    let next_cursor = if truncated {
+        Some(Cursor::mint(op, &filter, &snapshot_id, start + k).to_token())
+    } else {
+        None
+    };
+
+    Ok(SectionResourceInventory {
+        snapshot_id,
+        // `returned` is a copy of the length; compute it before `chosen` is
+        // moved into `uris`.
+        returned: chosen.len(),
+        uris: chosen,
+        truncated,
+        next_cursor,
+    })
 }
 
 // ---------------------------------------------------------------------------
