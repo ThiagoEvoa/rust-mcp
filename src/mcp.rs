@@ -58,6 +58,21 @@ use rmcp::{
 
 use crate::error::{AppError, AppResult};
 
+/// Protocol / tool error mapping for task `[048][M4]` (AC2): maps the crate's
+/// internal retrieval errors to version-aware `rmcp` [`rmcp::model::ErrorData`]
+/// without leaking internal paths or stack traces. See that module for the
+/// [`ErrorClass`](protocol_error::ErrorClass) /
+/// [`ProtocolError`](protocol_error::ProtocolError) API and the `2026-07-28`
+/// error-code upgrade.
+pub mod protocol_error;
+
+/// The typed MCP tool/resource schemas for task `[048][M4]` (AC1): the
+/// request/response shapes and catalog/section resource payloads that the five
+/// tools and two resources speak, plus a conformance check that a value
+/// serialised by this crate agrees with its generated `schemars` schema. See
+/// that module for the type catalogue and the agreement tests.
+pub mod schema;
+
 /// The documentation MCP server handler for the M1 skeleton.
 ///
 /// A unit struct — it has no corpus or request state yet. It exists to
