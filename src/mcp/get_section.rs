@@ -277,7 +277,11 @@ pub fn result(resp: &GetSectionResponse) -> Result<CallToolResult, AppError> {
 /// Project a [036] `SectionRead` onto the [048] `SectionView`, keeping the body
 /// verbatim and the context / citations / freshness / snapshot identity
 /// faithful to the read (AC2). The caller substitutes the clipped body.
-fn view_from(read: &SectionRead) -> SectionView {
+///
+/// `pub(crate)` so the [055] section-resource read reuses this exact projection
+/// (identical `SectionView` content and provenance to the `get_section` tool,
+/// per AC1), rather than re-deriving the view in a second place.
+pub(crate) fn view_from(read: &SectionRead) -> SectionView {
     let section = &read.section;
     SectionView {
         id: section.id.as_str().to_string(),
