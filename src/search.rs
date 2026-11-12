@@ -1974,8 +1974,9 @@ mod tests {
     /// the [046] harness exercises) shows the behaviour does not hard-code a query.
     #[test]
     fn a_bare_command_verb_ranks_its_command_page_first() {
-        // Carries "rustdoc" as a structured command key; the key contributes a
-        // standalone `rustdoc` token to the index, so the bare query matches it.
+        // Carries "rustdoc" as a structured command key; the key is indexed as a
+        // standalone `rustdoc` token (written as its own field run, *after* the
+        // body/heading/title), so the bare query matches it.
         let usage = section(
             "rustdoc",
             "commands/rustdoc",
@@ -1985,14 +1986,18 @@ mod tests {
             &["rustdoc".to_string()],
             &[],
         );
-        // A sibling that mentions the verb in prose — the bare `rustdoc` is the
-        // final token, so the [033] phrase-merge cannot fuse it into a command
-        // phrase and it indexes as a standalone body token — but carries no key.
+        // A body-only sibling that also carries a standalone `rustdoc` token, so
+        // the two sections genuinely compete. The flag `--help` sits between the
+        // verb and the next word, so the [033] phrase-merge does *not* fold
+        // `rustdoc` into a command phrase (it fuses a verb only with a following
+        // *word*, never with a following flag), and `rustdoc` indexes as its own
+        // body token — but the sibling carries no `command_keys` entry, so it
+        // stays in the body-only (tier 0) tier.
         let sibling = section(
             "rustdoc",
             "reference/options",
             "betacmd",
-            "a documentation generator called rustdoc",
+            "a documentation generator, run rustdoc --help to generate docs",
             &[],
             &[],
             &[],
