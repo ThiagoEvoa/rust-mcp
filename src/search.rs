@@ -1004,7 +1004,26 @@ fn split_exact(query_tokens: &[Token]) -> (BTreeSet<String>, BTreeSet<String>, B
             Token::LintId(s) => {
                 lints.insert(s.clone());
             }
-            Token::Word(_) | Token::Flag(_) => {}
+            Token::Word(s) => {
+                // A *bare* documented command verb — a query of just `rustc`,
+                // `cargo`, `rustup`, … with no subcommand — is still a
+                // command-name match: the user named a tool by its verb and wants
+                // that tool's command page. The [033] tokenizer keeps a bare verb
+                // a `Word` (there is no subcommand to fuse into a `Command`
+                // phrase), but for exact-match ranking a bare verb still names a
+                // command key, so it lifts a section that carries the same verb as
+                // a `command_keys` entry to the command tier. This is the general
+                // rule "a bare command verb names its command page", not a
+                // per-query special case: it uses the same `is_command_verb`
+                // verb set the tokenizer already trusts, and it only *adds* a
+                // section to the highest (command) tier — it can never demote a
+                // weaker match, so it strengthens the exact-over-body guarantee
+                // rather than weakening it.
+                if is_command_verb(s) {
+                    commands.insert(s.clone());
+                }
+            }
+            Token::Flag(_) => {}
         }
     }
     (codes, commands, lints)
@@ -1940,6 +1959,55 @@ mod tests {
         assert_eq!(
             hits[0].section_id, usage.id,
             "the exact command-usage section must rank first, not be crowded out by the catalog"
+        );
+    }
+
+    /// AC2 (bare verb): a query of just a documented command verb — `rustdoc` with
+    /// no subcommand — ranks the section that carries it as a `command_keys` entry
+    /// first, above a body-only mention of the verb. The [033] tokenizer keeps a
+    /// bare verb a `Word` (there is no subcommand to fuse into a `Command`
+    /// phrase), so without this rule a bare tool name gets no exact-match tier and
+    /// falls back to a length-normalized BM25 order a shorter sibling could win.
+    /// The rule is **general** — it reuses the same `is_command_verb` set the
+    /// tokenizer already trusts, so *any* documented verb names its command page —
+    /// not a per-query special case. A distinct verb (`rustdoc`, not the `rustc`
+    /// the [046] harness exercises) shows the behaviour does not hard-code a query.
+    #[test]
+    fn a_bare_command_verb_ranks_its_command_page_first() {
+        // Carries "rustdoc" as a structured command key; the key contributes a
+        // standalone `rustdoc` token to the index, so the bare query matches it.
+        let usage = section(
+            "rustdoc",
+            "commands/rustdoc",
+            "alphacmd",
+            "the documentation generator and its command-line options",
+            &[],
+            &["rustdoc".to_string()],
+            &[],
+        );
+        // A sibling that mentions the verb in prose — the bare `rustdoc` is the
+        // final token, so the [033] phrase-merge cannot fuse it into a command
+        // phrase and it indexes as a standalone body token — but carries no key.
+        let sibling = section(
+            "rustdoc",
+            "reference/options",
+            "betacmd",
+            "a documentation generator called rustdoc",
+            &[],
+            &[],
+            &[],
+        );
+        let corpus = vec![sibling, usage.clone()];
+        let index = SectionIndex::build(&snapshot(corpus));
+        let hits = index.search("rustdoc");
+        assert_eq!(
+            hits.len(),
+            2,
+            "both sections carry a standalone `rustdoc` token, so both match"
+        );
+        assert_eq!(
+            hits[0].section_id, usage.id,
+            "a bare documented command verb must rank its command page first, above a body-only mention"
         );
     }
 
