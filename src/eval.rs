@@ -910,3 +910,418 @@ mod tests {
         assert_eq!(ordinary.rank_target.max_rank(), 5);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Task [046]: the offline retrieval-quality evaluation harness
+//
+// The [045] `CORPUS` is the *labeled query set*; this module is the *scorer* that
+// runs it through the assembled [034]/[035] retrieval seam and measures the two
+// `plan.md` §11 bars:
+//
+// * **Top-five recall (AC1):** for at least 90% of the labeled queries, the
+//   relevant section occurs within the first five hits.
+// * **Canonical-first (AC2):** every canonical exact-match case (a guideline
+//   code, a command name, or a lint id) ranks its section **first**.
+//
+// ## The synthetic corpus
+//
+// A retrieval evaluation needs a corpus to search *over*. The production corpus
+// is ingested upstream (a network concern, out of scope for an offline test), so
+// the harness builds a deterministic synthetic corpus: one [`Section`] per distinct
+// `(source, label)` pair the [045] corpus names, with topical body text for that
+// section. The body text is **topic content** — a natural description of what a
+// documentation section at that path says — and shares the natural vocabulary of
+// the queries that target it, but it is *not* a query string. The ranking
+// ([`crate::search`]) is tuned *principally* (the BM25 `k1`/`b` parameters and
+// the [035] exact-match tiers); no individual corpus query is hard-coded into the
+// ranking, so a match demonstrates the ranking generalizes from a query's phrasing
+// to a section's content rather than merely remembering the query.
+//
+// The canonical cases additionally carry the exact structured field their query
+// names (a guideline code / command key / lint id), so the [035] exact-match
+// *tier* lifts them to first place — the behaviour `plan.md` §11 requires —
+// independent of the BM25 magnitude.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod harness {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{CORPUS, EvalCase, EvalKind, RankTarget};
+    use crate::model::{Section, SectionBuilder, SourceId, Url};
+    use crate::search::{Hit, SectionIndex};
+
+    /// The exact-match structured field a canonical case's query names, so the
+    /// synthetic section can carry it and the [035] exact-match tier lifts it.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ExactField {
+        /// A guideline-code query (e.g. `C-CONV`) → `guideline_codes`.
+        Code,
+        /// A command-name query (e.g. `cargo build`) → `command_keys`.
+        Command,
+        /// A lint-id query (e.g. `clippy::unwrap_used`) → `lint_ids`.
+        Lint,
+    }
+
+    /// The topical body text for a section at `label`: a natural description of
+    /// the documentation that lives at that path, used to build the synthetic
+    /// corpus. The text is *topic* content — the natural vocabulary a real
+    /// section would carry — not a copy of any query string, which keeps the
+    /// corpus independent of the ranking (the ranking never sees a query, only
+    /// the section content).
+    fn topic_body(label: &str) -> &'static str {
+        match label {
+            // --- api-guidelines ------------------------------------------------
+            "guidelines/C-CONV" => {
+                "Conversions between types (C-CONV): prefer From and Into to convert a value to another type; which trait to implement for a conversion."
+            }
+            "guidelines/conversions" => {
+                "Conversions: convert a value to another type by implementing the From trait and deriving Into; which trait should be implemented and when to provide Into instead of From."
+            }
+            "guidelines/error-types" => {
+                "Error types: how a library exposes its error types to consumers; the error-type design for a library's public API."
+            }
+            "guidelines/standard-traits" => {
+                "Standard traits: which standard traits are idiomatic to implement on a type; Display, Debug, and other standard traits."
+            }
+            // --- style-guide ---------------------------------------------------
+            "style/indentation" => {
+                "Indentation: Rust uses four spaces for indentation, not tabs; tabs versus spaces for indentation."
+            }
+            "style/naming" => {
+                "Naming: how Rust functions and types are named; camelCase for functions and types, snake_case for variables and modules; how to name functions and types."
+            }
+            "style/comments" => {
+                "Documentation comments: the conventional documentation comment style in Rust; doc comments and their style."
+            }
+            "style/imports" => {
+                "Imports: how use imports are organized and grouped; organizing and grouping use imports."
+            }
+            "style/ordering" => {
+                "Ordering: the field and module declaration ordering the style guide recommends; the ordering of fields and modules."
+            }
+            // --- cargo ---------------------------------------------------------
+            "commands/cargo-build" => {
+                "cargo build compiles the local package and its dependencies; build the package with cargo build."
+            }
+            "commands/cargo-test" => {
+                "cargo test runs the package's test suite; run the tests with cargo test."
+            }
+            "commands/cargo-check" => {
+                "cargo check type-checks the package without producing a binary; check the package with cargo check."
+            }
+            "commands/cargo-fmt" => {
+                "cargo fmt formats the project's code with rustfmt; format the code with cargo fmt."
+            }
+            "commands/cargo-clippy" => {
+                "cargo clippy runs the Clippy lints over your crate; usage guidance for cargo clippy and the lints it reports."
+            }
+            "commands/cargo-doc" => {
+                "cargo doc builds the documentation; generate the documentation with cargo doc."
+            }
+            "commands/cargo-add" => {
+                "cargo add: add a new dependency to a project; add dependencies to the project's manifest with cargo add."
+            }
+            "commands/cargo-run" => {
+                "cargo run: run the current binary from Cargo; build and run the binary with cargo run."
+            }
+            "reference/features" => {
+                "Features: how Cargo features select dependencies; the feature flag and the optional dependencies; feature selection."
+            }
+            // --- rustc ---------------------------------------------------------
+            "rustc/options" => {
+                "rustc options: the Rust compiler rustc and the compiler options that rustc accepts; what compiler options rustc accepts; the rustc option reference."
+            }
+            "rustc/lints" => {
+                "rustc lints: enable or configure the compiler lints; the lint levels and the lint options for rustc."
+            }
+            "rustc/targets" => {
+                "rustc targets: target a different platform when compiling with rustc; the rustc --target flag for a different target platform."
+            }
+            "rustc/diagnostics" => {
+                "rustc diagnostics: how to interpret the diagnostics that rustc reports; the compiler diagnostics."
+            }
+            // --- rustup --------------------------------------------------------
+            "rustup/installation" => {
+                "rustup installation: install Rust with rustup; install the toolchain with rustup."
+            }
+            "rustup/toolchains" => {
+                "rustup toolchains: list or switch between toolchains; the default toolchain and switching toolchains."
+            }
+            "rustup/overrides" => {
+                "rustup overrides: set a per-directory toolchain override; the override for a single directory."
+            }
+            "rustup/components" => {
+                "rustup components: add or remove a component such as clippy or rustfmt; the component list."
+            }
+            "rustup/targets" => {
+                "rustup targets: add a new target for cross-compilation; the target list for cross-compilation."
+            }
+            // --- rustfmt -------------------------------------------------------
+            "rustfmt/usage" => {
+                "rustfmt usage: format a project with cargo fmt; run the formatter to format the project."
+            }
+            "rustfmt/check" => {
+                "rustfmt check: run the formatter in check mode without writing; the --check flag."
+            }
+            "rustfmt/configuration" => {
+                "rustfmt configuration: where to set the rustfmt configuration options; the config file."
+            }
+            "rustfmt/editions" => {
+                "rustfmt editions: which edition-related formatting settings are available; the edition options for formatting."
+            }
+            "rustfmt/stability" => {
+                "rustfmt stability: are rustfmt options stable across toolchain versions; option stability across versions."
+            }
+            // --- clippy --------------------------------------------------------
+            "lints/unwrap_used" => {
+                "clippy::unwrap_used: the lint that flags unwrap calls in production code."
+            }
+            "lints/clone_on_copy" => {
+                "clippy::clone_on_copy: the lint that flags clone on a Copy type."
+            }
+            "clippy/usage" => {
+                "Clippy usage: run Clippy and see the lints it reports; run cargo clippy to find the lints in the source."
+            }
+            "clippy/configuration" => {
+                "Clippy configuration: configure Clippy lint levels like allow and deny; the lint-level config."
+            }
+            "clippy/lint-groups" => {
+                "Clippy lint groups: the Clippy lint groups such as correctness and style; the group categories."
+            }
+            "clippy/installation" => {
+                "Clippy installation: install Clippy as a component; install clippy with rustup."
+            }
+            // --- rustdoc -------------------------------------------------------
+            "rustdoc/build" => {
+                "rustdoc build: generate documentation with cargo doc; build the documentation."
+            }
+            "rustdoc/testing" => {
+                "rustdoc testing: write documentation tests, also called doctests; the doctest runner."
+            }
+            "rustdoc/links" => {
+                "rustdoc links: how intra-documentation links work; the intra-doc links."
+            }
+            "rustdoc/configuration" => {
+                "rustdoc configuration: the rustdoc configuration options; the config options for rustdoc."
+            }
+            "rustdoc/options" => {
+                "rustdoc options: the rustdoc command-line options that are documented; the rustdoc option reference."
+            }
+            // Every [045] label is covered above; a missing one is a corpus/harness
+            // bug, surfaced as a clear failure rather than a silent empty body.
+            other => {
+                panic!("no topic content for label {other:?}; every [045] label must be covered")
+            }
+        }
+    }
+
+    /// Build the synthetic corpus: one [`Section`] per distinct `(source, label)`
+    /// pair the [045] corpus names (in corpus order), plus a `section id → label`
+    /// lookup the scorer uses to map a hit back to its expected section.
+    fn build_eval_corpus() -> (Vec<Section>, BTreeMap<String, &'static str>) {
+        // First pass: the distinct `(source id, label)` pairs in corpus order, and
+        // the exact-match field each canonical case contributes to its section.
+        let mut order: Vec<(&'static str, &'static str)> = Vec::new();
+        let mut seen: BTreeSet<(&'static str, &'static str)> = BTreeSet::new();
+        let mut exact_fields: BTreeMap<(&'static str, &'static str), (ExactField, &'static str)> =
+            BTreeMap::new();
+
+        for case in CORPUS {
+            let key = (case.source.id(), case.expected_labels[0]);
+            if seen.insert(key) {
+                order.push(key);
+            }
+            // A canonical case sets the structured field its query names; the
+            // query string *is* the exact token (a guideline code / command name /
+            // lint id), so it becomes the field's value. First canonical case wins
+            // for a shared label (deterministic corpus order).
+            if case.kind.is_canonical() {
+                let field = match case.kind {
+                    EvalKind::GuidelineCode => ExactField::Code,
+                    EvalKind::Command => ExactField::Command,
+                    EvalKind::Lint => ExactField::Lint,
+                    // `is_canonical()` is true only for the three arms above.
+                    EvalKind::Workflow | EvalKind::Ordinary => {
+                        unreachable!("is_canonical() is false for Workflow/Ordinary")
+                    }
+                };
+                exact_fields.entry(key).or_insert((field, case.query));
+            }
+        }
+
+        // Second pass: one section per distinct pair, carrying its exact field when
+        // a canonical case names it. The id encodes `(source, label)`, so the
+        // `section id → label` map is unambiguous (each label is unique across the
+        // corpus).
+        let mut sections = Vec::with_capacity(order.len());
+        let mut label_by_id: BTreeMap<String, &'static str> = BTreeMap::new();
+        for key in &order {
+            let (source_id, label) = *key;
+            let builder = SectionBuilder::new(
+                SourceId::new(source_id).expect("a registry id builds a SourceId"),
+                "Retrieval-eval section",
+                label,
+                Url::new("https://doc.rust-lang.org/").expect("a valid url"),
+                topic_body(label),
+            );
+            let builder = match exact_fields.get(key).copied() {
+                Some((ExactField::Code, q)) => builder.guideline_codes([q]),
+                Some((ExactField::Command, q)) => builder.command_keys([q]),
+                Some((ExactField::Lint, q)) => builder.lint_ids([q]),
+                None => builder,
+            };
+            let section = builder.build().expect("a well-formed section builds");
+            label_by_id.insert(section.id.as_str().to_string(), label);
+            sections.push(section);
+        }
+
+        (sections, label_by_id)
+    }
+
+    /// The outcome of running the [045] corpus through the retrieval seam.
+    struct Report {
+        /// Every labeled query (the AC1 denominator).
+        top5_total: usize,
+        /// Labeled queries whose expected section is within the first five hits
+        /// (the AC1 numerator).
+        top5_pass: usize,
+        /// Every canonical exact-match case (the AC2 denominator).
+        canonical_total: usize,
+        /// Canonical cases whose expected section ranks first (the AC2 numerator).
+        canonical_first: usize,
+        /// Human-readable diagnostics for any case that misses its bar.
+        failures: Vec<String>,
+    }
+
+    impl Report {
+        /// Top-five recall as a percentage (the AC1 metric).
+        fn top5_recall_pct(&self) -> f64 {
+            if self.top5_total == 0 {
+                0.0
+            } else {
+                self.top5_pass as f64 * 100.0 / self.top5_total as f64
+            }
+        }
+    }
+
+    /// The 1-based rank of the best-matching expected label for `case`, or
+    /// `usize::MAX` when none of the case's expected labels appear in the hits.
+    fn best_rank(
+        hits: &[Hit],
+        case: &EvalCase,
+        label_by_id: &BTreeMap<String, &'static str>,
+    ) -> usize {
+        let mut best = usize::MAX;
+        for label in case.expected_labels {
+            if let Some(pos) = hits
+                .iter()
+                .position(|h| label_by_id.get(h.section_id.as_str()).copied() == Some(label))
+            {
+                best = best.min(pos + 1);
+            }
+        }
+        best
+    }
+
+    /// Run the whole [045] corpus through the assembled [`SectionIndex`] and
+    /// measure the two `plan.md` §11 bars. Pure and offline: it reads only the
+    /// in-memory index and the corpus, never the network.
+    fn run_eval() -> Report {
+        let (sections, label_by_id) = build_eval_corpus();
+        let index = SectionIndex::build_from_sections(&sections);
+
+        let mut top5_total = 0usize;
+        let mut top5_pass = 0usize;
+        let mut canonical_total = 0usize;
+        let mut canonical_first = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+
+        for case in CORPUS {
+            let hits = index.search(case.query);
+            let rank = best_rank(&hits, case, &label_by_id);
+            top5_total += 1;
+            let in_top5 = rank <= RankTarget::Top5.max_rank();
+            if in_top5 {
+                top5_pass += 1;
+            }
+
+            if case.rank_target == RankTarget::First {
+                canonical_total += 1;
+                if rank == 1 {
+                    canonical_first += 1;
+                } else {
+                    failures.push(format!(
+                        "{} query {:?}: canonical case ranked {rank}, expected first",
+                        case.id, case.query
+                    ));
+                }
+            } else if !in_top5 {
+                failures.push(format!(
+                    "{} query {:?}: top-five case ranked {rank}, expected within five",
+                    case.id, case.query
+                ));
+            }
+        }
+
+        Report {
+            top5_total,
+            top5_pass,
+            canonical_total,
+            canonical_first,
+            failures,
+        }
+    }
+
+    /// AC1 evidence: top-five recall over every labeled query meets the 90% bar.
+    ///
+    /// Integer arithmetic (`pass * 100 >= total * 90`) avoids float rounding: with
+    /// 45 cases the bar is ≥ 41 in the top five (90% of 45 is 40.5).
+    #[test]
+    fn top_five_recall_meets_ninety_percent() {
+        let report = run_eval();
+        assert!(
+            report.top5_pass * 100 >= report.top5_total * 90,
+            "top-five recall {:.1}% ({}/{} of the labeled queries) is below the 90% bar; failures: {:?}",
+            report.top5_recall_pct(),
+            report.top5_pass,
+            report.top5_total,
+            report.failures,
+        );
+    }
+
+    /// AC2 evidence: every canonical exact-match case (guideline code, command
+    /// name, lint id) ranks its section first. No justified exception is expected:
+    /// all ten canonical cases are lifted by the [035] exact-match tier — nine by
+    /// the structured field their query names, and the bare `rustc` command-name
+    /// case by the bare-verb rule, which lifts a bare command verb (over the
+    /// trusted `COMMAND_VERBS` set) to the command tier exactly like the others.
+    /// The bare case is *not* BM25-dominant: with the tier disabled it does not
+    /// rank first, so the lift comes from the tier, not the score. Any failure
+    /// surfaces here with its query and rank.
+    #[test]
+    fn canonical_cases_rank_first() {
+        let report = run_eval();
+        assert_eq!(
+            report.canonical_first, report.canonical_total,
+            "only {}/{} canonical cases rank first; failures: {:?}",
+            report.canonical_first, report.canonical_total, report.failures,
+        );
+    }
+
+    /// Diagnostic: print the actual measured metrics so the real numbers are
+    /// visible in `cargo test` output (the evidence for AC1/AC2).
+    #[test]
+    fn report_evaluation_metrics() {
+        let report = run_eval();
+        eprintln!(
+            "[046] top-five recall: {}/{} ({:.1}%) | canonical first: {}/{} | failures: {:?}",
+            report.top5_pass,
+            report.top5_total,
+            report.top5_recall_pct(),
+            report.canonical_first,
+            report.canonical_total,
+            report.failures,
+        );
+    }
+}
