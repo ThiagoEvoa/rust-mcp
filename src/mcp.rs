@@ -109,6 +109,7 @@ pub mod get_api_checklist;
 /// result as a `CallToolResult`. It retrieves documentation only — it executes no
 /// command and touches no filesystem or network.
 pub mod get_command_guidance;
+pub mod resources;
 
 /// The typed MCP tool/resource schemas for task `[048][M4]` (AC1): the
 /// request/response shapes and catalog/section resource payloads that the five
