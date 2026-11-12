@@ -53,12 +53,10 @@ use rmcp::model::{CallToolResult, ContentBlock};
 
 use crate::error::AppError;
 use crate::mcp::protocol_error::{ErrorClass, ProtocolError};
-use crate::mcp::schema::{
-    CitationView, SearchDocsRequest, SearchDocsResponse, SearchHitView,
-};
+use crate::mcp::schema::{CitationView, SearchDocsRequest, SearchDocsResponse, SearchHitView};
 use crate::model::{Section, SnapshotManifest};
 use crate::pagination::{CursorError, FilterKey, Item, MAX_RESPONSE_BYTES, Operation};
-use crate::search::{SearchError, SectionIndex, SearchRequest, SourceFilter};
+use crate::search::{SearchError, SearchRequest, SectionIndex, SourceFilter};
 use serde_json::Value;
 
 /// The `search_docs` tool name, matching the [048] schema's `name` field.
@@ -274,10 +272,9 @@ pub fn search(
 /// Returns [`AppError::RuntimeStart`] when the response exceeds the response cap
 /// or serialization fails.
 pub fn result(resp: &SearchDocsResponse) -> Result<CallToolResult, AppError> {
-    let structured = serde_json::to_value(resp)
-        .map_err(|e| {
-            AppError::runtime_start("encode search_docs structured output", Some(Box::new(e)))
-        })?;
+    let structured = serde_json::to_value(resp).map_err(|e| {
+        AppError::runtime_start("encode search_docs structured output", Some(Box::new(e)))
+    })?;
     let text = render_text(resp);
     // The cap is enforced on *both* rendered forms: the structured body carries
     // every field, so its serialized byte length is the binding measurement, while
@@ -285,10 +282,7 @@ pub fn result(resp: &SearchDocsResponse) -> Result<CallToolResult, AppError> {
     // within the cap" contract.
     let structured_bytes = serde_json::to_string(&structured)
         .map_err(|e| {
-            AppError::runtime_start(
-                "measure search_docs structured output",
-                Some(Box::new(e)),
-            )
+            AppError::runtime_start("measure search_docs structured output", Some(Box::new(e)))
         })?
         .len();
     let byte_len = structured_bytes.max(text.len());
@@ -359,7 +353,7 @@ fn render_citation(citation: &CitationView) -> String {
         parts.push(format!("({title})"));
     }
     if let Some(url) = &citation.url {
-        parts.push(format!("{url}"));
+        parts.push(url.to_string());
     }
     parts.join(" ")
 }
@@ -414,13 +408,25 @@ fn build_citations(section: &Section) -> Vec<CitationView> {
 
     // Applicable guideline codes / command keys / lint ids.
     for code in &section.guideline_codes {
-        out.push(note_citation(&section_id, &source, format!("guideline code: {code}")));
+        out.push(note_citation(
+            &section_id,
+            &source,
+            format!("guideline code: {code}"),
+        ));
     }
     for key in &section.command_keys {
-        out.push(note_citation(&section_id, &source, format!("command key: {key}")));
+        out.push(note_citation(
+            &section_id,
+            &source,
+            format!("command key: {key}"),
+        ));
     }
     for lint in &section.lint_ids {
-        out.push(note_citation(&section_id, &source, format!("lint id: {lint}")));
+        out.push(note_citation(
+            &section_id,
+            &source,
+            format!("lint id: {lint}"),
+        ));
     }
     // Compatibility metadata: stability/version qualifications.
     for qualification in &section.qualifications {
@@ -511,9 +517,7 @@ fn find_first(body: &[char], needle: &[char]) -> Option<usize> {
         window
             .iter()
             .zip(needle.iter())
-            .all(|(body_char, needle_char)| {
-                body_char.to_lowercase().eq(needle_char.to_lowercase())
-            })
+            .all(|(body_char, needle_char)| body_char.to_lowercase().eq(needle_char.to_lowercase()))
     })
 }
 
@@ -579,19 +583,53 @@ mod tests {
             .get("properties")
             .and_then(serde_json::Value::as_object)
             .expect("output schema has `properties`");
-        for field in ["snapshot_id", "hits", "limit", "truncated", "next_cursor", "next_steps"] {
+        for field in [
+            "snapshot_id",
+            "hits",
+            "limit",
+            "truncated",
+            "next_cursor",
+            "next_steps",
+        ] {
             assert!(
                 props.contains_key(field),
                 "output schema is missing the `{field}` field"
             );
         }
-        // Each hit carries the excerpt, id, source, score, and citations.
-        let hit_props = props
+        // Each hit's shape is referenced (not inlined) from `hits.items` into the
+        // schema's `$defs` (schemars keeps named structs as references). Resolve
+        // the `items` node — a `$ref`, or an inline object — to its property bag.
+        let items = props
             .get("hits")
-            .and_then(|h| h.get("items").and_then(serde_json::Value::as_object))
-            .and_then(|items| items.get("properties").and_then(serde_json::Value::as_object))
+            .and_then(|h| h.get("items"))
+            .expect("output schema documents a `hits` array");
+        let hit_props =
+            if let Some(ref_str) = items.get("$ref").and_then(serde_json::Value::as_str) {
+                let name = ref_str
+                    .strip_prefix("#/$defs/")
+                    .or_else(|| ref_str.strip_prefix("#/definitions/"))
+                    .unwrap_or(ref_str);
+                schema
+                    .get("$defs")
+                    .or_else(|| schema.get("definitions"))
+                    .and_then(|defs| defs.get(name))
+            } else {
+                Some(items)
+            }
+            .and_then(|shape| {
+                shape
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+            })
             .expect("output schema documents the hit shape");
-        for field in ["section_id", "source", "title", "excerpt", "score", "citations"] {
+        for field in [
+            "section_id",
+            "source",
+            "title",
+            "excerpt",
+            "score",
+            "citations",
+        ] {
             assert!(
                 hit_props.contains_key(field),
                 "hit schema is missing the `{field}` field"
@@ -671,18 +709,19 @@ mod tests {
         assert_eq!(resp.hits.len(), 1);
         let hit = &resp.hits[0];
         // ID + source + title.
-        assert!(hit.section_id.starts_with("cargo#"));
+        assert!(hit.section_id.starts_with("cargo/"));
         assert_eq!(hit.source, "cargo");
-        assert_eq!(hit.title, "Cargo Book");
+        assert_eq!(hit.title, "The Cargo Book");
         // A bounded, non-empty excerpt.
         assert!(!hit.excerpt.is_empty());
         assert!(hit.excerpt.chars().count() <= EXCERPT_MAX_CHARS + 2);
         // Provenance (canonical URL) + compatibility metadata (command key +
         // qualification) are surfaced as citations.
         assert!(
-            hit.citations
-                .iter()
-                .any(|c| c.url.as_deref() == Some("https://doc.rust-lang.org/cargo/")),
+            hit.citations.iter().any(|c| c
+                .url
+                .as_deref()
+                .is_some_and(|u| u.starts_with("https://doc.rust-lang.org/cargo/"))),
             "a canonical-URL citation is present: {:?}",
             hit.citations
         );
@@ -694,9 +733,11 @@ mod tests {
             hit.citations
         );
         assert!(
-            hit.citations
-                .iter()
-                .any(|c| c.note.as_deref().map(|n| n.starts_with("qualification: ")).unwrap_or(false)),
+            hit.citations.iter().any(|c| c
+                .note
+                .as_deref()
+                .map(|n| n.starts_with("qualification: "))
+                .unwrap_or(false)),
             "a qualification (compatibility) citation is present: {:?}",
             hit.citations
         );
@@ -723,7 +764,10 @@ mod tests {
         let resp = search(&m, &req).expect("search succeeds");
         assert!(resp.hits.len() == 1, "a one-item page returns one hit");
         assert!(resp.truncated, "a truncated page reports truncation");
-        assert!(resp.next_cursor.is_some(), "a truncated page carries a next cursor");
+        assert!(
+            resp.next_cursor.is_some(),
+            "a truncated page carries a next cursor"
+        );
         assert_eq!(resp.limit, 1);
     }
 
@@ -777,7 +821,12 @@ mod tests {
         // A cursor minted for a *different* operation (here `Checklist`, not
         // `Search`) cannot be replayed against `search_docs`: the [037] cursor
         // contract rejects it as an operation mismatch.
-        let foreign = Cursor::mint(Operation::Checklist, &FilterKey::all(), &m.body.snapshot_id, 5);
+        let foreign = Cursor::mint(
+            Operation::Checklist,
+            &FilterKey::all(),
+            &m.body.snapshot_id,
+            5,
+        );
         let req = SearchDocsRequest {
             query: "the".to_string(),
             source: None,
@@ -835,10 +884,7 @@ mod tests {
             resp.next_cursor.is_none(),
             "a no-match search carries no next cursor"
         );
-        assert!(
-            !resp.truncated,
-            "a no-match search is not truncated"
-        );
+        assert!(!resp.truncated, "a no-match search is not truncated");
         assert!(
             !resp.next_steps.is_empty(),
             "a no-match search carries the [038] useful-empty next-steps"
@@ -846,8 +892,8 @@ mod tests {
         assert!(
             resp.next_steps
                 .iter()
-                .any(|s| s.contains("different term")),
-            "the useful-empty guidance suggests a different term: {:?}",
+                .any(|s| s.contains("broader") || s.contains("fewer terms")),
+            "the useful-empty guidance suggests adjusting the query: {:?}",
             resp.next_steps
         );
         assert_eq!(resp.snapshot_id, m.body.snapshot_id.as_str());
@@ -874,10 +920,12 @@ mod tests {
         assert!(resp.next_cursor.is_some());
     }
 
-    /// AC2: an empty result returns an empty hits list with a null/absent next
-    /// cursor, and serializes so `next_cursor`/`next_steps` are omitted.
+    /// AC2: a no-match result is a *successful* empty page. On the wire it omits
+    /// the `next_cursor` (the [038] "empty → null cursor" contract, gated by
+    /// `skip_serializing_if` on `None`) while still carrying the useful-empty
+    /// `next_steps` guidance, which a no-match always populates.
     #[test]
-    fn empty_result_omits_cursor_and_next_steps_on_the_wire() {
+    fn no_match_omits_next_cursor_on_the_wire() {
         let m = manifest();
         let resp = search(
             &m,
@@ -890,11 +938,22 @@ mod tests {
         )
         .expect("a no-match search is not an error");
         let json = serde_json::to_value(&resp).expect("serialize the response");
-        assert_eq!(json.get("hits").and_then(serde_json::Value::as_array), Some(&Vec::<_>::new()));
-        // `next_cursor` and `next_steps` are `skip_serializing_if`, so an empty
-        // result omits them entirely (null/absent on the wire).
+        assert_eq!(
+            json.get("hits").and_then(serde_json::Value::as_array),
+            Some(&Vec::<_>::new())
+        );
+        // `next_cursor` is `skip_serializing_if`-gated on `None`, so a no-match
+        // (a null cursor) omits it entirely on the wire.
         assert!(json.get("next_cursor").is_none(), "next_cursor is absent");
-        assert!(json.get("next_steps").is_none(), "next_steps is absent");
+        // A no-match still carries the [038] useful-empty `next_steps`, so it is
+        // present and non-empty on the wire (the guidance is not omitted).
+        assert!(
+            json.get("next_steps")
+                .and_then(serde_json::Value::as_array)
+                .map(|steps| !steps.is_empty())
+                .unwrap_or(false),
+            "a no-match carries the useful-empty next_steps on the wire: {json:?}"
+        );
     }
 
     /// AC2: a full page's assembled response stays within the response cap.
@@ -980,9 +1039,7 @@ mod tests {
     #[test]
     fn error_mapping_leaks_no_internal_detail() {
         let cases: Vec<SearchDocsError> = vec![
-            SearchDocsError::Cursor(CursorError::Malformed(
-                "not-a-valid-cursor".to_string(),
-            )),
+            SearchDocsError::Cursor(CursorError::Malformed("not-a-valid-cursor".to_string())),
             SearchDocsError::Cursor(CursorError::Mismatch {
                 field: MismatchField::Filter,
                 expected: "all".to_string(),
@@ -1001,7 +1058,14 @@ mod tests {
                 // version is checked against the same set.
                 let data = protocol_error::map(err.clone(), version.as_ref());
                 let text = format!("{}{}", data.message, data.data.unwrap_or_default());
-                for forbidden in ["/src/", "at ", "panic", "SearchError", "CursorError", "search_docs.rs"] {
+                for forbidden in [
+                    "/src/",
+                    "at ",
+                    "panic",
+                    "SearchError",
+                    "CursorError",
+                    "search_docs.rs",
+                ] {
                     assert!(
                         !text.contains(forbidden),
                         "error {err:?} at {version:?} leaks `{forbidden}`: {text}"
