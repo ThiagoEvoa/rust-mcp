@@ -176,20 +176,30 @@ pub fn render_text(resp: &ListSourcesResponse) -> String {
 /// concise text rendering, both within the response cap.
 ///
 /// The structured JSON is the source of truth; the text content block is a
-/// readable summary that carries the same data. The cap is enforced on the
-/// serialised structured body (the largest part); an over-cap catalog would be
-/// an operational error, which never occurs for the eight-source corpus.
+/// readable summary that carries the same data. The cap is enforced on **both**
+/// rendered forms: the structured body is the larger of the two (it carries every
+/// field plus JSON overhead, while the text is a rendered subset of the same
+/// data), so the structured measurement is the binding one and the text
+/// measurement is the guard that keeps the two forms from ever disagreeing with
+/// the "both within the cap" contract. An over-cap catalog would be an
+/// operational error, which never occurs for the eight-source corpus.
 pub fn result(resp: &ListSourcesResponse) -> Result<CallToolResult, AppError> {
     let structured = serde_json::to_value(resp).map_err(|e| AppError::RuntimeStart {
         message: "encode list_sources structured output".to_string(),
         source: Some(Box::new(e)),
     })?;
-    let byte_len = serde_json::to_vec(&structured)
+    // The cap is enforced on *both* rendered forms (see the function docs): the
+    // structured body is the larger, so its measurement is the binding one, and
+    // the text measurement guards the "both within the cap" contract.
+    let structured_bytes = serde_json::to_vec(&structured)
         .map_err(|e| AppError::RuntimeStart {
             message: "measure list_sources structured output".to_string(),
             source: Some(Box::new(e)),
         })?
         .len();
+    let text = render_text(resp);
+    // `str::len` is the UTF-8 byte length, which is the cap's unit.
+    let byte_len = structured_bytes.max(text.len());
     if byte_len > MAX_RESPONSE_BYTES {
         return Err(AppError::RuntimeStart {
             message: format!(
@@ -205,7 +215,6 @@ pub fn result(resp: &ListSourcesResponse) -> Result<CallToolResult, AppError> {
             message: "list_sources structured output is not a JSON object".to_string(),
             source: None,
         })?;
-    let text = render_text(resp);
     // `CallToolResult::success` sets is_error=Some(false); we add the
     // structured content so structured-capable clients get the typed payload.
     let mut call = CallToolResult::success(vec![ContentBlock::text(text)]);
@@ -226,8 +235,13 @@ mod tests {
     }
 
     fn as_of() -> Instant {
-        // Well after the bundled snapshot's captured times, so every verdict is
-        // a definite "fresh" (last_checked within threshold), never "unknown".
+        // A fixed "now" so the report is deterministic. The bundled seed has
+        // `last_checked: None` for every source (see `src/bundled.rs`), so every
+        // verdict resolves to "unknown": freshness is still computed from the
+        // snapshot's sources (via `build_report` / `evaluate_freshness`), there is
+        // simply no `last_checked` to compare, so the verdict is never guessed as
+        // "fresh". This is what `verdicts_are_unknown_for_a_snapshot_without_
+        // last_checked` asserts.
         Instant::parse("2026-01-01T00:00:00Z").expect("valid")
     }
 
@@ -264,18 +278,59 @@ mod tests {
     fn text_and_structured_agree() {
         let resp = response(&snapshot(), as_of(), threshold()).expect("build");
         let text = render_text(&resp);
-        // Every source id appears in the text, in the same order.
+
+        // Per-source, field-by-field agreement: each structured source's *whole*
+        // rendered line — id, verdict, title, last-checked (or "unknown"), and
+        // content hash — must appear in the text, in registry order. This pins
+        // that the text and structured forms agree on every field, not merely
+        // that the ids appear in order.
         let mut last = usize::MIN;
         for source in &resp.sources {
-            let pos = text
-                .find(&format!("  - {}", source.id))
-                .expect("source id present in text");
+            let last_checked = source
+                .last_checked
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let line = format!(
+                "  - {} [{}]: {} (last checked {}, content {})",
+                source.id, source.freshness, source.title, last_checked, source.content_hash,
+            );
+            let pos = text.find(&line).unwrap_or_else(|| {
+                panic!(
+                    "text disagrees with structured source {}: {line}",
+                    source.id
+                )
+            });
             assert!(pos > last, "sources appear in order in the text");
             last = pos;
         }
-        // The snapshot id and corpus hash appear in the header.
-        assert!(text.contains(&resp.snapshot_id));
-        assert!(text.contains(&resp.corpus_hash));
+
+        // Snapshot metadata in the header agrees with the structured fields.
+        assert!(
+            text.contains(&format!("snapshot {}", resp.snapshot_id)),
+            "the header carries the snapshot id"
+        );
+        assert!(
+            text.contains(&format!("corpus {}", resp.corpus_hash)),
+            "the header carries the corpus hash"
+        );
+        assert!(
+            text.contains(&format!("schema v{}", resp.schema_version)),
+            "the header carries the schema version"
+        );
+
+        // Command-catalog keys agree: every key appears, and the full
+        // comma-joined list matches the structured `commands` field.
+        for key in &resp.commands {
+            assert!(
+                text.contains(key.as_str()),
+                "command key {key} appears in the text"
+            );
+        }
+        let command_list = resp.commands.join(", ");
+        assert!(
+            text.contains(&command_list),
+            "the text carries the full command key list"
+        );
     }
 
     #[test]
@@ -320,5 +375,53 @@ mod tests {
     #[test]
     fn tool_name_is_list_sources() {
         assert_eq!(TOOL_NAME, "list_sources");
+    }
+
+    // F-049-2: exercise `verdict_label`'s `Some(true)`/`Some(false)` arms here
+    // (the `None` arm is already covered by the bundled-snapshot tests), so the
+    // freshness-to-label mapping is pinned in-module, not only upstream at the
+    // status layer.
+    #[test]
+    fn verdict_label_maps_every_arm() {
+        assert_eq!(verdict_label(Some(true)), "stale");
+        assert_eq!(verdict_label(Some(false)), "fresh");
+        assert_eq!(verdict_label(None), "unknown");
+    }
+
+    // F-049-3: drive `result`'s over-cap rejection (`byte_len > MAX_RESPONSE_BYTES`
+    // -> `Err`) without an 8-source catalog by building a response whose serialised
+    // body (and its text rendering) blow past the 32 KiB cap on their own.
+    #[test]
+    fn result_rejects_a_response_over_the_cap() {
+        let wide = "x".repeat(512);
+        let sources = (0..128)
+            .map(|i| SourceStatusView {
+                id: format!("source-{i:03}"),
+                title: wide.clone(),
+                last_checked: Some(wide.clone()),
+                fetched_at: wide.clone(),
+                upstream_modified: Some(wide.clone()),
+                content_hash: wide.clone(),
+                freshness: "unknown".to_string(),
+            })
+            .collect();
+        let resp = ListSourcesResponse {
+            snapshot_id: "over-cap".to_string(),
+            corpus_hash: "c128-over-cap".to_string(),
+            sources,
+            commands: vec![wide.clone()],
+            schema_version: "1".to_string(),
+        };
+        // Precondition: the complete serialised body really does exceed the cap.
+        assert!(
+            serde_json::to_vec(&resp).expect("serialise").len() > MAX_RESPONSE_BYTES,
+            "precondition: the response body exceeds the cap"
+        );
+        let err = result(&resp).expect_err("an over-cap response is a typed error");
+        let message = err.to_string();
+        assert!(
+            message.contains("exceeds the") && message.contains(&MAX_RESPONSE_BYTES.to_string()),
+            "the rejection names the cap: {message}"
+        );
     }
 }
