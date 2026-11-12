@@ -266,9 +266,9 @@ pub fn checklist(
             });
         }
         // `UnknownSection` is only produced by the section read, never the
-        // checklist read; map it to the not-found family so this function stays
-        // total and panic-free.
-        Err(ReadError::UnknownSection(_)) => {
+        // checklist read; keep the read total and panic-free by mapping it to
+        // the same not-found family (the checklist-scoped `UnknownCategory`).
+        Err(_) => {
             return Err(GetApiChecklistError::UnknownCategory {
                 requested: String::new(),
                 supported: available_categories(manifest),
