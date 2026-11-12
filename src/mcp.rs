@@ -85,6 +85,16 @@ pub mod search_docs;
 /// a missing id through the [048] `ProtocolError` mapping.
 pub mod get_section;
 
+/// The `get_api_checklist` MCP tool ([052][M4]): lists the snapshot's
+/// API-guideline checklist entries — each its upstream `code`, `title`,
+/// `category`, checklist `location`, and explanatory section ids — optionally
+/// filtered by a single category and paginated by a [037] continuation cursor,
+/// composing the [036] checklist read (which verifies every explanation
+/// resolves), mapping an unknown category and a dangling citation through the
+/// [048] `ProtocolError` contract, and assembling the result as a
+/// `CallToolResult`.
+pub mod get_api_checklist;
+
 /// The typed MCP tool/resource schemas for task `[048][M4]` (AC1): the
 /// request/response shapes and catalog/section resource payloads that the five
 /// tools and two resources speak, plus a conformance check that a value
