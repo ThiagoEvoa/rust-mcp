@@ -1360,4 +1360,273 @@ mod tests {
             .protocol_error(Some(&ProtocolVersion::V_2025_11_25));
         assert_eq!(pre.code, ErrorCode::INVALID_PARAMS);
     }
+
+    // ===== [055] AC1: a section-resource read == the get_section tool read =====
+
+    #[test]
+    fn a_resource_read_and_the_tool_read_return_identical_content_and_provenance() {
+        // AC1: the section resource serves the exact `SectionView` `get_section`
+        // serves for the same section — both compose the shared
+        // `get_section::view_from` projection, so content and provenance cannot
+        // drift. A small section is used so the tool's body clip is a no-op and
+        // the two reads are byte-identical.
+        let m = snapshot();
+        let id = "cargo/commands%2Fcargo-build";
+        let uri = section_uri(m.body.snapshot_id.as_str(), id);
+
+        let tool = crate::mcp::get_section::get_section(
+            &m,
+            &crate::mcp::schema::GetSectionRequest {
+                section_id: id.to_string(),
+                cursor: None,
+            },
+            as_of(),
+            threshold(),
+        )
+        .expect("the tool read resolves");
+
+        let resource = read_section_resource(&m, &uri, as_of(), threshold())
+            .expect("the resource read resolves");
+
+        assert_eq!(
+            tool.section, resource,
+            "AC1: the resource read and the tool read agree on content + provenance"
+        );
+        // Provenance in particular is identical: snapshot identity, source, and
+        // the verbatim body.
+        assert_eq!(resource.snapshot_id, m.body.snapshot_id.as_str());
+        assert_eq!(resource.source, "cargo");
+        assert!(!resource.body.is_empty(), "the body is served verbatim");
+    }
+
+    #[test]
+    fn a_section_resource_read_serves_the_section_provenance() {
+        // The resource read carries the section's full provenance: id, source,
+        // canonical URL, snapshot identity, and a freshness verdict the read
+        // computed (never invented).
+        let m = snapshot();
+        let uri = section_uri(m.body.snapshot_id.as_str(), "cargo/commands%2Fcargo-build");
+        let view = read_section_resource(&m, &uri, as_of(), threshold())
+            .expect("the resource read resolves");
+        assert_eq!(view.id, "cargo/commands%2Fcargo-build");
+        assert_eq!(view.source, "cargo");
+        assert_eq!(view.snapshot_id, m.body.snapshot_id.as_str());
+        assert!(
+            matches!(view.freshness.as_str(), "fresh" | "stale" | "unknown"),
+            "a freshness verdict is reported: {}",
+            view.freshness
+        );
+        assert!(!view.body.is_empty(), "the body is served");
+    }
+
+    #[test]
+    fn a_uri_naming_another_snapshot_is_a_mismatch_not_a_read() {
+        // AC2: a section resource is named under the active snapshot; a URI
+        // naming another snapshot is rejected before any read.
+        let m = snapshot();
+        let other = crate::model::SnapshotId::new("fixture-other-snapshot").expect("a URI-safe id");
+        let uri = section_uri(other.as_str(), "cargo/commands%2Fcargo-build");
+        let err = read_section_resource(&m, &uri, as_of(), threshold())
+            .expect_err("a foreign-snapshot URI is rejected");
+        assert!(
+            matches!(err, SectionResourceError::MismatchedSnapshot { .. }),
+            "a foreign-snapshot URI is a MismatchedSnapshot, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_valid_but_absent_section_is_unknown_not_a_fabricated_read() {
+        // AC2: a section id that parses through the grammar but is absent from the
+        // active snapshot is a typed not-found, never a fabricated section.
+        let m = snapshot();
+        let uri = section_uri(
+            m.body.snapshot_id.as_str(),
+            "cargo/commands%2Fdoes-not-exist",
+        );
+        let err = read_section_resource(&m, &uri, as_of(), threshold())
+            .expect_err("an absent section fails");
+        assert!(
+            matches!(err, SectionResourceError::UnknownSection { .. }),
+            "an absent section is UnknownSection, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_section_resource_result_is_structured_and_within_cap() {
+        // The resource result carries the section under a `section` key and fits
+        // the response cap.
+        let m = snapshot();
+        let uri = section_uri(m.body.snapshot_id.as_str(), "cargo/commands%2Fcargo-build");
+        let view = read_section_resource(&m, &uri, as_of(), threshold())
+            .expect("the resource read resolves");
+        let call = section_resource_result(&view).expect("the result fits the cap");
+        assert!(!call.content.is_empty(), "a text block is rendered");
+        let structured = call
+            .structured_content
+            .as_ref()
+            .expect("structured content");
+        assert!(
+            structured.get("section").is_some(),
+            "the payload carries the section"
+        );
+        assert_eq!(structured["section"]["id"], "cargo/commands%2Fcargo-build");
+    }
+
+    // ===== [055] AC2: the URI grammar rejects non-canonical forms ===========
+
+    #[test]
+    fn the_parser_accepts_a_canonical_section_uri_and_round_trips() {
+        // A canonical `rust-docs://snapshots/{snap}/sections/{id}` URI parses to
+        // its snapshot + section components.
+        let m = snapshot();
+        let uri = section_uri(m.body.snapshot_id.as_str(), "cargo/commands%2Fcargo-build");
+        let (snap, section) = parse_section_resource_uri(&uri).expect("a canonical URI parses");
+        assert_eq!(snap, m.body.snapshot_id);
+        assert_eq!(section.as_str(), "cargo/commands%2Fcargo-build");
+    }
+
+    #[test]
+    fn a_non_canonical_uri_is_malformed_without_filesystem_access() {
+        // AC2: a bare, prefix-less, or filesystem-style URI is rejected by the
+        // grammar — never read from a path.
+        let m = snapshot();
+        let commands_segment = format!(
+            "rust-docs://snapshots/{}/commands",
+            m.body.snapshot_id.as_str()
+        );
+        for bad in [
+            "rust-docs://section/cargo/commands%2Fcargo-build", // the old bare form
+            "cargo/commands%2Fcargo-build",                     // no prefix
+            "/etc/passwd",                                      // a filesystem path
+            "not-a-uri",
+            commands_segment.as_str(), // a non-`sections` segment
+        ] {
+            let err = parse_section_resource_uri(bad).expect_err("rejected");
+            assert!(
+                matches!(err, SectionResourceError::MalformedUri { .. }),
+                "{bad} must be MalformedUri, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_traversal_section_uri_is_rejected_without_filesystem_access() {
+        // AC2: a raw `/` after the source separator fails the section-id grammar,
+        // so a traversal never reaches a filesystem read.
+        let m = snapshot();
+        let snap = m.body.snapshot_id.as_str();
+        for bad in [
+            format!("rust-docs://snapshots/{snap}/sections/../../etc/passwd"),
+            format!("rust-docs://snapshots/{snap}/sections/cargo/commands%2Fbuild/extra"),
+        ] {
+            let err = parse_section_resource_uri(&bad).expect_err("rejected");
+            assert!(
+                matches!(err, SectionResourceError::MalformedUri { .. }),
+                "{bad} must be rejected as MalformedUri, got {err:?}"
+            );
+        }
+    }
+
+    // ===== [055] AC2: the section-resource discovery paginates =============
+
+    #[test]
+    fn section_resource_discovery_paginates_and_walks_every_section_uri() {
+        // AC2: walking every page reproduces the snapshot's full section list in
+        // deterministic order, with an explicit continuation between pages and a
+        // cap-bounded envelope on each page.
+        let m = snapshot();
+        let mut expected: Vec<String> = m
+            .body
+            .sections
+            .iter()
+            .map(|s| section_uri(m.body.snapshot_id.as_str(), s.id.as_str()))
+            .collect();
+        expected.sort();
+
+        let mut seen: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut pages = 0usize;
+        loop {
+            let page =
+                section_resource_inventory(&m, None, cursor.as_deref()).expect("the page builds");
+            assert!(
+                page.serialized_bytes() <= MAX_RESPONSE_BYTES,
+                "every page fits the response cap"
+            );
+            assert_eq!(
+                page.returned,
+                page.uris.len(),
+                "`returned` matches the page's URI count"
+            );
+            seen.extend(page.uris.iter().cloned());
+            pages += 1;
+            assert!(
+                pages <= 200,
+                "the discovery paginates in a bounded number of pages"
+            );
+            if page.truncated {
+                cursor = page.next_cursor.clone();
+                assert!(cursor.is_some(), "a truncated page carries a continuation");
+            } else {
+                assert!(
+                    page.next_cursor.is_none(),
+                    "the final page carries no continuation"
+                );
+                break;
+            }
+        }
+        assert_eq!(
+            seen, expected,
+            "the walked pages equal the full section list in order"
+        );
+        assert!(
+            !seen.is_empty(),
+            "the discovery returns the snapshot's sections"
+        );
+    }
+
+    #[test]
+    fn a_zero_limit_section_discovery_yields_an_empty_page_with_a_continuation() {
+        // A zero-limit request returns an empty page that still knows more
+        // sections exist and carries a continuation to resume.
+        let m = snapshot();
+        let page = section_resource_inventory(&m, Some(0), None).expect("the page builds");
+        assert!(page.uris.is_empty(), "a zero-limit page returns no URIs");
+        assert!(
+            page.truncated && page.next_cursor.is_some(),
+            "an empty page knows more sections exist and resumes"
+        );
+    }
+
+    #[test]
+    fn a_foreign_cursor_is_rejected_for_section_discovery() {
+        // A cursor minted for a different filter (the command-catalog `all`
+        // filter) cannot resume the `sections` stream.
+        use crate::pagination::{Cursor, FilterKey};
+        let m = snapshot();
+        let foreign = Cursor::mint(
+            Operation::Catalog,
+            &FilterKey::all(),
+            &m.body.snapshot_id,
+            0,
+        )
+        .to_token();
+        let err = section_resource_inventory(&m, None, Some(foreign.as_str()))
+            .expect_err("a foreign-filter cursor is rejected");
+        assert!(
+            matches!(err, CursorError::Mismatch { .. }),
+            "a foreign-filter cursor is a Mismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_cursor_is_rejected_for_section_discovery() {
+        let m = snapshot();
+        let err = section_resource_inventory(&m, None, Some("not-a-cursor"))
+            .expect_err("a malformed cursor is rejected");
+        assert!(
+            matches!(err, CursorError::Malformed(_)),
+            "garbage is Malformed, got {err:?}"
+        );
+    }
 }
