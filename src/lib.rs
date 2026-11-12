@@ -29,6 +29,7 @@
 //!   threshold (`[030]`),
 //! - [`search`] — tokenization, ranking, pagination (`[033]`-`[047]`),
 //! - [`commands`] — source-backed command catalog/guidance (`[039]`-`[044]`),
+//! - [`eval`] — the independent retrieval evaluation corpus (`[045]`),
 //! - [`mcp`] — tool/resource handlers and protocol errors (`[048]`-`[059]`).
 //!
 //! Modules are **private** by default: per `plan.md` section 8 the package keeps
@@ -43,6 +44,7 @@ mod commands;
 mod corpus;
 mod coverage;
 mod error;
+mod eval;
 mod ingest;
 mod logging;
 mod mcp;
