@@ -364,6 +364,16 @@ pub struct CatalogResourceView {
     pub sources: Vec<SourceStatusView>,
     /// The command-catalog entries on this page.
     pub commands: Vec<CommandEntryView>,
+    /// The concrete resource identities this catalog advertises for the active
+    /// snapshot, URI-safe encoded: the command-catalog page URI
+    /// (`rust-docs://snapshots/{snapshot_id}/commands`) and the section resource
+    /// URIs (`rust-docs://snapshots/{snapshot_id}/sections/{section_id}`). A
+    /// client fetches these concrete URIs rather than inferring them from the
+    /// catalog path. Additive over the [048] base: `#[serde(default,
+    /// skip_serializing_if)]`, so an earlier `CatalogResourceView` without it
+    /// deserializes cleanly and an empty field is omitted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_uris: Vec<String>,
     /// The next page cursor, when the catalog is truncated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
