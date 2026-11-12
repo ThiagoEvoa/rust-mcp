@@ -74,16 +74,12 @@ use rmcp::model::{CallToolResult, ContentBlock, Tool};
 
 use crate::error::AppError;
 use crate::mcp::protocol_error::{ErrorClass, ProtocolError};
-use crate::mcp::schema::{
-    CitationView, GetSectionRequest, GetSectionResponse, SectionView,
-};
+use crate::mcp::schema::{CitationView, GetSectionRequest, GetSectionResponse, SectionView};
 use crate::model::{Section, SectionId, SnapshotManifest};
-use crate::pagination::{
-    clip_body, Cursor, CursorError, FilterKey, Operation, MAX_RESPONSE_BYTES,
-};
+use crate::pagination::{Cursor, CursorError, FilterKey, MAX_RESPONSE_BYTES, Operation, clip_body};
 use crate::provenance::{Instant, StaleThreshold};
 use crate::reads::{ReadError, SectionRead};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::str::FromStr;
 
 // The [048] `rmcp` tool name for `get_section`.
@@ -155,10 +151,11 @@ pub fn get_section(
     // 1. Resolve the caller-supplied, server-issued section id (AC1: the caller
     //    supplies an id, never a URL). A not-well-formed id maps to a typed
     //    not-found; no section is fabricated.
-    let section_id = SectionId::from_str(request.section_id.as_str())
-        .map_err(|_| GetSectionError::UnknownSection {
+    let section_id = SectionId::from_str(request.section_id.as_str()).map_err(|_| {
+        GetSectionError::UnknownSection {
             id: request.section_id.clone(),
-        })?;
+        }
+    })?;
 
     // 2. Read the full record through the [036] section read: the Markdown body,
     //    the heading breadcrumb (context), the citations, the snapshot identity,
@@ -168,7 +165,7 @@ pub fn get_section(
         Err(ReadError::UnknownSection(id)) => {
             return Err(GetSectionError::UnknownSection {
                 id: id.as_str().to_string(),
-            })
+            });
         }
         // `UnknownCategory` and `DanglingExplanation` are only produced by the
         // checklist read, never by a section read; keep the read total and
@@ -176,7 +173,7 @@ pub fn get_section(
         Err(_) => {
             return Err(GetSectionError::UnknownSection {
                 id: request.section_id.clone(),
-            })
+            });
         }
     };
 
@@ -191,7 +188,11 @@ pub fn get_section(
         Some(token) => {
             let cursor = Cursor::from_token(token).map_err(GetSectionError::Cursor)?;
             cursor
-                .verify(Operation::SectionContinuation, &filter, &manifest.body.snapshot_id)
+                .verify(
+                    Operation::SectionContinuation,
+                    &filter,
+                    &manifest.body.snapshot_id,
+                )
                 .map_err(GetSectionError::Cursor)?
         }
     };
@@ -212,18 +213,15 @@ pub fn get_section(
 
     // 5. Re-mint the continuation as an absolute offset into the full body, so a
     //    resumed call re-clips from the correct position.
-    let next_cursor = match part.next {
-        Some(cursor) => Some(
-            Cursor::mint(
-                Operation::SectionContinuation,
-                &filter,
-                &manifest.body.snapshot_id,
-                start + cursor.offset(),
-            )
-            .to_token(),
-        ),
-        None => None,
-    };
+    let next_cursor = part.next.map(|cursor| {
+        Cursor::mint(
+            Operation::SectionContinuation,
+            &filter,
+            &manifest.body.snapshot_id,
+            start + cursor.offset(),
+        )
+        .to_token()
+    });
 
     // 6. Project the read to the [048] response, substituting the clipped body
     //    and the (re-minted) continuation cursor.
@@ -244,20 +242,15 @@ pub fn get_section(
 /// content + a human-readable text block, with a defensive cap check.
 pub fn result(resp: &GetSectionResponse) -> Result<CallToolResult, AppError> {
     let structured = serde_json::to_value(resp).map_err(|e| {
-        AppError::runtime_start(
-            "encode get_section structured output",
-            Some(Box::new(e)),
-        )
+        AppError::runtime_start("encode get_section structured output", Some(Box::new(e)))
     })?;
 
     let text = render_text(resp);
-    let structured_bytes = serde_json::to_string(&structured).map_err(|e| {
-        AppError::runtime_start(
-            "measure get_section structured output",
-            Some(Box::new(e)),
-        )
-    })?
-    .len();
+    let structured_bytes = serde_json::to_string(&structured)
+        .map_err(|e| {
+            AppError::runtime_start("measure get_section structured output", Some(Box::new(e)))
+        })?
+        .len();
 
     // Defensive cap check: the [037] `clip_body` already bounds the body part,
     // so a well-formed response fits; this is the safety net.
@@ -324,9 +317,12 @@ const MAX_CITATIONS: usize = 12;
 fn citation_views(section: &Section) -> Vec<CitationView> {
     let section_id = section.id.as_str().to_string();
     let source = section.source_id.as_str().to_string();
-    let mut out =
-        Vec::with_capacity(1 + section.guideline_codes.len() + section.command_keys.len()
-            + section.lint_ids.len() + section.qualifications.len());
+    let mut out = Vec::with_capacity(
+        1 + section.guideline_codes.len()
+            + section.command_keys.len()
+            + section.lint_ids.len()
+            + section.qualifications.len(),
+    );
 
     // Provenance: the canonical upstream document.
     out.push(CitationView {
@@ -338,13 +334,25 @@ fn citation_views(section: &Section) -> Vec<CitationView> {
     });
 
     for code in &section.guideline_codes {
-        out.push(note_citation(&section_id, &source, format!("guideline code: {code}")));
+        out.push(note_citation(
+            &section_id,
+            &source,
+            format!("guideline code: {code}"),
+        ));
     }
     for key in &section.command_keys {
-        out.push(note_citation(&section_id, &source, format!("command key: {key}")));
+        out.push(note_citation(
+            &section_id,
+            &source,
+            format!("command key: {key}"),
+        ));
     }
     for lint in &section.lint_ids {
-        out.push(note_citation(&section_id, &source, format!("lint id: {lint}")));
+        out.push(note_citation(
+            &section_id,
+            &source,
+            format!("lint id: {lint}"),
+        ));
     }
     for qualification in &section.qualifications {
         out.push(note_citation(
@@ -431,8 +439,9 @@ fn render_citation(citation: &CitationView) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bundled;
+
     use crate::model::{SectionBuilder, SourceId, Url};
+    use rmcp::model::{ErrorCode, ProtocolVersion};
 
     fn as_of() -> Instant {
         Instant::parse("2026-10-30T00:00:00Z").expect("as-of instant")
@@ -443,7 +452,7 @@ mod tests {
     }
 
     fn manifest() -> SnapshotManifest {
-        bundled::snapshot().expect("bundled snapshot parses")
+        crate::bundled::manifest()
     }
 
     fn request(section_id: impl Into<String>, cursor: Option<String>) -> GetSectionRequest {
@@ -471,7 +480,10 @@ mod tests {
             .and_then(|p| p.as_object())
             .expect("input schema has properties");
         assert!(props.contains_key("section_id"), "section_id is documented");
-        assert!(props.contains_key("cursor"), "the continuation cursor is documented");
+        assert!(
+            props.contains_key("cursor"),
+            "the continuation cursor is documented"
+        );
         for url_field in ["url", "source_url", "uri", "canonical_url"] {
             assert!(
                 !props.contains_key(url_field),
@@ -485,13 +497,21 @@ mod tests {
         // AC1: a caller-supplied, server-issued id resolves to its section
         // without the caller constructing a URL.
         let m = manifest();
-        let resp = get_section(&m, &request("cargo/commands%2Fcargo-build", None), as_of(), threshold())
-            .expect("the id resolves");
+        let resp = get_section(
+            &m,
+            &request("cargo/commands%2Fcargo-build", None),
+            as_of(),
+            threshold(),
+        )
+        .expect("the id resolves");
         assert_eq!(resp.section.id, "cargo/commands%2Fcargo-build");
         assert_eq!(resp.section.source, "cargo");
         assert!(!resp.section.body.is_empty(), "the body is served");
         assert!(!resp.truncated, "a small section is not truncated");
-        assert!(resp.next_cursor.is_none(), "a small section has no continuation");
+        assert!(
+            resp.next_cursor.is_none(),
+            "a small section has no continuation"
+        );
         assert_eq!(resp.schema_version, "1");
     }
 
@@ -503,22 +523,21 @@ mod tests {
         // identity in the response match the [036] corpus read verbatim.
         let m = manifest();
         let id = "api-guidelines/about";
-        let read = crate::reads::get_section(
-                &m,
-                &SectionId::from_str(id).unwrap(),
-                as_of(),
-                threshold(),
-            )
-            .expect("the [036] read resolves");
+        let read =
+            crate::reads::get_section(&m, &SectionId::from_str(id).unwrap(), as_of(), threshold())
+                .expect("the [036] read resolves");
 
-        let resp = get_section(&m, &request(id, None), as_of(), threshold())
-            .expect("the tool resolves");
+        let resp =
+            get_section(&m, &request(id, None), as_of(), threshold()).expect("the tool resolves");
         let s = &resp.section;
 
         // Markdown body: verbatim from the read.
         assert_eq!(s.body, read.section.body, "body matches the read");
         // Heading context: the breadcrumb from the read.
-        assert_eq!(s.heading_path, read.section.heading_path, "heading context matches");
+        assert_eq!(
+            s.heading_path, read.section.heading_path,
+            "heading context matches"
+        );
         // Canonical URL / doc title / source: verbatim from the read.
         assert_eq!(s.canonical_url, read.section.canonical_url.as_str());
         assert_eq!(s.doc_title, read.section.doc_title);
@@ -526,7 +545,10 @@ mod tests {
         // Snapshot identity: the read's snapshot id.
         assert_eq!(s.snapshot_id, read.snapshot_id.as_str());
         // Freshness: the read's verdict.
-        assert_eq!(s.freshness, verdict_label(read.freshness.is_stale()).to_string());
+        assert_eq!(
+            s.freshness,
+            verdict_label(read.freshness.is_stale()).to_string()
+        );
         // Citations: derived from the read's section fields (one provenance
         // citation plus a note per applicable code/key/lint/qualification).
         let expected_notes = read.section.guideline_codes.len()
@@ -558,15 +580,14 @@ mod tests {
             Url::new("https://doc.rust-lang.org/cargo/commands/cargo-build").expect("url"),
             "# cargo build\n\nbody text",
         )
-        .guideline_codes(&["C-CONV", "C-CONV-2"])
-        .qualifications(&["stable"])
+        .guideline_codes(["C-CONV".to_string(), "C-CONV-2".to_string()])
+        .qualifications(["stable".to_string()])
         .build()
         .expect("section builds");
         let id = section.id.as_str().to_string();
         m.body.sections.push(section);
 
-        let resp = get_section(&m, &request(&id, None), as_of(), threshold())
-            .expect("resolves");
+        let resp = get_section(&m, &request(&id, None), as_of(), threshold()).expect("resolves");
         let citations = &resp.section.citations;
         // One provenance citation + two guideline-code notes + one qualification
         // note.
@@ -596,16 +617,30 @@ mod tests {
     #[test]
     fn unknown_section_maps_to_resource_not_found() {
         let m = manifest();
-        let err = get_section(&m, &request("api-guidelines/does-not-exist", None), as_of(), threshold())
-            .expect_err("a missing id fails");
+        let err = get_section(
+            &m,
+            &request("api-guidelines/does-not-exist", None),
+            as_of(),
+            threshold(),
+        )
+        .expect_err("a missing id fails");
         assert!(
             matches!(err, GetSectionError::UnknownSection { .. }),
             "a missing id is UnknownSection"
         );
-        let pe = err.protocol_error(2026_01_01);
-        assert_eq!(pe.error.code, -32002);
-        assert_eq!(pe.error.code_name.as_deref(), Some("RESOURCE_NOT_FOUND"));
-        assert_eq!(err.protocol_error(2025_01_01).error.code, -32603);
+        let pe = err.protocol_error(Some(&ProtocolVersion::V_2025_11_25));
+        assert_eq!(pe.code, ErrorCode::RESOURCE_NOT_FOUND);
+        assert_eq!(
+            pe.data.expect("data").get("section_id"),
+            Some(&"api-guidelines/does-not-exist".into())
+        );
+        // The version-aware upgrade: a missing section is INVALID_PARAMS for a
+        // peer on 2026-07-28, but RESOURCE_NOT_FOUND for an older peer.
+        assert_eq!(
+            err.protocol_error(Some(&ProtocolVersion::V_2026_07_28))
+                .code,
+            ErrorCode::INVALID_PARAMS
+        );
     }
 
     #[test]
@@ -615,14 +650,15 @@ mod tests {
         let m = manifest();
         let err = get_section(&m, &request("notanid", None), as_of(), threshold())
             .expect_err("a malformed id fails");
-        match err {
-            GetSectionError::UnknownSection { id } => {
-                assert_eq!(id, "notanid");
-                let pe = err.protocol_error(2026_01_01);
-                assert_eq!(pe.error.code, -32002);
-            }
-            other => panic!("expected UnknownSection, got {other:?}"),
+        assert!(
+            matches!(err, GetSectionError::UnknownSection { .. }),
+            "a malformed id is UnknownSection"
+        );
+        if let GetSectionError::UnknownSection { id } = &err {
+            assert_eq!(id, "notanid");
         }
+        let pe = err.protocol_error(Some(&ProtocolVersion::V_2025_11_25));
+        assert_eq!(pe.code, ErrorCode::RESOURCE_NOT_FOUND);
     }
 
     // ----- AC1/AC2: over-cap sections paginate via the [037] cursor. -----
@@ -725,7 +761,10 @@ mod tests {
         let m = manifest();
         let err = get_section(
             &m,
-            &request("cargo/commands%2Fcargo-build", Some("not-a-cursor".to_string())),
+            &request(
+                "cargo/commands%2Fcargo-build",
+                Some("not-a-cursor".to_string()),
+            ),
             as_of(),
             threshold(),
         )
@@ -734,7 +773,11 @@ mod tests {
             matches!(err, GetSectionError::Cursor(CursorError::Malformed(_))),
             "a malformed cursor is Malformed"
         );
-        assert_eq!(err.protocol_error(2026_01_01).error.code, -32602);
+        assert_eq!(
+            err.protocol_error(Some(&ProtocolVersion::V_2025_11_25))
+                .code,
+            ErrorCode::INVALID_PARAMS
+        );
     }
 
     // ----- The `CallToolResult` assembly + cap. -----
@@ -742,11 +785,19 @@ mod tests {
     #[test]
     fn result_fits_the_response_cap_for_a_section() {
         let m = manifest();
-        let resp = get_section(&m, &request("cargo/commands%2Fcargo-build", None), as_of(), threshold())
-            .expect("resolves");
+        let resp = get_section(
+            &m,
+            &request("cargo/commands%2Fcargo-build", None),
+            as_of(),
+            threshold(),
+        )
+        .expect("resolves");
         let call = result(&resp).expect("the response fits the cap");
         assert!(!call.content.is_empty(), "a text block is rendered");
-        assert!(call.structured_content.is_some(), "structured content is present");
+        assert!(
+            call.structured_content.is_some(),
+            "structured content is present"
+        );
         assert_eq!(
             call.structured_content.as_ref().unwrap()["section"]["id"],
             "cargo/commands%2Fcargo-build"
@@ -756,8 +807,13 @@ mod tests {
     #[test]
     fn result_rejects_an_over_cap_response() {
         // A response whose body alone exceeds the cap is rejected defensively.
-        let mut resp = get_section(&manifest(), &request("cargo/commands%2Fcargo-build", None), as_of(), threshold())
-            .expect("resolves");
+        let mut resp = get_section(
+            &manifest(),
+            &request("cargo/commands%2Fcargo-build", None),
+            as_of(),
+            threshold(),
+        )
+        .expect("resolves");
         resp.section.body = "x".repeat(500 * 1024);
         let err = result(&resp).expect_err("an over-cap response is rejected");
         assert!(
@@ -781,6 +837,6 @@ mod tests {
         // No internal paths or stack traces.
         assert!(!msg.contains("src/"));
         assert!(!msg.contains("at "));
-        assert!(!msg.contains('/'.to_string() + "home/"));
+        assert!(!msg.contains("/home/"));
     }
 }
