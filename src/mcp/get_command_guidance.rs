@@ -1099,8 +1099,7 @@ mod tests {
         let note = resp
             .entry
             .effect_notes
-            .iter()
-            .next()
+            .first()
             .expect("at least one effect note");
         assert!(!note.kind.is_empty(), "the effect note has a kind label");
         assert!(
