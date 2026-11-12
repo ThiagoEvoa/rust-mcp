@@ -95,6 +95,21 @@ pub mod get_section;
 /// `CallToolResult`.
 pub mod get_api_checklist;
 
+/// The `get_command_guidance` MCP tool ([053][M4]): the fifth and final M4
+/// tool. Reads the source-backed documentation for one canonical command key
+/// (e.g. `cargo test`) — its catalog entry (purpose, documented syntax, examples,
+/// prerequisites, version/stability qualifications, and the separately-labeled
+/// maintainer effect notes) plus the source-backed sections it cites — served
+/// from the active snapshot and paginated over-cap section bodies through a [037]
+/// continuation cursor. It composes the [039]–[043] command catalog lookup
+/// (which validates the key at the [007] boundary, so a shell operator or
+/// unsupported key is refused, never executed), the [036] section read, and the
+/// [037] cursor, mapping a malformed / unsupported key, a dangling citation, and a
+/// bad cursor through the [048] `ProtocolError` contract, and assembling the
+/// result as a `CallToolResult`. It retrieves documentation only — it executes no
+/// command and touches no filesystem or network.
+pub mod get_command_guidance;
+
 /// The typed MCP tool/resource schemas for task `[048][M4]` (AC1): the
 /// request/response shapes and catalog/section resource payloads that the five
 /// tools and two resources speak, plus a conformance check that a value
