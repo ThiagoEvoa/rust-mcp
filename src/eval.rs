@@ -1292,9 +1292,13 @@ mod harness {
 
     /// AC2 evidence: every canonical exact-match case (guideline code, command
     /// name, lint id) ranks its section first. No justified exception is expected:
-    /// the nine code/command/lint cases are lifted by the [035] exact-match tier,
-    /// and the bare `rustc` command-name case is the dominant `rustc` section under
-    /// BM25. Any failure surfaces here with its query and rank.
+    /// all ten canonical cases are lifted by the [035] exact-match tier — nine by
+    /// the structured field their query names, and the bare `rustc` command-name
+    /// case by the bare-verb rule, which lifts a bare command verb (over the
+    /// trusted `COMMAND_VERBS` set) to the command tier exactly like the others.
+    /// The bare case is *not* BM25-dominant: with the tier disabled it does not
+    /// rank first, so the lift comes from the tier, not the score. Any failure
+    /// surfaces here with its query and rank.
     #[test]
     fn canonical_cases_rank_first() {
         let report = run_eval();
