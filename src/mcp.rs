@@ -111,6 +111,15 @@ pub mod get_api_checklist;
 pub mod get_command_guidance;
 pub mod resources;
 
+/// The `instructions` text advertised on every `initialize` handshake by
+/// [`DocsServer::get_info`] ([056][M4]): the plan's §7 "Agent workflow and
+/// client integration" sequence, plus the retrieval-versus-execution and
+/// stale/unknown-compatibility boundaries. This module is the single owner of the
+/// `instructions` string the skeleton hands to
+/// `ServerConfig::with_instructions`, keeping the capability surface empty until
+/// handler dispatch lands later in M4.
+pub mod instructions;
+
 /// The typed MCP tool/resource schemas for task `[048][M4]` (AC1): the
 /// request/response shapes and catalog/section resource payloads that the five
 /// tools and two resources speak, plus a conformance check that a value
@@ -139,9 +148,12 @@ impl ServerHandler for DocsServer {
     /// Advertise the implementation identity and an empty capability set.
     ///
     /// `server_info` carries the binary's name and version so the client can
-    /// tell *which* server it is talking to; `capabilities` is empty because M1
-    /// implements no tools or resources yet (plan §6, "advertise only what is
-    /// implemented"); `instructions` points an agent at the corpus. The
+    /// tell *which* server it is talking to; `capabilities` is empty because the
+    /// skeleton implements no tools or resources yet (plan §6, "advertise only
+    /// what is implemented") — the surface stays empty until handler dispatch;
+    /// `instructions` advertises the plan's §7 agent workflow (retrieval versus
+    /// execution, stale/unknown compatibility, adapt-to-the-repository), owned by
+    /// [`crate::mcp::instructions::INSTRUCTIONS`]. The
     /// default `supported_protocol_versions` returns the SDK's full
     /// `KNOWN_VERSIONS`, and the default `initialize`/`discover` handshake
     /// negotiates the highest mutually supported, client-requested version —
@@ -152,12 +164,7 @@ impl ServerHandler for DocsServer {
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions(
-                "Local stdio MCP server for official Rust documentation \
-                 (api-guidelines, style-guide, cargo, rustc, rustup, rustfmt, \
-                 clippy, rustdoc). M1 skeleton: the connection negotiates and \
-                 disconnects cleanly; tools and resources land in M4.",
-            )
+            .with_instructions(crate::mcp::instructions::INSTRUCTIONS)
     }
 }
 
