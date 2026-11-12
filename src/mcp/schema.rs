@@ -108,6 +108,11 @@ pub struct SectionView {
     pub freshness: String,
     /// The content hash identifying this section's body.
     pub content_hash: String,
+    /// Citations the section resolves to (source/example references and the
+    /// applicable guideline/lint/command codes), carried verbatim from the
+    /// corpus read, as the plan's `get_section` contract requires.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citations: Vec<CitationView>,
 }
 
 /// One ranked search hit.

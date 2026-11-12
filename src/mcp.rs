@@ -78,6 +78,13 @@ pub mod list_sources;
 /// `ProtocolError` mapping, and assembling the result as a `CallToolResult`.
 pub mod search_docs;
 
+/// The `get_section` MCP tool ([051][M4]): resolves a server-issued section id
+/// to a section's complete record — Markdown body, heading context, citations,
+/// source freshness, and snapshot identity — served from the active snapshot,
+/// paginating over-cap bodies through the [037] continuation cursor and mapping
+/// a missing id through the [048] `ProtocolError` mapping.
+pub mod get_section;
+
 /// The typed MCP tool/resource schemas for task `[048][M4]` (AC1): the
 /// request/response shapes and catalog/section resource payloads that the five
 /// tools and two resources speak, plus a conformance check that a value
