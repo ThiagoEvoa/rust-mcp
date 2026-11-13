@@ -157,7 +157,7 @@ rust-docs-mcp status:
   snapshot: rust-docs-bundled-seed
   source(s): 8, section(s): 8
   freshness threshold: 7 day(s) (default)
-  as_of: 1794576127 (seconds since the Unix epoch)
+  as_of: <as_of> (seconds since the Unix epoch)
   [api-guidelines] Rust API Guidelines
     last checked: unknown
     fetched:      2026-10-30T00:00:00Z
@@ -169,7 +169,8 @@ rust-docs-mcp status:
 ```
 
 (Real output, 2026-11-13; the per-run tracing prefix
-`<timestamp> <level> ... rust-docs-mcp: ` is omitted for readability, and the report
+`<timestamp> <level> ... rust-docs-mcp: ` is omitted for readability, the `as_of`
+value is the per-run wall clock and varies between runs, and the report
 continues with one block per source.) Three **distinct** times travel with each
 source and are never conflated (`plan.md` §5: *"Distinguish download time, last
 check time, and known upstream modification time"*):
@@ -207,7 +208,7 @@ takes a **non-negative** integer; a missing or negative value is an actionable
 ```text
 error: a value is required for '--stale-days <DAYS>' but none was supplied
 
-Usage: rust-docs-mcp status [OPTIONS]
+For more information, try '--help'.
 ```
 
 A source checked more than `DAYS` ago reports `stale: stale` under that window and
@@ -289,7 +290,7 @@ failure:
 
 | Failure | Diagnostic (`sync failed: …`) |
 | --- | --- |
-| The fetch client could not start (e.g. the registry is unreachable) | `building the fetch client failed: …` |
+| The fetch client could not start (e.g. the registry is unreachable) | `the fetch client could not start: …` |
 | A per-document fetch failed (transport, boundary rejection, retry cap, a non-success status) | `a fetch failed: …` |
 | A source's document URLs could not be discovered on the live path | `discovery failed: …` |
 | A source fetched but **failed to parse/extract** | `extracting source \`<id>\` failed: <reason>` |
@@ -333,8 +334,7 @@ or restore the bundled fallback.
 The middle reports the **specific reason for each source that was attempted** — the
 local published snapshot when a data directory was read, and the bundled snapshot
 when one was supplied (otherwise `(no bundled snapshot was provided)`). The two
-reasons the real binary produces, captured 2026-11-13 (via the load path used by
-`status`/`inspect`):
+reasons the real binary produces, captured 2026-11-13 via the two-path `load_snapshot(dir, None)` loader — the unit-test path; the `status`/`inspect` CLI instead uses `load_snapshot_embedded`, which always supplies the embedded bundle and never reaches this branch:
 
 - **Absent local, no bundle** — `status`/`inspect` with no valid local and no
   bundle:

@@ -245,7 +245,7 @@ rust-docs-mcp status:
   snapshot: rust-docs-bundled-seed
   source(s): 8, section(s): 8
   freshness threshold: 14 day(s) (configured)
-  as_of: 1794576127 (seconds since the Unix epoch)
+  as_of: <as_of> (seconds since the Unix epoch)
   [api-guidelines] Rust API Guidelines
     last checked: unknown
     fetched:      2026-10-30T00:00:00Z
