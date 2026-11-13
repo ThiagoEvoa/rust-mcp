@@ -388,3 +388,23 @@ redistributed content — are in
 - **Attribute**: `THIRD_PARTY_NOTICES.md` and `docs/LICENSING.md` accompany the
   content; the per-source notices are also carried machine-readable in the
   manifest's `attribution[]`.
+
+## Distribution and attribution
+
+How the project is **distributed** (a Cargo source distribution — no pre-built
+release binary, container, or published crate), the **install contents** (the
+`rust-docs-mcp` binary plus the embedded, validated, attributed corpus and the
+notices that travel with it), the **initial supported target** and its **release
+limitations**, and the **redistribution/attribution** policy are recorded in
+[`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md) (task [067]). In short:
+
+- **Distribute** by source: `cargo build --release` produces the
+  `rust-docs-mcp` binary; with no local snapshot it serves the **bundled seed
+  offline** (no network, no LLM, no API key, no telemetry).
+- **Install contents**: the binary, the embedded corpus (`data/bundled/snapshot.json`),
+  and the notices (`THIRD_PARTY_NOTICES.md`, `docs/LICENSING.md`, and the
+  `attribution[]` the snapshot carries).
+- **Attribution / redistribution**: MIT OR Apache-2.0 at the recipient's option
+  (operative license Apache-2.0, MIT text retained); redistribute the content
+  only with the two license files and `THIRD_PARTY_NOTICES.md`. A full, current
+  corpus is an explicit `sync`; the first `sync` requires network.
