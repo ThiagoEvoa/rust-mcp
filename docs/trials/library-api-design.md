@@ -154,49 +154,55 @@ The decoded `instructions` value (the actual response, verbatim) is:
 
 ### 3.2 `tools/list` → the five advertised tools
 
+The server advertises the five tools. Each carries a full JSON-Schema
+`inputSchema` and `outputSchema` (omitted here for brevity; the schema module
+generates them from the very types that serialise the responses). The names and
+descriptions below are the real ones:
+
 ```json
 { "jsonrpc": "2.0", "id": 1, "result": { "tools": [
-    { "name": "list_sources",         "description": "List the documentation sources in the active snapshot." },
-    { "name": "search_docs",          "description": "Search the bundled Rust documentation sections by relevance. …" },
-    { "name": "get_section",          "description": "Fetch one documentation section by its identifier, with citations and freshness. …" },
-    { "name": "get_api_checklist",    "description": "List the API guidelines checklist entries for a category, or all categories. …" },
-    { "name": "get_command_guidance", "description": "Get command guidance for a Cargo/rustc/rustup/rustfmt/clippy/rustdoc command. …" }
+    { "name": "list_sources",
+      "description": "List the source collections this snapshot serves, with per-source freshness and the available command-catalog keys. Takes no arguments." },
+    { "name": "search_docs",
+      "description": "Search the Rust documentation corpus by query, optionally scoped to a source and paginated. Returns ranked hits with excerpts and citations." },
+    { "name": "get_section",
+      "description": "Read one documentation section by its id, with its heading breadcrumb, body, and provenance. Resumable via a continuation cursor." },
+    { "name": "get_api_checklist",
+      "description": "List Rust API-guideline checklist entries, optionally filtered by category and paginated." },
+    { "name": "get_command_guidance",
+      "description": "Read the guidance for one command (e.g. `cargo test`): its purpose, syntax, examples, prerequisites, compatibility, effect notes, and the source-backed sections it cites." }
 ] } }
 ```
 
-The `get_api_checklist` input schema is `oneOf[{ }, {category: string}]` — the
-category is optional, so the trial can walk all categories.
+The `get_api_checklist` input schema is a single object whose `category`
+property is optional (`type: ["string", "null"]`, not in `required`), so the
+trial can walk all categories by omitting it — no `oneOf` is used.
 
 ### 3.3 `search_docs` — *"From TryFrom conversion naming"* (the natural-language attempt)
 
 ```json
 { "jsonrpc": "2.0", "id": 2, "result": {
-    "content": [ { "type": "text", "text": "1. style-guide/intro\n   \
-The Rust style guide is a collection of recommendations for writing Rust code \
-that is consistent, idiomatic, and easy to understand. …" } ],
+    "content": [ { "type": "text", "text": "search_docs — snapshot rust-docs-bundled-seed, 1 hit(s), limit 5\n  [1] The Rust Style Guide — style-guide/intro (1.487)\n      The Rust Style Guide captures the common style conventions of the Rust community: naming, whitespace, comments, error handling, and more. It is a style reference, not a compiler or linter, and is updated on the nightly documentation.\n↳ style-guide: canonical upstream document (The Rust Style Guide) https://doc.rust-lang.org/nightly/style-guide/intro.html" } ],
     "isError": false,
     "structuredContent": {
-        "query": "From TryFrom conversion naming",
-        "limit": 5,
-        "total": 1,
-        "returned": 1,
-        "truncated": false,
-        "next_steps": null,
         "hits": [
             {
-                "rank": 1, "section_id": "style-guide/intro",
-                "source": "style-guide", "title": "Intro", "score": 1.4871,
-                "excerpt": "The Rust style guide is a collection of \
-recommendations for writing Rust code that is consistent, idiomatic, and easy to \
-understand.",
                 "citations": [
-                    { "source": "style-guide", "title": "The Rust Programming Language \
-Style Guide",
-                      "url": "https://rust-lang.github.io/api-guidelines/about.html",
-                      "as_of": "2026-10-30", "freshness": "unknown" }
-                ]
+                    { "note": "canonical upstream document",
+                      "section_id": "style-guide/intro", "source": "style-guide",
+                      "title": "The Rust Style Guide",
+                      "url": "https://doc.rust-lang.org/nightly/style-guide/intro.html" }
+                ],
+                "excerpt": "The Rust Style Guide captures the common style conventions of the Rust community: naming, whitespace, comments, error handling, and more. It is a style reference, not a compiler or linter, and is updated on the nightly documentation.",
+                "score": 1.486900018141989,
+                "section_id": "style-guide/intro",
+                "source": "style-guide",
+                "title": "The Rust Style Guide"
             }
-        ]
+        ],
+        "limit": 5,
+        "snapshot_id": "rust-docs-bundled-seed",
+        "truncated": false
     }
 } }
 ```
@@ -215,28 +221,29 @@ Style Guide",
 
 ```json
 { "jsonrpc": "2.0", "id": 3, "result": {
-    "content": [ { "type": "text", "text": "1. api-guidelines/about\n   \
-…help an API author write an API that is easy to use and hard to misuse." } ],
+    "content": [ { "type": "text", "text": "search_docs — snapshot rust-docs-bundled-seed, 1 hit(s), limit 5\n  [1] The API Guidelines — api-guidelines/about (2.865)\n      …lp an API author write an API that is easy to use and hard to misuse. Each guideline carries a stable code (for example C-CONV) and is enforced in practice by Clippy lints.\n↳ api-guidelines: canonical upstream document (The API Guidelines) https://rust-lang.github.io/api-guidelines/about.html\n↳ api-guidelines: guideline code: C-CONV" } ],
     "isError": false,
     "structuredContent": {
-        "query": "C-CONV", "limit": 5, "total": 1, "returned": 1,
-        "truncated": false, "next_steps": null,
         "hits": [
             {
-                "rank": 1, "section_id": "api-guidelines/about",
-                "source": "api-guidelines", "title": "About this document",
-                "score": 2.8653,
-                "excerpt": "…help an API author write an API that is easy to use and hard to misuse.",
                 "citations": [
-                    { "source": "api-guidelines", "title": "API guidelines",
-                      "url": "https://rust-lang.github.io/api-guidelines/about.html",
-                      "as_of": "2026-10-30", "freshness": "unknown" },
-                    { "source": "api-guidelines", "title": "API guidelines",
-                      "note": "guideline code: C-CONV",
-                      "as_of": "2026-10-30", "freshness": "unknown" }
-                ]
+                    { "note": "canonical upstream document",
+                      "section_id": "api-guidelines/about", "source": "api-guidelines",
+                      "title": "The API Guidelines",
+                      "url": "https://rust-lang.github.io/api-guidelines/about.html" },
+                    { "note": "guideline code: C-CONV",
+                      "section_id": "api-guidelines/about", "source": "api-guidelines" }
+                ],
+                "excerpt": "…lp an API author write an API that is easy to use and hard to misuse. Each guideline carries a stable code (for example C-CONV) and is enforced in practice by Clippy lints.",
+                "score": 2.864784293464422,
+                "section_id": "api-guidelines/about",
+                "source": "api-guidelines",
+                "title": "The API Guidelines"
             }
-        ]
+        ],
+        "limit": 5,
+        "snapshot_id": "rust-docs-bundled-seed",
+        "truncated": false
     }
 } }
 ```
@@ -251,23 +258,19 @@ Style Guide",
 
 ```json
 { "jsonrpc": "2.0", "id": 4, "result": {
-    "content": [ { "type": "text", "text": "Conversions and From\n  C-CONV \
-Prefer `From`/`Into` for conversions …" } ],
+    "content": [ { "type": "text", "text": "get_api_checklist — snapshot rust-docs-bundled-seed, category Conversions and From, 1 entry (limit 5)\n  [1] C-CONV Prefer `From`/`Into` for conversions (Conversions and From) @ Conversions and From#C-CONV\n      explains: api-guidelines/about" } ],
     "isError": false,
     "structuredContent": {
         "category": "Conversions and From",
-        "snapshot_id": "rust-docs-bundled-seed",
         "entries": [
-            {
-                "code": "C-CONV",
-                "title": "Prefer `From`/`Into` for conversions",
-                "category": "Conversions and From",
-                "location": "Conversions and From#C-CONV",
-                "explanation_sections": ["api-guidelines/about"]
-            }
+            { "category": "Conversions and From", "code": "C-CONV",
+              "explanation_sections": ["api-guidelines/about"],
+              "location": "Conversions and From#C-CONV",
+              "title": "Prefer `From`/`Into` for conversions" }
         ],
-        "total": 1, "returned": 1, "truncated": false,
-        "next_steps": "Read the explanation section(s) before relying on a checklist entry."
+        "limit": 5,
+        "snapshot_id": "rust-docs-bundled-seed",
+        "truncated": false
     }
 } }
 ```
@@ -276,18 +279,18 @@ Prefer `From`/`Into` for conversions …" } ],
 
 ```json
 { "jsonrpc": "2.0", "id": 5, "result": {
-    "content": [ { "type": "text", "text": "Conversions and From\n  C-CONV \
-Prefer `From`/`Into` for conversions …" } ],
+    "content": [ { "type": "text", "text": "get_api_checklist — snapshot rust-docs-bundled-seed, category all, 1 entry (limit 5)\n  [1] C-CONV Prefer `From`/`Into` for conversions (Conversions and From) @ Conversions and From#C-CONV\n      explains: api-guidelines/about" } ],
     "isError": false,
     "structuredContent": {
-        "snapshot_id": "rust-docs-bundled-seed",
         "entries": [
-            { "code": "C-CONV", "title": "Prefer `From`/`Into` for conversions",
-              "category": "Conversions and From", "location": "Conversions and From#C-CONV",
-              "explanation_sections": ["api-guidelines/about"] }
+            { "category": "Conversions and From", "code": "C-CONV",
+              "explanation_sections": ["api-guidelines/about"],
+              "location": "Conversions and From#C-CONV",
+              "title": "Prefer `From`/`Into` for conversions" }
         ],
-        "total": 1, "returned": 1, "truncated": false,
-        "next_steps": "Read the explanation section(s) before relying on a checklist entry."
+        "limit": 5,
+        "snapshot_id": "rust-docs-bundled-seed",
+        "truncated": false
     }
 } }
 ```
@@ -295,66 +298,73 @@ Prefer `From`/`Into` for conversions …" } ],
 > **Finding:** the seed ships exactly **one** checklist entry (`C-CONV`) — it is
 > a *representative* subset, not the full upstream checklist. The trial records
 > this: the all-categories walk reaches `C-CONV` exactly once, and it is the
-> single conversion-related entry available.
+> single conversion-related entry available. With no category the response omits
+> the `category` field entirely.
 
 ### 3.7 `get_section` — `"api-guidelines/about"` (the section the agent cites)
 
 ```json
 { "jsonrpc": "2.0", "id": 6, "result": {
-    "content": [ { "type": "text", "text": "# About this document\n\nThese guidelines \
-introduce a set of common principles and best practices that can help an API \
-author write an API that is easy to use and hard to misuse. … A rule or \
-recommendation might have a stable code (for example C-CONV), a short \
-description, and a link to an explanation section. This file is the \
-representative introduction to that checklist, not its complete rule text." } ],
+    "content": [ { "type": "text", "text": "get_section — The API Guidelines (api-guidelines/about · snapshot rust-docs-bundled-seed · schema v1 · freshness unknown)\n  source: api-guidelines\n  canonical: https://rust-lang.github.io/api-guidelines/about.html\n  citations:\n  ↳ api-guidelines: canonical upstream document (The API Guidelines) https://rust-lang.github.io/api-guidelines/about.html\n  ↳ api-guidelines: guideline code: C-CONV\n  body:\nThe Rust API Guidelines are recommendations for the design, documentation, and testing of Rust APIs. They help an API author write an API that is easy to use and hard to misuse. Each guideline carries a stable code (for example C-CONV) and is enforced in practice by Clippy lints." } ],
     "isError": false,
     "structuredContent": {
         "section": {
-            "id": "api-guidelines/about",
-            "source": "api-guidelines",
-            "title": "About this document",
-            "as_of": "2026-10-30",
-            "freshness": "unknown",
+            "body": "The Rust API Guidelines are recommendations for the design, documentation, and testing of Rust APIs. They help an API author write an API that is easy to use and hard to misuse. Each guideline carries a stable code (for example C-CONV) and is enforced in practice by Clippy lints.",
             "canonical_url": "https://rust-lang.github.io/api-guidelines/about.html",
-            "content_hash": "c128-ffa531f24bfdd996c9ef3d1a076dd56a",
-            "snapshot_id": "rust-docs-bundled-seed",
-            "body": "…A rule or recommendation might have a stable code (for example C-CONV), \
-a short description, and a link to an explanation section. This file is the \
-representative introduction to that checklist, not its complete rule text.",
+            "chapter_path": "about",
             "citations": [
-                { "source": "api-guidelines", "title": "API guidelines",
-                  "url": "https://rust-lang.github.io/api-guidelines/about.html",
-                  "as_of": "2026-10-30", "freshness": "unknown" },
-                { "source": "api-guidelines", "title": "API guidelines",
-                  "note": "guideline code: C-CONV", "as_of": "2026-10-30", "freshness": "unknown" }
-            ]
+                { "note": "canonical upstream document",
+                  "section_id": "api-guidelines/about", "source": "api-guidelines",
+                  "title": "The API Guidelines",
+                  "url": "https://rust-lang.github.io/api-guidelines/about.html" },
+                { "note": "guideline code: C-CONV",
+                  "section_id": "api-guidelines/about", "source": "api-guidelines" }
+            ],
+            "content_hash": "c128-ffa531f24bfdd996c9ef3d1a076dd56a",
+            "doc_title": "The API Guidelines",
+            "freshness": "unknown",
+            "id": "api-guidelines/about",
+            "snapshot_id": "rust-docs-bundled-seed",
+            "source": "api-guidelines"
         },
-        "schema_version": "1", "truncated": false
+        "schema_version": "1",
+        "truncated": false
     }
 } }
 ```
 
 > **Reading:** this is the section the trial **cites**. Its `body` *names*
-> `C-CONV` ("a stable code (for example C-CONV)") but does **not** expand the
-> `From`/`Into`/`TryFrom` naming rule or example — the seed's representative
-> `api-guidelines` intro is "not its complete rule text". The full rule lives
-> upstream at the `canonical_url`.
+> `C-CONV` ("a stable code (for example C-CONV)") and notes it "is enforced in
+> practice by Clippy lints", but does **not** expand the `From`/`Into`/`TryFrom`
+> naming rule or example — the seed's representative `api-guidelines` intro gives
+> the code as an example, not the full rule. The full rule lives upstream at the
+> `canonical_url`. Note the section view carries `doc_title` (not a `title`
+> field) and `freshness` (`unknown`, not an `as_of` date): the seed's
+> representative section carries neither, and neither is fabricated here.
 
 ## 4. Canonical citations the trial records
 
-The trial's citation for the conversion-naming guidance (from §3.7):
+The trial's citation for the conversion-naming guidance is the `get_section`
+response for `api-guidelines/about` (§3.7): its `section` fields and its two
+`citations`, verbatim:
 
 | Field | Value |
 |-------|-------|
+| `id` | `api-guidelines/about` |
 | `source` | `api-guidelines` |
-| `section_id` | `api-guidelines/about` |
-| `title` | *About this document* |
+| `doc_title` | `The API Guidelines` |
+| `chapter_path` | `about` |
 | `canonical_url` | `https://rust-lang.github.io/api-guidelines/about.html` |
-| `as_of` | `2026-10-30` |
-| `freshness` | `unknown` (the seed has never checked upstream) |
 | `content_hash` | `c128-ffa531f24bfdd996c9ef3d1a076dd56a` |
 | `snapshot_id` | `rust-docs-bundled-seed` |
-| provenance note | `guideline code: C-CONV` |
+| `freshness` | `unknown` (the seed has never checked upstream) |
+| citation `[0]` | `note: "canonical upstream document"`, `title: "The API Guidelines"`, `url: https://rust-lang.github.io/api-guidelines/about.html` |
+| citation `[1]` | `note: "guideline code: C-CONV"` |
+
+The section view exposes `doc_title` (not a `title` field) and `freshness`
+(`unknown`, not an `as_of` date); its citations carry `source`/`section_id` and,
+for the canonical one, `title`/`url`. No `title`/`as_of`/`freshness`/`rank`
+fields are invented — the table lists only what the response contains.
 
 ## 5. Findings — success achieved, limits recorded
 

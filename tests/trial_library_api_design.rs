@@ -148,9 +148,13 @@ struct Client {
 
 impl Client {
     /// Spawn the `serve` binary over piped stdio and complete the `initialize`
-    /// handshake + `notifications/initialized`, the way a conforming MCP client
-    /// does.
-    async fn new() -> Self {
+    /// handshake + `notifications/initialized` exactly once, the way a conforming
+    /// MCP client does. Returns the completed client together with that single
+    /// `initialize` response, so a caller asserts on exactly the handshake the
+    /// transcript records — without re-initializing (a second `initialize` would
+    /// record a redundant exchange and desync the transcript from the session it
+    /// documents).
+    async fn new() -> (Self, Value) {
         let data_dir = fresh_data_dir();
         let mut child = Command::new(env!("CARGO_BIN_EXE_rust-docs-mcp"))
             .arg("serve")
@@ -179,9 +183,9 @@ impl Client {
             transcript: Vec::new(),
         };
 
-        client.initialize().await;
+        let init = client.initialize().await;
         client.notify("notifications/initialized").await;
-        client
+        (client, init)
     }
 
     /// Send the `initialize` request and assert the server echoes the negotiated
@@ -389,11 +393,14 @@ impl Client {
 /// retrieval defects (AC2), and proves a clean disconnect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_library_api_design_trial_retrieves_and_cites_the_conversion_guideline() {
-    let mut client = Client::new().await;
+    let (mut client, init) = Client::new().await;
 
     // ---- (1) initialize: the negotiated version, the capabilities, and the
-    //         agent-workflow `instructions` the trial runs on. ----------------
-    let init = client.initialize().await;
+    //         agent-workflow `instructions` the trial runs on. `Client::new`
+    //         completes the handshake exactly once and returns that single
+    //         `initialize` response, so these assertions run on exactly the
+    //         handshake the transcript records (no redundant second exchange).
+    //         ----------------------------------------------------------------
     assert_eq!(
         init["result"]
             .get("protocolVersion")
