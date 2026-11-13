@@ -169,14 +169,14 @@ the distribution and are mutually consistent:
 
   | Source | `licenses` | `repository` | `required_notice` (abbreviated) |
   | --- | --- | --- | --- |
-  | `api-guidelines` | `MIT OR Apache-2.0` | `rust-lang/api-guidelines` | *Rust upstream content (MIT OR Apache-2.0), attributed in `THIRD_PARTY_NOTICES.md`* |
-  | `style-guide` | `MIT OR Apache-2.0` | `rust-lang/rust` | *Rust upstream content …* |
-  | `cargo` | `MIT OR Apache-2.0` | `rust-lang/cargo` | *The upstream content …* |
-  | `rustc` | `MIT OR Apache-2.0` | `rust-lang/rust` | *The upstream content …* |
-  | `rustup` | `MIT OR Apache-2.0` | `rust-lang/rustup` | *The upstream content …* |
-  | `rustfmt` | `MIT OR Apache-2.0` | `rust-lang/rustfmt` | *rustfmt upstream content …* |
-  | `clippy` | `MIT OR Apache-2.0` | `rust-lang/rust-clippy` | *Clippy upstream content …* |
-  | `rustdoc` | `MIT OR Apache-2.0` | `rust-lang/rust` | *The upstream content …* |
+  | `api-guidelines` | `MIT OR Apache-2.0` | `https://github.com/rust-lang/api-guidelines` | *Rust upstream content (MIT OR Apache-2.0), attributed in `THIRD_PARTY_NOTICES.md`* |
+  | `style-guide` | `MIT OR Apache-2.0` | `https://github.com/rust-lang/rust` | *Rust upstream content …* |
+  | `cargo` | `MIT OR Apache-2.0` | `https://github.com/rust-lang/cargo` | *The upstream content …* |
+  | `rustc` | `MIT OR Apache-2.0` | `https://github.com/rust-lang/rust` | *The upstream content …* |
+  | `rustup` | `MIT OR Apache-2.0` | `https://github.com/rust-lang/rustup` | *The upstream content …* |
+  | `rustfmt` | `MIT OR Apache-2.0` | `https://github.com/rust-lang/rustfmt` | *rustfmt upstream content …* |
+  | `clippy` | `MIT OR Apache-2.0` | `https://github.com/rust-lang/rust-clippy` | *Clippy upstream content …* |
+  | `rustdoc` | `MIT OR Apache-2.0` | `https://github.com/rust-lang/rust` | *The upstream content …* |
 
   The human-facing `THIRD_PARTY_NOTICES.md` names the **same** upstream
   repositories (cross-checked in §1.4), so the machine-readable and
