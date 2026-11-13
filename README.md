@@ -8,8 +8,8 @@ immutable snapshot. It runs entirely **offline**: the server *retrieves*
 documentation; it does not execute commands, touch the project filesystem, or
 reach the network. The calling agent runs Rust and Cargo commands through its
 own terminal tools and inspects their results. See [`plan.md`](plan.md) for the
-full specification and [`docs/`](docs/) for the compatibility, licensing, and
-CI records.
+full specification and [`docs/`](docs/) for the compatibility, licensing, CI, and
+client-configuration records.
 
 ## What it is
 
@@ -203,6 +203,12 @@ Add `--data-dir` or `--verbose` to `args` if you use them (for example
 client-specific integration is required to begin using the server; the generic
 absolute-path configuration above is the documented contract, and the
 `initialize` handshake above is the runtime check that it works.
+
+The **tested configuration** for the first client — the raw JSON-RPC 2.0 client
+over stdio — and the real captured transcript that proves it can list sources,
+search, and retrieve a section with a citation are recorded in
+[`docs/CLIENTS.md`](docs/CLIENTS.md) (reproduced by
+[`tests/first_client.rs`](tests/first_client.rs)).
 
 ## Refreshing the corpus
 
