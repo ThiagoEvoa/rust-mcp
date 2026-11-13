@@ -246,15 +246,6 @@ impl Client {
     async fn read_resource(&mut self, uri: &str) -> Value {
         self.request("resources/read", &json!({ "uri": uri })).await
     }
-
-    /// Write one newline-framed message to the child's stdin and flush.
-    ///
-    /// Implemented as a small blocking-style helper that the async `request`
-    /// drives; written as a plain synchronous flush on the `AsyncWriteExt` by
-    /// `send` below to keep the read path single-threaded and deterministic.
-    /// (Kept as a no-op shim; the real write happens in `send`.)
-    #[allow(dead_code)]
-    fn send(&mut self, _message: Value) {}
 }
 
 impl Client {
@@ -915,13 +906,50 @@ async fn read_section_resource(client: &mut Client) {
 
 impl Client {
     /// Close our side of the child's stdin (an EOF the stdio transport treats as
-    /// the end of the session) and assert the server self-exits cleanly within
-    /// the budget — the concrete "no orphaned process" claim.
+    /// the end of the session), **drain whatever the server still has on
+    /// stdout**, assert every remaining line is a JSON-RPC 2.0 message, and
+    /// assert the server self-exits cleanly within the budget. The first and
+    /// last are the "no orphaned process" claim; the drain is the *stricter*
+    /// AC2 check that asserts the tail of the session — not just the lines up to
+    /// the final response.
     async fn close_and_wait_clean(mut self) {
         // Dropping the piped stdin writer closes its write end, which the stdio
         // transport reads as an EOF — the end of the session. This mirrors the
         // lifecycle test's `drop(stdin)`.
         drop(self.stdin);
+
+        // Now drain the child's remaining stdout. After the final response the
+        // server may still emit a trailing notification, a misrouted log line,
+        // or a panic message; EOF (the server closing stdout as it exits) ends
+        // the drain. Every line it writes must be a JSON-RPC 2.0 message — the
+        // "stdout carries only protocol traffic" assertion for the *tail* of the
+        // session, the stricter check PR #77 asked for. Each read gets a fresh
+        // budget so a slow session cannot make the drain time out spuriously.
+        loop {
+            let mut line = String::new();
+            match tokio::time::timeout(BUDGET, self.reader.read_line(&mut line)).await {
+                Ok(Ok(0)) => break, // EOF: the server closed stdout and exited.
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => panic!("reading the child's stdout failed: {error}"),
+                Err(_) => {
+                    panic!("timed out draining the child's stdout after the final response")
+                }
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let value: Value =
+                serde_json::from_str(trimmed).expect("every tail stdout line must be JSON");
+            assert_eq!(
+                value.get("jsonrpc").and_then(Value::as_str),
+                Some("2.0"),
+                "a non-JSON-RPC object leaked onto the tail of stdout: {trimmed}"
+            );
+        }
+
+        // stdout closed (EOF above), so the server is exiting; assert a clean,
+        // successful self-exit — the concrete "no orphaned process" claim.
         match tokio::time::timeout(BUDGET, self.child.wait()).await {
             Ok(Ok(status)) => {
                 assert!(
