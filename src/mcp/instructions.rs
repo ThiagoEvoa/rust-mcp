@@ -252,9 +252,11 @@ mod tests {
             Some(INSTRUCTIONS),
             "get_info() must advertise the reworked INSTRUCTIONS",
         );
-        // The capability surface stays empty until handler dispatch (M4 pattern);
-        // this task reworks only the instructions text.
-        assert!(info.capabilities.tools.is_none());
-        assert!(info.capabilities.resources.is_none());
+        // [057] wires the handler dispatch, so the capability surface now
+        // advertises the tools and resources the server implements (plan §6,
+        // "advertise only what is implemented"); this task still reworks only the
+        // instructions text.
+        assert!(info.capabilities.tools.is_some());
+        assert!(info.capabilities.resources.is_some());
     }
 }
