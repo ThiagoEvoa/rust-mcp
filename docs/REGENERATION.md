@@ -106,17 +106,22 @@ corpus coverage:
   gaps: none
 
 extraction fidelity (sections=4):
-  api-guidelines/about: 121/121 words, complete
-  style-guide/intro: 121/121 words, complete
-  cargo/commands%2Fcargo-build: 121/121 words, complete
-  rustc/introduction: 121/121 words, complete
-  fidelity_complete=true
+  present nested heading
+  present anchor
+  present list
+  present table
+  present command syntax/options
+  present stability callout
+  present relative link
+  present lint known issues
+  present fenced code example
+  present no navigation/scripts
 ```
 
-(The per-run tracing prefix on each line — e.g. `2026-11-13T07:08:50.712489Z INFO rust_docs_mcp::inspect` — is omitted for readability; it is timestamped per run and carries no corpus fact.)
+(The per-run tracing prefix on each line — e.g. `2026-11-13T16:14:00.333305Z  INFO 304: rust-docs-mcp:` — is omitted for readability; it is timestamped per run and carries no corpus fact.)
 
 - **`coverage_complete=true`** — every *required* `SourceCollection` has ≥1 section and its `checklist`/`commands` cross-references resolve.
-- **`fidelity_complete=true`** — every section body is untruncated (the seed bodies are full; a truncated body would report `complete=false` and the run would not be `fidelity_complete`).
+- **`fidelity_complete=true`** — all ten content types the extractors must retain are *present* (no recorded gap): `FidelityReport::all_types_present` (`src/coverage.rs`) is true when the report's `absent` list is empty. The run is over the representative fixtures (`inspect_fidelity` over `representative_fidelity_sections()`, hence `sections=4`); a type no fixture exhibits lands in `absent`, flips `fidelity_complete` to `false`, and is *recorded* as a gap — never a fabricated pass. This is **not** "every section body is untruncated"; that is not what the fidelity check measures.
 
 The same run is reproducible: because the seed is fixed and the serializer is compact, the coverage/fidelity lines are identical on every run.
 
@@ -170,9 +175,9 @@ AC1 requires "source revisions **where identifiable; unknown where not**." For t
 | `upstream_modified` | *absent* (`unknown`) | The seed has not checked upstream. |
 | `fetched_at` / `created_at` | `2026-10-30T00:00:00Z` | The fixed seed time. |
 
-`rust-docs-mcp status` renders these for each source — on the seed every `last checked` and `upstream` is `unknown`, and the `content:` line shows the per-source `content_hash` and channel. **Unknown values are preserved explicitly, never guessed** (plan §5/§130/§139). The model's `Release` and `Source` fields are `Option`-bearing precisely so an unknown is a first-class "absent," not a zero.
+`rust-docs-mcp status` renders these for each source — on the seed every `last checked` and `upstream` is `unknown`, and the `content:` line shows the per-source `content_hash` (the channel lives in the manifest's `release.channel`, not on a `status` row). **Unknown values are preserved explicitly, never guessed** (plan §5/§130/§139). The model's `Release` and `Source` fields are `Option`-bearing precisely so an unknown is a first-class "absent," not a zero.
 
-A live `sync` publishes a **fresh, version-stamped snapshot** (`snapshot_id` = `rust-docs-mcp/<CARGO_PKG_VERSION>-<nanos>`, a wall-clock `fetched_at`, and a per-source `content_hash` over the ingested content) while **preserving the last valid corpus**. The full freshness model — conditional HTTP 304 checks, the `FRESHNESS_THRESHOLD_DAYS = 7` window, the last-valid fallback — is in [`docs/OPERATIONS.md`](OPERATIONS.md) §4–§5.
+A live `sync` publishes a **fresh, version-stamped snapshot** (`snapshot_id` = `rust-docs-mcp/<CARGO_PKG_VERSION>-<nanos>`, a wall-clock `fetched_at`, and a per-source `content_hash` over the ingested content) while **preserving the last valid corpus**. The full freshness model — conditional HTTP 304 checks, the `StaleThreshold::default()` (seven-day) window, the last-valid fallback — is in [`docs/OPERATIONS.md`](OPERATIONS.md) §4–§5.
 
 ---
 
@@ -190,9 +195,9 @@ A live `sync` publishes a **fresh, version-stamped snapshot** (`snapshot_id` = `
 
 ### 3.3 Validation is part of `sync` (atomic publish only if every check passes)
 
-`CorpusPublisher::publish_snapshot` (in `src/corpus.rs`) is ordered so a bad corpus can never become active:
+`publish_snapshot` — the free function `crate::corpus::publish_snapshot(data_dir, manifest)` in `src/corpus.rs` — is ordered so a bad corpus can never become active:
 
-1. **Validate in memory** (`manifest.validate()` → `require_valid()?`) *before* touching the filesystem.
+1. **Validate in memory** (`validate_snapshot(manifest)` → `.require_valid()?`) *before* touching the filesystem.
 2. Serialize to compact JSON and enforce the size bound (`MAX_SNAPSHOT_BYTES = 64 MiB`).
 3. Resolve the corpus directory; acquire the **writer lock** (so two concurrent `sync`s don't interleave a write).
 4. Clean stale temp files.
@@ -228,14 +233,14 @@ All eight sources are **MIT OR Apache-2.0**; none ships its own `NOTICE`, so the
 
 | Source | `repository` | `licenses` | `required_notice` (verbatim) |
 | --- | --- | --- | --- |
-| Rust API Guidelines | `rust-lang/api-guidelines` | `MIT OR Apache-2.0` | *Rust upstream content is provided under the MIT License or the Apache License 2.0, per the source's license files.* |
-| Rust Style Guide | `rust-lang/style-guide` | `MIT OR Apache-2.0` | *The upstream content is provided under the MIT License or the Apache License 2.0, per the source's license files.* |
-| The Cargo Book | `rust-lang/cargo` | `MIT OR Apache-2.0` | *The upstream content is provided under the MIT License or the Apache License 2.0, per the source's license files.* |
-| The rustc Book | `rust-lang/rust` | `MIT OR Apache-2.0` | *The upstream content is provided under the MIT License or the Apache License 2.0, per the source's license files.* |
-| The rustup Book | `rust-lang/rustup` | `MIT OR Apache-2.0` | *The upstream content is provided under the MIT License or the Apache License 2.0, per the source's license files.* |
-| rustfmt reference | `rust-lang/rustfmt` | `MIT OR Apache-2.0` | *rustfmt upstream content is provided under the MIT License or the Apache License 2.0, per the source's license files.* |
-| Clippy | `rust-lang/rust-clippy` | `MIT OR Apache-2.0` | *Clippy upstream content is provided under the MIT License or the Apache License 2.0, per the source's license files.* |
-| The rustdoc Book | `rust-lang/rust` | `MIT OR Apache-2.0` | *The upstream content is provided under the MIT License or the Apache License 2.0, per the source's license files.* |
+| Rust API Guidelines | `https://github.com/rust-lang/api-guidelines` | `["MIT OR Apache-2.0"]` | `Rust upstream content (MIT OR Apache-2.0), attributed in THIRD_PARTY_NOTICES.md` |
+| Rust Style Guide | `https://github.com/rust-lang/rust` | `["MIT OR Apache-2.0"]` | `Rust upstream content (MIT OR Apache-2.0), attributed in THIRD_PARTY_NOTICES.md` |
+| The Cargo Book | `https://github.com/rust-lang/cargo` | `["MIT OR Apache-2.0"]` | `The upstream content (MIT OR Apache-2.0), attributed in THIRD_PARTY_NOTICES.md` |
+| The rustc Book | `https://github.com/rust-lang/rust` | `["MIT OR Apache-2.0"]` | `The upstream content (MIT OR Apache-2.0), attributed in THIRD_PARTY_NOTICES.md` |
+| The rustup Book | `https://github.com/rust-lang/rustup` | `["MIT OR Apache-2.0"]` | `The upstream content (MIT OR Apache-2.0), attributed in THIRD_PARTY_NOTICES.md` |
+| rustfmt reference | `https://github.com/rust-lang/rustfmt` | `["MIT OR Apache-2.0"]` | `rustfmt upstream content (MIT OR Apache-2.0), attributed in THIRD_PARTY_NOTICES.md` |
+| Clippy | `https://github.com/rust-lang/rust-clippy` | `["MIT OR Apache-2.0"]` | `Clippy upstream content (MIT OR Apache-2.0), attributed in THIRD_PARTY_NOTICES.md` |
+| The rustdoc Book | `https://github.com/rust-lang/rust` | `["MIT OR Apache-2.0"]` | `The upstream content (MIT OR Apache-2.0), attributed in THIRD_PARTY_NOTICES.md` |
 
 ### 4.3 Notices travel with the content
 
