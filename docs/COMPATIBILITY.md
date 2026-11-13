@@ -330,3 +330,155 @@ the raw anonymous crates.io API returns 403 without one):**
 | `rust-toolchain.toml` | **Created** — records the `channel = "stable"` pin; exact patch version intentionally left to the toolchain. |
 | `plan.md` | M1 first checklist item marked `[x]` with a pointer to this doc. All other content unchanged. |
 | `Cargo.toml`, `Cargo.lock`, `src/` | **Not created** — belongs to task [002]. |
+
+---
+
+## 10. M4 client + protocol matrix (verified, 2026-11-13)
+
+**Task:** [058] M4 — *Verify the supported protocol and first-client matrix*
+(issue [#58](https://github.com/ThiagoEvoa/rust-mcp/issues/58)).
+**Status:** **Verified** — the M4-tested matrix is recorded here from the actual
+artifacts that exercise it; **re-review pending.** This section is the M4
+"record + document" closeout: it records what was *actually* tested, reconciles
+the §1/§5.1 `[001]` prediction with the as-built client, and documents the
+unsupported combinations. It does **not** change retrieval behavior or the
+handler's dispatch.
+**Verified:** 2026-11-13, on `rustc`/`cargo` 1.99.1 (stable `aarch64-apple-darwin`),
+MSRV 1.88, edition 2024 — the §2 baseline. Every outcome below points at a
+test that is part of the green `cargo test --workspace --locked` suite.
+
+> This section supersedes, for the M4 surface only, the *"first supported client
+> = rmcp's built-in in-process client / SDK test harness"* prediction in §1 and
+> §5.1. The deviation and its rationale are recorded in §10.4. The §5.1
+> in-process client remains the *M1* contract-establishing client; the M4
+> as-built first client is the raw JSON-RPC client in §10.3. Real-world/external
+> clients remain **STILL TO TEST** (§10.5).
+
+### 10.1 SDK + feature matrix (actually compiled and exercised)
+
+| Concern | Record | Confidence |
+| --- | --- | --- |
+| MCP SDK | `rmcp` **3.8.0** (+ `rmcp-macros` **3.8.0**, pulled transitively by the `macros`/`server` features) | Confirmed — `Cargo.toml` line 36, `Cargo.lock` |
+| SDK features enabled | **`server` + `macros` + `transport-io` only.** The heavy `transport-streamable-http-*` / `auth` / `server-side-http` features stay **off**, and the `client` feature is **not** enabled (see §10.3) | Confirmed — `Cargo.toml` `rmcp = { version = "3.8.0", features = ["server", "macros", "transport-io"] }` |
+| Transport | **stdio only** (`transport-io`): the `serve` binary reads/writes the JSON-RPC 2.0 protocol over OS stdio. No HTTP/SSE/streamable-HTTP transport is built or tested | Confirmed — `src/mcp.rs` stdio driver; no HTTP feature in the closure |
+| Protocol versions advertised | `supported_protocol_versions()` returns the SDK's full `KNOWN_VERSIONS` = `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`, **`2026-07-28`** (§4); the server negotiates the **highest mutually-supported, client-requested** version | Confirmed — `src/mcp.rs` `get_info` (default `supported_protocol_versions`); §4 |
+
+### 10.2 Per-version connection / discovery outcomes
+
+The server advertises **all five** `KNOWN_VERSIONS` (§4). Each version's
+connection/discovery outcome, and the test that proves it, is:
+
+| Protocol version | Has `initialize`? | Connection / discovery path | Outcome | Proven by |
+| --- | --- | --- | --- | --- |
+| `2024-11-05` | Yes | `initialize` handshake (oldest `initialize`-capable) | Connects; server echoes `protocolVersion = 2024-11-05` + `serverInfo`; clean self-exit on client disconnect | `tests/stdio_lifecycle.rs` `[005]` (iterates this version) |
+| `2025-03-26` | Yes | `initialize` handshake | Connects; echoes `2025-03-26`; clean disconnect | `tests/stdio_lifecycle.rs` `[005]` |
+| `2025-06-18` | Yes | `initialize` handshake | Connects; echoes `2025-06-18`; clean disconnect | `tests/stdio_lifecycle.rs` `[005]` |
+| `2025-11-25` | Yes | `initialize` handshake (highest `initialize`-capable; `LATEST_WITH_INITIALIZE`) | Connects; echoes `2025-11-25`; clean disconnect. This is the version the M4 surface proof drives the full five-tool + two-resource surface against (§10.3) | `tests/stdio_lifecycle.rs` `[005]` (lifecycle); `tests/stdio_mcp.rs` `[057]` (full surface) |
+| `2026-07-28` | **No** (`NO_INITIALIZE`; `LATEST`) | **Discovery / error-upgrade path** — no `initialize` handshake (SEP-2567); a client that requests it is down-negotiated to `2025-11-25`. The version-aware error-code upgrade (`RESOURCE_NOT_FOUND` `-32002` → `INVALID_PARAMS` `-32602`, SEP-2164) applies to peers on `2026-07-28` or newer | The error-upgrade rule is proven by the `protocol_error` unit tests; the `initialize`-negotiation half is proven because a client asking for `2026-07-28` is down-negotiated to `2025-11-25` (which the surface test drives). The `2026-07-28`-specific *discovery* framing (no `initialize`) is the SDK's documented behavior (§4), not a separately-spawned-client run | `src/mcp/protocol_error.rs` tests (`resource_not_found_upgrades_to_invalid_params_for_2026_07_28`, `unknown_section_is_resource_not_found_for_pre_2026`); `tests/stdio_mcp.rs` `[057]` not-found assertions (`-32002` at the negotiated `2025-11-25`) |
+
+**Key boundary (carried from §4, re-confirmed by the tests):** `has_initialize()`
+is `true` for `2024-11-05 … 2025-11-25` and `false` from `2026-07-28`. The four
+`initialize`-capable versions are exercised directly by `tests/stdio_lifecycle.rs`;
+`2026-07-28` is exercised as the *discovery/error-upgrade* path (its `initialize`
+half by down-negotiation, its error-code upgrade by the `protocol_error` unit
+suite). This is exactly the "validate **both** an `initialize`-style client
+(`2024-11-05`…`2025-11-25`, with the `2024-11-05` floor) **and** a
+`2026-07-28` discovery path, and error-mapping must branch on the negotiated
+version" requirement from §4.
+
+### 10.3 Client actually used (the M4 first client)
+
+The M4 first client is a **raw JSON-RPC 2.0 client** written by hand over a
+newline-delimited stream — **no `rmcp` client, no new dependency**:
+
+- **`tests/stdio_lifecycle.rs`** (`[005]`, M1, still the authoritative
+  lifecycle check) — spawns the *real* `rust-docs-mcp serve` binary over genuine
+  OS stdio, and for each of the four `initialize`-capable versions
+  (`2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`) sends one
+  `initialize` request + the `notifications/initialized` notification, asserts the
+  server echoes the exact `protocolVersion` and `serverInfo`, then closes its
+  stdin (an EOF) and asserts the server **exits on its own, cleanly**, within a
+  bounded budget (the "no orphaned process" half). Every stdout line is parsed
+  and must be a JSON-RPC 2.0 message.
+- **`tests/stdio_mcp.rs`** (`[057]`, M4) — spawns the *real* `serve` binary over
+  stdio, completes the `initialize` handshake at `2025-11-25` (the highest
+  `initialize`-capable version; a `2026-07-28` request would be down-negotiated
+  to it), then discovers and calls **all five tools** (`list_sources`,
+  `search_docs`, `get_section`, `get_api_checklist`, `get_command_guidance`,
+  including pagination, empty results, and invalid input → `INVALID_PARAMS`) and
+  reads **both resources** (`rust-docs://catalog` and a section
+  `rust-docs://snapshots/<id>/sections/<id>`), asserting typed not-found errors
+  (`-32002` at the negotiated version) and **stdout protocol integrity** (every
+  line a JSON-RPC 2.0 message).
+
+Both clients speak raw JSON-RPC, so the checks are **hermetic** (no network, no
+external process beyond the server binary under test) and **do not depend on the
+SDK's internal task scheduler** — the rmcp `RunningService` tasks are `!Send`
+and bind to a `LocalSpawner`, so an in-process black-box client would have to
+replicate the SDK's runtime setup (see the `get_info` test comment in
+`src/mcp.rs`).
+
+### 10.4 Reconciliation with the `[001]` prediction (deviation + rationale)
+
+§1 and §5.1 predicted the first supported client would be **"rmcp's built-in
+in-process client / SDK test harness"** (`serve_client` / `ClientSession`). The
+as-built M4 first client is instead the **raw JSON-RPC client** in §10.3. This
+is a **deliberate, documented deviation**, not a regression:
+
+- **No new dependency.** Enabling rmcp's `client` feature would add the client
+  half of the SDK to the server's build. The raw JSON-RPC client keeps the
+  dependency closure at `server` + `macros` + `transport-io` only — the
+  **no-new-dependency posture** that governs the project and that `[057]`
+  established as precedent.
+- **Hermetic and more authoritative.** A raw client exercises the **production
+  stdio path** — the same bytes and the same process boundary a real external
+  agent hits — rather than an in-memory `async-stdio` stream. As `src/mcp.rs`
+  records, the spawned-binary check is "the more authoritative check anyway"; an
+  in-process client would have to reconstruct the SDK's `!Send`/`LocalSpawner`
+  runtime and is not a reliable black-box check from this crate.
+- **No `initialize` at `2026-07-28`** means the in-process client would also have
+  to special-case the discovery path; the raw client handles both the
+  `initialize`-capable versions (directly) and the `2026-07-28` discovery/error
+  path (by down-negotiation + the `protocol_error` unit suite) without that
+  branching.
+
+The §5.1 in-process client remains the **M1** contract-establishing client (it
+proves protocol/lifecycle behavior with no network); the M4 **as-built** first
+client is the raw JSON-RPC client in §10.3. This section is the authoritative
+record of *what was actually tested*; §1/§5.1 read as the M1-era prediction they
+are.
+
+### 10.5 Real-world clients — STILL TO TEST
+
+No **real-world / external** MCP client (a separate agent binary, the MCP
+reference client, or a non-rmcp implementation such as a TypeScript/Python MCP
+client) has been launched against this server yet. Each remains **STILL TO TEST**
+(carrying forward §5.2), and the first such trial is owed by task `[064]`
+(*"Document & verify the first client config"*). Until then, the compatibility
+claim is scoped to: **the SDK's own server + a raw JSON-RPC 2.0 client over
+stdio, across all five advertised protocol versions.** A real spawn/EOF/cancel/
+exit-code run against an external client is not claimed here.
+
+### 10.6 Capabilities advertised vs. unsupported combinations (AC2)
+
+**Advertised — exactly `tools` + `resources`.** `DocsServer::get_info`
+(`src/mcp.rs`) builds capabilities with
+`ServerCapabilities::builder().enable_tools().enable_resources()` — and **only**
+those two. It dispatches all five tools and the two catalog/section resource URIs.
+A focused unit test (`get_info_advertises_identity_and_capabilities`, `src/mcp.rs`)
+asserts `tools`/`resources` are advertised and `prompts` is **not**.
+
+**Unsupported / not advertised** (documented so a client does not expect them):
+
+| Category | Unsupported combination | Rationale / where recorded |
+| --- | --- | --- |
+| Capabilities | **`prompts`** | Not implemented (no prompt surface). Asserted `is_none()` by the `get_info` unit test. |
+| Capabilities | **`completions`**, **`logging`**, **`experimental`**, **`extensions`** | `rmcp`'s `ServerCapabilities` fields we do **not** enable; they serialize as absent (`skip_serializing_if = "Option::is_none"`). The server advertises no completion, logging, or prompt surface. |
+| Transport | **Anything other than stdio** (streamable-HTTP, SSE, `auth`) | Not built. The `rmcp` HTTP/auth features are off; the server is a local stdio process. No HTTP listener exists to test. |
+| Protocol versions | **Versions outside `KNOWN_VERSIONS`** (older than `2024-11-05`; unknown/unrecognized) | The server negotiates the highest *mutually-supported* version from `KNOWN_VERSIONS` (§4); a client naming a version the SDK does not know cannot be negotiated to and is not supported. `2026-07-28` is supported as the discovery/error-upgrade path (§10.2), not as an `initialize` client. |
+| Real-world clients | **External / non-rmcp MCP clients** | **STILL TO TEST** (§10.5). |
+
+This is the "advertise only what is implemented" invariant from
+[plan.md](../plan.md) §6, now concrete: the `tools` + `resources` surface that
+`[057]` wired through handler dispatch is exactly the surface advertised, and
+nothing else is advertised.
