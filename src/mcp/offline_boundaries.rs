@@ -452,9 +452,12 @@ async fn adversarial_inputs_are_refused_never_executed_fetched_or_read() {
             ErrorCode::INVALID_PARAMS,
         ),
         // A well-formed id the active snapshot does not carry — the "section
-        // absent" refusal, shown as its base RESOURCE_NOT_FOUND code.
+        // absent" refusal, shown as its base RESOURCE_NOT_FOUND code. The id
+        // keeps a registry-known `source/` prefix (`api-guidelines/`) so it
+        // passes the section-id grammar; a bare path like `does-not-exist` has
+        // no source and is refused earlier as a malformed id (INVALID_PARAMS).
         (
-            &format!("rust-docs://snapshots/{snapshot_id}/sections/does-not-exist"),
+            &format!("rust-docs://snapshots/{snapshot_id}/sections/api-guidelines/does-not-exist"),
             ErrorCode::RESOURCE_NOT_FOUND,
         ),
     ];
