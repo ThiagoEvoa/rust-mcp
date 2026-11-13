@@ -38,13 +38,15 @@ client-integration sequence are in [`plan.md`](plan.md) §7.
   rustup toolchain install stable
   ```
 
-- **A C linker** (for the TLS stack used by `sync`'s HTTP fetcher) and the usual
-  build tooling. `cargo build` compiles the release binary.
+- **A C compiler** (`cc`, for the `rustls` TLS stack used by `sync`'s HTTP
+  fetcher), plus the usual build tooling — the linker that produces the final
+  binary. `cargo build` compiles the release binary.
 
-- **No external runtime dependencies and no network to start the server.** The
-  server is standard-library-only at run time for serving; it makes no network
-  calls, needs no API key, and sends no telemetry. Network access is required
-  only for the explicit `sync` refresh command (see [Refreshing the corpus](#refreshing-the-corpus)).
+- **No external runtime services and no network to start the server.** The
+  server needs no external runtime services at serving time — no network service,
+  LLM, API key, or telemetry — and it makes no network calls. Network access is
+  required only for the explicit `sync` refresh command
+  (see [Refreshing the corpus](#refreshing-the-corpus)).
 
 ## Install (clean-install walkthrough)
 
@@ -103,9 +105,11 @@ checked upstream yet — `sync` stamps them. The `as_of` value is the wall clock
 the time of the run, so it varies.
 
 The `snapshot:` line is the **snapshot identity** (`rust-docs-bundled-seed`);
-the `8` sources/`8` sections confirm the eight collections are present. The same
-identity is returned by the in-protocol `list_sources` tool, and a real client
-sees it in the `initialize` handshake (`serverInfo.name = "rust-docs-mcp"`).
+the `8` sources/`8` sections confirm the eight collections are present. The
+`list_sources` tool returns that same snapshot id. The `initialize` handshake
+carries a *different* value — the `serverInfo` that identifies the **server**
+itself: `name = "rust-docs-mcp"`, `version = "0.1.0"` — distinct from the
+snapshot id.
 
 For a coverage and extraction-fidelity report over the same snapshot, use
 `inspect` (the operator view):
