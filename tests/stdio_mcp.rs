@@ -177,12 +177,16 @@ impl Client {
     /// Send the `initialize` request and assert the server echoes the negotiated
     /// protocol version and its implementation identity.
     async fn initialize(&mut self) {
-        let response = self.request("initialize", &json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {},
-            "clientInfo": { "name": "stdio-mcp-test", "version": "0.0.1" },
-        }))
-        .await;
+        let response = self
+            .request(
+                "initialize",
+                &json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": { "name": "stdio-mcp-test", "version": "0.0.1" },
+                }),
+            )
+            .await;
         assert_eq!(
             response.get("error"),
             None,
@@ -279,7 +283,9 @@ impl Client {
         // JSON-RPC 2.0 message — the "stdout carries only protocol traffic"
         // assertion for this request.
         loop {
-            let remaining = self.deadline.saturating_duration_since(tokio::time::Instant::now());
+            let remaining = self
+                .deadline
+                .saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 panic!("timed out waiting for the response to `{method}` (id {id})");
             }
@@ -351,14 +357,15 @@ async fn serve_exposes_the_five_tools_and_two_resources_over_stdio() {
 /// `tools/list` advertises exactly the five documented tools.
 async fn discover_all_five_tools(client: &mut Client) {
     let response = client.request("tools/list", &json!({})).await;
-    assert_eq!(response.get("error"), None, "tools/list must succeed: {response}");
+    assert_eq!(
+        response.get("error"),
+        None,
+        "tools/list must succeed: {response}"
+    );
     let tools = response["result"]["tools"]
         .as_array()
         .expect("`tools/list` returns a `tools` array");
-    let advertised: Vec<&str> = tools
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
+    let advertised: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in TOOL_NAMES {
         assert!(
             advertised.contains(&name),
@@ -388,7 +395,11 @@ async fn discover_all_five_tools(client: &mut Client) {
 /// snapshot metadata.
 async fn call_list_sources(client: &mut Client) {
     let response = client.call_tool("list_sources", json!({})).await;
-    assert_eq!(response.get("error"), None, "list_sources must succeed: {response}");
+    assert_eq!(
+        response.get("error"),
+        None,
+        "list_sources must succeed: {response}"
+    );
     let structured = &response["result"]["structuredContent"];
     assert_eq!(
         structured["snapshot_id"], SNAPSHOT_ID,
@@ -409,7 +420,9 @@ async fn call_list_sources(client: &mut Client) {
     }
     // The command-catalog keys are surfaced for `get_command_guidance`
     // discovery.
-    let commands = structured["commands"].as_array().expect("a `commands` array");
+    let commands = structured["commands"]
+        .as_array()
+        .expect("a `commands` array");
     assert!(
         !commands.is_empty(),
         "the command catalog is surfaced for discovery"
@@ -429,10 +442,16 @@ async fn call_search_docs(client: &mut Client) {
     let response = client
         .call_tool("search_docs", json!({ "query": "C-CONV" }))
         .await;
-    assert_eq!(response.get("error"), None, "a valid search must succeed: {response}");
+    assert_eq!(
+        response.get("error"),
+        None,
+        "a valid search must succeed: {response}"
+    );
     let structured = &response["result"]["structuredContent"];
     assert_eq!(structured["snapshot_id"], SNAPSHOT_ID);
-    let hits = structured["hits"].as_array().expect("a valid search returns hits");
+    let hits = structured["hits"]
+        .as_array()
+        .expect("a valid search returns hits");
     assert!(
         !hits.is_empty(),
         "the query `C-CONV` matches a section in the seed corpus"
@@ -478,7 +497,12 @@ async fn call_search_docs(client: &mut Client) {
         );
         let structured = &response["result"]["structuredContent"];
         for hit in structured["hits"].as_array().expect("a hits array") {
-            collected.push(hit["section_id"].as_str().expect("a section id").to_string());
+            collected.push(
+                hit["section_id"]
+                    .as_str()
+                    .expect("a section id")
+                    .to_string(),
+            );
         }
         pages += 1;
         if structured.get("truncated").and_then(Value::as_bool) != Some(true) {
@@ -495,7 +519,10 @@ async fn call_search_docs(client: &mut Client) {
                 .expect("a truncated page carries a next cursor")
                 .to_string(),
         );
-        assert!(pages <= 20, "the search paginates in a bounded number of pages");
+        assert!(
+            pages <= 20,
+            "the search paginates in a bounded number of pages"
+        );
     }
     assert!(
         !collected.is_empty(),
@@ -516,7 +543,10 @@ async fn call_search_docs(client: &mut Client) {
 
     // --- Empty result: zero hits with useful-empty guidance, not an error. ---
     let response = client
-        .call_tool("search_docs", json!({ "query": "zzzzz_no_such_token_qwerty" }))
+        .call_tool(
+            "search_docs",
+            json!({ "query": "zzzzz_no_such_token_qwerty" }),
+        )
         .await;
     assert_eq!(
         response.get("error"),
@@ -530,7 +560,10 @@ async fn call_search_docs(client: &mut Client) {
         Some(Value::Array(arr)) => arr.is_empty(),
         _ => false,
     };
-    assert!(empty, "a non-matching query returns zero hits: {structured}");
+    assert!(
+        empty,
+        "a non-matching query returns zero hits: {structured}"
+    );
     // The useful-empty guidance is offered.
     let next_steps = structured["next_steps"].as_array();
     assert!(
@@ -539,7 +572,9 @@ async fn call_search_docs(client: &mut Client) {
     );
 
     // --- Invalid input: a blank query is a typed INVALID_PARAMS (-32602). ----
-    let response = client.call_tool("search_docs", json!({ "query": "   " })).await;
+    let response = client
+        .call_tool("search_docs", json!({ "query": "   " }))
+        .await;
     assert_error(&response, -32602, "a blank search query is INVALID_PARAMS");
 }
 
@@ -548,9 +583,16 @@ async fn call_search_docs(client: &mut Client) {
 async fn call_get_section(client: &mut Client) {
     // --- A valid section id. ------------------------------------------------
     let response = client
-        .call_tool("get_section", json!({ "section_id": "api-guidelines/about" }))
+        .call_tool(
+            "get_section",
+            json!({ "section_id": "api-guidelines/about" }),
+        )
         .await;
-    assert_eq!(response.get("error"), None, "a valid section must resolve: {response}");
+    assert_eq!(
+        response.get("error"),
+        None,
+        "a valid section must resolve: {response}"
+    );
     let section = &response["result"]["structuredContent"]["section"];
     assert_eq!(section["id"], "api-guidelines/about");
     assert_eq!(section["source"], "api-guidelines");
@@ -573,18 +615,30 @@ async fn call_get_section(client: &mut Client) {
     );
     // Citations back the section.
     let citations = section.get("citations").and_then(Value::as_array);
-    assert!(citations.is_some(), "the section carries citations: {section}");
+    assert!(
+        citations.is_some(),
+        "the section carries citations: {section}"
+    );
     // The schema version is echoed.
     assert!(
-        response["result"]["structuredContent"].get("schema_version").is_some(),
+        response["result"]["structuredContent"]
+            .get("schema_version")
+            .is_some(),
         "the response carries the schema version"
     );
 
     // --- A missing section id is a typed not-found. -------------------------
     let response = client
-        .call_tool("get_section", json!({ "section_id": "cargo/does-not-exist" }))
+        .call_tool(
+            "get_section",
+            json!({ "section_id": "cargo/does-not-exist" }),
+        )
         .await;
-    assert_error(&response, -32002, "a missing section is a typed not-found (-32002)");
+    assert_error(
+        &response,
+        -32002,
+        "a missing section is a typed not-found (-32002)",
+    );
     // The offending id is surfaced in the error `data` for self-correction.
     assert_eq!(
         response["error"]["data"]["section_id"],
@@ -603,14 +657,20 @@ async fn call_get_api_checklist(client: &mut Client) {
             json!({ "category": "Conversions and From" }),
         )
         .await;
-    assert_eq!(response.get("error"), None, "a valid category resolves: {response}");
+    assert_eq!(
+        response.get("error"),
+        None,
+        "a valid category resolves: {response}"
+    );
     let structured = &response["result"]["structuredContent"];
     assert_eq!(
         structured["category"],
         json!("Conversions and From"),
         "the response echoes the requested category"
     );
-    let entries = structured["entries"].as_array().expect("an `entries` array");
+    let entries = structured["entries"]
+        .as_array()
+        .expect("an `entries` array");
     assert!(
         !entries.is_empty(),
         "the `Conversions and From` category has entries in the seed corpus"
@@ -629,7 +689,10 @@ async fn call_get_api_checklist(client: &mut Client) {
 
     // --- An invalid category is a typed error with discoverable categories. --
     let response = client
-        .call_tool("get_api_checklist", json!({ "category": "No Such Category" }))
+        .call_tool(
+            "get_api_checklist",
+            json!({ "category": "No Such Category" }),
+        )
         .await;
     assert_error(
         &response,
@@ -664,11 +727,15 @@ async fn call_get_command_guidance(client: &mut Client) {
     let structured = &response["result"]["structuredContent"];
     assert_eq!(structured["entry"]["key"], json!("cargo build"));
     assert!(
-        structured["entry"]["purpose"].as_str().is_some_and(|p| !p.is_empty()),
+        structured["entry"]["purpose"]
+            .as_str()
+            .is_some_and(|p| !p.is_empty()),
         "the entry carries a purpose"
     );
     // The cited section bodies are resolved into the `sections` page.
-    let sections = structured["sections"].as_array().expect("a `sections` array");
+    let sections = structured["sections"]
+        .as_array()
+        .expect("a `sections` array");
     assert!(
         !sections.is_empty(),
         "`cargo build` cites at least one upstream section in the seed corpus"
@@ -687,7 +754,10 @@ async fn call_get_command_guidance(client: &mut Client) {
 
     // --- An unsupported key is a typed error with the supported keys. -------
     let response = client
-        .call_tool("get_command_guidance", json!({ "command": "cargo frobnicate" }))
+        .call_tool(
+            "get_command_guidance",
+            json!({ "command": "cargo frobnicate" }),
+        )
         .await;
     assert_error(
         &response,
@@ -715,7 +785,11 @@ async fn call_get_command_guidance(client: &mut Client) {
 async fn read_catalog_resource(client: &mut Client) {
     // The discovery listing.
     let list = client.request("resources/list", &json!({})).await;
-    assert_eq!(list.get("error"), None, "resources/list must succeed: {list}");
+    assert_eq!(
+        list.get("error"),
+        None,
+        "resources/list must succeed: {list}"
+    );
     let resources = list["result"]["resources"]
         .as_array()
         .expect("`resources/list` returns a `resources` array");
@@ -746,8 +820,8 @@ async fn read_catalog_resource(client: &mut Client) {
     );
     // The text payload is itself a JSON object (schema conformance by round-trip).
     let text = contents[0]["text"].as_str().expect("a JSON text payload");
-    let payload: Value = serde_json::from_str(text)
-        .expect("the catalog resource text is a JSON object");
+    let payload: Value =
+        serde_json::from_str(text).expect("the catalog resource text is a JSON object");
     assert!(
         payload.is_object(),
         "the catalog resource payload is a JSON object"
@@ -781,7 +855,11 @@ async fn read_catalog_resource(client: &mut Client) {
 async fn read_section_resource(client: &mut Client) {
     let uri = section_resource_uri("api-guidelines/about");
     let response = client.read_resource(&uri).await;
-    assert_eq!(response.get("error"), None, "a section resource reads: {response}");
+    assert_eq!(
+        response.get("error"),
+        None,
+        "a section resource reads: {response}"
+    );
     let contents = response["result"]["contents"]
         .as_array()
         .expect("`contents` is an array");
@@ -796,8 +874,8 @@ async fn read_section_resource(client: &mut Client) {
         "the section resource is served as application/json"
     );
     let text = contents[0]["text"].as_str().expect("a JSON text payload");
-    let payload: Value = serde_json::from_str(text)
-        .expect("the section resource text is a JSON object");
+    let payload: Value =
+        serde_json::from_str(text).expect("the section resource text is a JSON object");
     let section = &payload["section"];
     assert_eq!(
         section["id"],
@@ -805,7 +883,10 @@ async fn read_section_resource(client: &mut Client) {
         "the section resource carries its section"
     );
     assert!(
-        section.get("body").and_then(Value::as_str).is_some_and(|b| !b.is_empty()),
+        section
+            .get("body")
+            .and_then(Value::as_str)
+            .is_some_and(|b| !b.is_empty()),
         "the section resource serves the body"
     );
     // Provenance: citations and the canonical URL are present.
@@ -865,13 +946,15 @@ fn assert_error(response: &Value, expected_code: i32, context: &str) {
         .and_then(Value::as_i64)
         .expect("an error response carries a numeric code");
     assert_eq!(
-        code,
-        expected_code as i64,
+        code, expected_code as i64,
         "{context}: expected error code {expected_code}, got {code} ({response})"
     );
     // Every protocol error carries a human-readable message.
     assert!(
-        error.get("message").and_then(Value::as_str).is_some_and(|m| !m.is_empty()),
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|m| !m.is_empty()),
         "an error response carries a message: {response}"
     );
 }
