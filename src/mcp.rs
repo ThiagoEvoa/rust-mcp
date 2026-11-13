@@ -25,18 +25,29 @@
 //! black-box client check would need to replicate the SDK's own runtime
 //! setup. The spawned-binary test instead exercises the production path over
 //! the real transport, which is the more authoritative check anyway.
-//! What it deliberately does **not** do in M1:
+//! What the M1 skeleton deliberately did **not** do — each item has since
+//! landed in a later milestone, recorded here for provenance:
 //!
-//! * it advertises **no** tool or resource capabilities — the five tools and
-//!   the two resources land in M4 ([048]-[059]); "advertise only what is
-//!   implemented" ([plan.md](../plan.md) §6) means the skeleton stays honest;
-//! * it touches **no** corpus or data directory — an immutable snapshot load and
-//!   the "no valid snapshot → exit without serving an empty server" gate land in
-//!   M2/M4 ([018]-[022], [050]); and
-//! * it is **not** wired to the real stdio streams yet by the CLI — task
-//!   [003] does that. The stdio transport is exercised by the spawned-binary
-//!   test, which runs the real `rust-docs-mcp serve` binary and speaks the
-//!   JSON-RPC protocol over its stdio.
+//! * **Capabilities — superseded by M4 ([057]).** The M1 skeleton advertised
+//!   *no* tool or resource capabilities. `[057]` wired the handler, and
+//!   `get_info` now advertises **exactly** `tools` + `resources`
+//!   (`ServerCapabilities::builder().enable_tools().enable_resources()`) and
+//!   dispatches all five tools and the two catalog/section resource URIs.
+//!   "Advertise only what is implemented" ([plan.md](../plan.md) §6) still
+//!   governs: nothing else (`prompts`, `completions`, `logging`,
+//!   `experimental`, `extensions`) is advertised, and no transport other than
+//!   stdio is built. The full client + protocol matrix and the unsupported
+//!   combinations are recorded in
+//!   [`docs/COMPATIBILITY.md`](../docs/COMPATIBILITY.md) §10 (task [058]).
+//! * **Corpus / data directory — superseded by M2/M4 ([018]-[022], [050]).**
+//!   The M1 skeleton touched no corpus; the immutable snapshot load and the
+//!   "no valid snapshot → exit without serving an empty server" gate landed in
+//!   M2/M4.
+//! * **CLI stdio wiring — superseded by [003].** The `serve` CLI command runs
+//!   the server over genuine OS stdio; the spawned-binary tests
+//!   ([`tests/stdio_lifecycle.rs`](../tests/stdio_lifecycle.rs) and
+//!   [`tests/stdio_mcp.rs`](../tests/stdio_mcp.rs)) drive that production
+//!   path with a raw JSON-RPC 2.0 client.
 //!
 //! # Error mapping
 //!
@@ -189,6 +200,16 @@ impl ServerHandler for DocsServer {
     /// mutually supported, client-requested version — which is exactly what the
     /// lifecycle tests assert.
     fn get_info(&self) -> ServerConfig {
+        // Advertise *exactly* the two capabilities this handler dispatches —
+        // `tools` + `resources` — and nothing else (plan §6, "advertise only
+        // what is implemented"). Notably **not** advertised: `prompts`,
+        // `completions`, `logging`, `experimental`, and `extensions` (rmcp
+        // omits any capability we do not `.enable_*()` via
+        // `skip_serializing_if = "Option::is_none"`), and no transport other
+        // than stdio is built. The full client + protocol matrix and the
+        // unsupported combinations are recorded in `docs/COMPATIBILITY.md` §10
+        // (task [058]); the unit test `get_info_advertises_exactly_tools_and_resources`
+        // guards this set.
         let capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_resources()
@@ -507,5 +528,45 @@ mod tests {
         assert!(info.capabilities.tools.is_some());
         assert!(info.capabilities.resources.is_some());
         assert!(info.capabilities.prompts.is_none());
+    }
+
+    /// The advertised capability set is *exactly* `tools` + `resources` — no
+    /// other capability is advertised (AC2, [058]). This is the "advertise only
+    /// what is implemented" invariant ([plan.md](../plan.md) §6): `prompts`,
+    /// `completions`, `logging`, `experimental`, and `extensions` must all be
+    /// absent so a client does not expect a surface the server never dispatches.
+    #[test]
+    fn get_info_advertises_exactly_tools_and_resources() {
+        let info = DocsServer::new().get_info();
+        // Exactly the two surfaces the handler dispatches.
+        assert!(
+            info.capabilities.tools.is_some(),
+            "the handler dispatches the five tools, so `tools` must be advertised"
+        );
+        assert!(
+            info.capabilities.resources.is_some(),
+            "the handler dispatches the two catalog/section resources, so `resources` must be advertised"
+        );
+        // Nothing else is advertised.
+        assert!(
+            info.capabilities.prompts.is_none(),
+            "no prompt surface is implemented; `prompts` must stay unadvertised"
+        );
+        assert!(
+            info.capabilities.completions.is_none(),
+            "no completion surface is implemented; `completions` must stay unadvertised"
+        );
+        assert!(
+            info.capabilities.logging.is_none(),
+            "no logging surface is implemented; `logging` must stay unadvertised"
+        );
+        assert!(
+            info.capabilities.experimental.is_none(),
+            "no experimental surface is implemented; `experimental` must stay unadvertised"
+        );
+        assert!(
+            info.capabilities.extensions.is_none(),
+            "no MCP extensions are implemented; `extensions` must stay unadvertised"
+        );
     }
 }
