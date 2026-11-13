@@ -1,0 +1,123 @@
+# Explicit, opt-in upstream-ingestion integration check — task [062] / issue #62.
+#
+# WHY THIS EXISTS, AND WHY IT IS KEPT OUT OF THE MANDATORY GATE
+# -------------------------------------------------------------
+# plan.md §11 (Validation and acceptance criteria) directs: "upstream ingestion
+# checks are explicit integration jobs rather than mandatory live-network unit
+# tests." This job is that check: it drives the real `sync` command against the
+# live upstream collections so an operator (or a schedule) can confirm that every
+# registered source's *inventory* and *extraction* still succeed, and that the
+# per-source inventory is reported.
+#
+# Live upstream is the one flaky input in the project. If this job were added to
+# the mandatory `PR validation` aggregate (`.github/workflows/validation.yml`) or
+# to a branch-ruleset required check, a transient upstream outage, a rate limit,
+# or a source layout change would fail *every* pull request for a reason outside
+# the change's control. That violates AC2 ("normal unit/integration tests do not
+# depend on live upstream availability") and the plan's separation of concerns.
+#
+# HOW IT IS OPT-IN
+#   - Triggers ONLY on `workflow_dispatch` (a human clicks "Run workflow") and an
+#     optional weekly `schedule`. It is deliberately NOT triggered on
+#     `pull_request`, `push`, or `merge_group`.
+#   - It is NOT listed in `PR validation`'s `needs:` and is NOT a ruleset check,
+#     so its result can never gate a merge. A failed run is informational.
+#   - The mandatory, offline suite lives in `.github/workflows/validation.yml`
+#     (loopback fixtures + `CARGO_NET_OFFLINE=true`) and is untouched by this
+#     change; see the AC2 guard there and `docs/CI.md`.
+#
+# HOW IT REPORTS PER-SOURCE FAILURES (AC1)
+#   The `sync` command's own stderr *is* the per-source report:
+#     - On success it renders `SyncReport::to_stderr` — one line per source with
+#       documents/sections/checklist/commands and the inventory diff (added /
+#       removed / unavailable).
+#     - On any per-source *inventory* or *extraction* failure the pipeline aborts
+#       (fail-fast, before the atomic publish) with a `SyncError` diagnostic on
+#       stderr that names the source for extraction failures
+#       (`extracting source \`<id>\` failed: …`) and carries the failing URL for
+#       fetch/discovery failures — and exits non-zero.
+#   Because the run step propagates that non-zero exit (`set -e`), a broken
+#   source fails this job with the per-source breakdown visible in the log. No
+#   machine-readable seam was needed: the existing stderr report satisfies AC1, so
+#   the default `sync` behavior is unchanged (no code change, no new dependency).
+
+name: Upstream ingestion
+
+on:
+  # Explicit human invocation.
+  workflow_dispatch:
+  # Optional periodic freshness smoke test. Informational only: a failed run does
+  # not gate any pull request (this workflow is not a required status check).
+  schedule:
+    - cron: "0 4 * * 1" # Mondays 04:00 UTC
+
+permissions:
+  # The eight upstream collections are public; the sync needs no repository
+  # token. Contents read is all that the checkout requires.
+  contents: read
+
+# A manual or scheduled run must not be cancelled by a later one: each run is an
+# independent, explicit check, so preserve it to completion.
+concurrency:
+  group: upstream-ingestion
+  cancel-in-progress: false
+
+jobs:
+  upstream:
+    name: Live upstream ingestion (all eight sources)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+      # This is the ONE job allowed to reach the network. It runs the live sync,
+      # so it must NOT set CARGO_NET_OFFLINE (that flag is the offline invariant
+      # of the mandatory suite; see validation.yml). RUST_LOG is pinned to info
+      # so the per-source report (emitted at info) is always visible in the log,
+      # unlike validation.yml which clears RUST_LOG so tests use the app default.
+      RUST_LOG: info
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Record toolchain
+        run: |
+          rustup show active-toolchain
+          rustc -Vv
+          cargo -V
+
+      # Build the binary once; the sync binary is the single entry point for the
+      # `sync` subcommand (src/main.rs -> src/cli.rs Command::Sync).
+      - name: Build the sync binary
+        run: cargo build --release --bin rust-docs-mcp --locked
+
+      # Drive the live sync over all eight registered collections. Its stderr is
+      # the per-source inventory report (success) or the source-named / URL-
+      # carrying extraction/inventory failure diagnostic, and its non-zero exit
+      # fails the job when any source's inventory or extraction fails.
+      - name: Sync all upstream sources and surface the per-source report
+        run: |
+          set -euo pipefail
+          data_dir="${{ runner.temp }}/rust-docs-mcp"
+          mkdir -p "$data_dir"
+          # A successful run prints the per-source inventory and exits 0. A broken
+          # source aborts before the atomic publish (the last valid corpus is
+          # preserved) and exits non-zero, failing this step with the report on
+          # stderr.
+          ./target/release/rust-docs-mcp sync --data-dir "$data_dir"
+
+      # Informational, never gating: after a successful live sync, show the
+      # offline per-source coverage of what was just ingested. This is the
+      # operator's offline complement to the live report and does not gate the
+      # job (it exits 0 even when a source is absent). Kept out of the failure
+      # path on purpose so a coverage gap does not mask which source failed.
+      - name: Show the ingested corpus's per-source coverage (informational)
+        if: ${{ success() }}
+        run: |
+          set -euo pipefail
+          data_dir="${{ runner.temp }}/rust-docs-mcp"
+          ./target/release/rust-docs-mcp inspect --data-dir "$data_dir"
