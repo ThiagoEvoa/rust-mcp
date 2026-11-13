@@ -145,6 +145,17 @@ pub mod instructions;
 /// that module for the type catalogue and the agreement tests.
 pub mod schema;
 
+/// [060][M4] — the offline-surface and access-boundary proofs: that the
+/// assembled MCP surface (all five tools + the two resource reads) serves
+/// offline over the embedded bundle, and that adversarial inputs (a
+/// shell-operator command key, a caller-forged URL / filesystem path /
+/// path-traversal / foreign-snapshot URI) are refused at the exact
+/// `dispatch_call` / `dispatch_read` boundary — never executed, fetched, or read.
+/// Test-only: it reaches the `pub(crate)` `dispatch_call` / `dispatch_read` seam
+/// on [`DocsServer`].
+#[cfg(test)]
+mod offline_boundaries;
+
 /// The documentation MCP server handler.
 ///
 /// It owns the single immutable snapshot (plan §5) it serves for its entire
@@ -278,7 +289,12 @@ impl DocsServer {
     /// `METHOD_NOT_FOUND` error. A blank query, an unknown source, or a cursor
     /// mismatch surface as the tool's own protocol error so the client receives
     /// the actionable guidance rather than a panicking server (plan §5).
-    async fn dispatch_call(
+    ///
+    /// `pub(crate)` so the [060] assembled-access-boundary tests
+    /// ([`crate::offline_boundaries`]) can drive adversarial inputs through this
+    /// exact boundary in-process. It is the public tool boundary the `serve`
+    /// handler dispatches; nothing outside the crate can reach it.
+    pub(crate) async fn dispatch_call(
         &self,
         request: CallToolRequestParams,
         version: Option<&rmcp::model::ProtocolVersion>,
@@ -353,11 +369,16 @@ impl DocsServer {
     }
 
     /// Dispatch a `read_resource` request. The catalog resource returns the
-    /// `catalog` resource view as JSON; any other `rust-docs://sections/...`
-    /// URI is rendered as a single-section resource. An unknown source or an
-    /// unavailable section surfaces as a `RESOURCE_NOT_FOUND` protocol error via
-    /// the module's own typed error.
-    async fn dispatch_read(
+    /// `catalog` resource view as JSON; any other snapshot-scoped section URI is
+    /// rendered as a single-section resource. An unknown source or an unavailable
+    /// section surfaces as a `RESOURCE_NOT_FOUND` protocol error via the module's
+    /// own typed error.
+    ///
+    /// `pub(crate)` for the same reason as [`dispatch_call`]: the [060]
+    /// assembled-access-boundary tests drive a caller-forged resource URI through
+    /// this exact boundary to prove a filesystem path, a URL, or a foreign-
+    /// snapshot URI is refused before any read.
+    pub(crate) async fn dispatch_read(
         &self,
         request: ReadResourceRequestParams,
         version: Option<&rmcp::model::ProtocolVersion>,
