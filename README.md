@@ -368,3 +368,23 @@ The licensing and attribution policy is recorded in
 [`docs/LICENSING.md`](docs/LICENSING.md) and
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md); the full design, scope, and
 trust boundary are in [`plan.md`](plan.md) §3, §5, and §9.
+
+## Reproducing the bundled corpus
+
+The exact steps to **regenerate**, **inspect**, **validate**, and **attribute**
+the bundled corpus — including the source revisions, parser/schema versions, and
+deterministic content hashes, and how the required notices travel with the
+redistributed content — are in
+[`docs/REGENERATION.md`](docs/REGENERATION.md). In short:
+
+- **Regenerate** the committed bundle with the ignored seam
+  `cargo test --locked bundled::tests::emit_bundle_json -- --ignored` (guarded by
+  the `the_committed_bundle_matches_the_builder` drift test).
+- **Inspect** coverage and extraction fidelity with `rust-docs-mcp inspect`;
+  read identity and content hashes with `rust-docs-mcp status`.
+- **Validate**: `validate_snapshot` runs *before* any `sync` publication, and a
+  `sync` publishes only a complete, valid corpus (atomic write; last valid
+  preserved). See `docs/REGENERATION.md` §3.
+- **Attribute**: `THIRD_PARTY_NOTICES.md` and `docs/LICENSING.md` accompany the
+  content; the per-source notices are also carried machine-readable in the
+  manifest's `attribution[]`.
