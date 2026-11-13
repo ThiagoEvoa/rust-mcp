@@ -45,8 +45,8 @@
 //!   M2/M4.
 //! * **CLI stdio wiring — superseded by [003].** The `serve` CLI command runs
 //!   the server over genuine OS stdio; the spawned-binary tests
-//!   ([`tests/stdio_lifecycle.rs`](../../tests/stdio_lifecycle.rs) and
-//!   [`tests/stdio_mcp.rs`](../../tests/stdio_mcp.rs)) drive that production
+//!   ([`tests/stdio_lifecycle.rs`](../tests/stdio_lifecycle.rs) and
+//!   [`tests/stdio_mcp.rs`](../tests/stdio_mcp.rs)) drive that production
 //!   path with a raw JSON-RPC 2.0 client.
 //!
 //! # Error mapping
