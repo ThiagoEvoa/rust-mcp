@@ -986,3 +986,393 @@ fn assert_error(response: &Value, expected_code: i32, context: &str) {
         "an error response carries a message: {response}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// [059] AC2 — cancellation / EOF: a pipelined burst exits cleanly with no
+// orphaned work, and the handlers don't block on per-request indexing/parsing.
+// ---------------------------------------------------------------------------
+
+/// [059] AC2: cancellation / EOF exits cleanly with **no orphaned work**, and
+/// the handlers don't block on per-request indexing or parsing.
+///
+/// The companion [`stdio_lifecycle.rs`](stdio_lifecycle.rs) proves a clean
+/// *single* connect/disconnect. This test goes further: it drives a **pipelined
+/// burst** — many requests in flight at once — and proves the session still
+/// cancels cleanly. The two halves of the criterion:
+///
+/// 1. **Handlers don't block on per-request work.** A burst of diverse requests
+///    — every one of the five tools and both resources, several at a time — is
+///    written to stdin back to back, with no response read in between. Each
+///    handler resolves by reading the immutable snapshot built once at startup
+///    (`DocsServer`'s `&self` handlers are `Send` + `Sync` and share it by
+///    reference; `mcp::tests::handler_request_futures_are_send` is the static
+///    proof), so a large concurrent burst drains without a per-request indexing
+///    or parsing stall — the observable consequence of "indexing/parsing happens
+///    at snapshot build time, not per call." Every response is matched to its
+///    request `id` and checked for shape, proving no response is mixed,
+///    corrupted, or lost while many are in flight.
+///
+/// 2. **Cancelling the session (EOF) exits cleanly, no orphaned work.** Once
+///    every in-flight response is delivered, the test closes its side of stdin —
+///    the stdio transport's end-of-session signal. The server then drains any
+///    tail output, self-exits with status 0, and writes nothing to the protocol
+///    stream that is not JSON-RPC 2.0 — no half-processed request is left
+///    dangling and no process is leaked.
+///
+/// The check is hermetic: a temp `--data-dir`, and `serve` loads the bundled
+/// snapshot in-memory (no network, no host cache). `kill_on_drop` is the safety
+/// net that reaps the child on a panic, but the assertions prove a graceful
+/// self-exit, not a forced kill.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_burst_exits_cleanly_on_eof_without_orphaned_work() {
+    use std::collections::HashMap;
+    use tokio::io::AsyncReadExt;
+    use tokio::time::Instant;
+
+    let data_dir = fresh_data_dir();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rust-docs-mcp"))
+        .arg("serve")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("the test harness must be able to launch the `serve` binary");
+
+    // Take the piped handles out before the writer/reader tasks borrow them, so
+    // we never move a handle we are about to use (and `child` stays available
+    // for the final `wait()`).
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let deadline = Instant::now() + BUDGET;
+
+    // A stderr drain runs the whole time, so a full stderr buffer can never make
+    // the child block on a diagnostic while we are reading stdout.
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf).await;
+        buf
+    });
+
+    // (0) The initialize handshake + `notifications/initialized`, the way a
+    //     conforming MCP client does — so the runtime is up before the burst.
+    write_request(
+        &mut stdin,
+        0,
+        "initialize",
+        &json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": { "name": "stdio-mcp-cancellation-test", "version": "0.0.1" },
+        }),
+    )
+    .await;
+    write_notify(&mut stdin, "notifications/initialized").await;
+    let init = read_response_until(&mut reader, 0, deadline).await;
+    assert_eq!(
+        init.get("result")
+            .and_then(|result| result.get("protocolVersion"))
+            .and_then(Value::as_str),
+        Some(PROTOCOL_VERSION),
+        "the handshake must echo the negotiated protocol version"
+    );
+
+    // (1) The pipelined burst: every tool and both resources, several at a time,
+    //     each with a distinct id. The writer writes them all back to back (no
+    //     response read in between) while the reader collects every response by
+    //     id.
+    let plan = burst_plan();
+    let frames: Vec<String> = plan
+        .iter()
+        .enumerate()
+        .map(|(i, (method, params, _))| request_frame(i as u64 + 1, method, params))
+        .collect();
+    let expected_ids: Vec<u64> = (1..=plan.len() as u64).collect();
+    let expected_key: HashMap<u64, &str> = plan
+        .iter()
+        .enumerate()
+        .map(|(i, (_, _, key))| (i as u64 + 1, *key))
+        .collect();
+
+    // The writer holds stdin open until the reader has every response, so EOF
+    // (dropping stdin) happens only *after* the burst is fully answered — never
+    // mid-flight — and the "clean exit" below is a clean disconnect, not a
+    // truncation of in-flight work.
+    let (drain_tx, drain_rx) = tokio::sync::oneshot::channel();
+    let writer = tokio::spawn(async move {
+        for frame in &frames {
+            stdin
+                .write_all(frame.as_bytes())
+                .await
+                .expect("writing a pipelined request to the child's stdin must not fail");
+            stdin
+                .flush()
+                .await
+                .expect("flushing the child's stdin must not fail");
+        }
+        // Park on the reader's "I have every response" signal, then fall out of
+        // the task — dropping `stdin` closes the child's stdin (the EOF).
+        let _ = drain_rx.await;
+    });
+
+    // (2) Read every burst response, matching by id, asserting each is a
+    //     JSON-RPC 2.0 success of its expected shape — no mixing, no corruption,
+    //     nothing lost while many are in flight.
+    let mut got: HashMap<u64, Value> = HashMap::new();
+    while expected_ids.iter().any(|id| !got.contains_key(id)) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            panic!(
+                "timed out waiting for the burst: got {}/{} responses",
+                got.len(),
+                plan.len()
+            );
+        }
+        let mut line = String::new();
+        match tokio::time::timeout(remaining, reader.read_line(&mut line)).await {
+            Ok(Ok(0)) => panic!(
+                "the server closed stdout before answering the burst \n                 \
+                 (got {}/{} responses) — a disconnected server",
+                got.len(),
+                plan.len()
+            ),
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => panic!("reading the child's stdout failed: {error}"),
+            Err(_) => panic!("timed out waiting for the burst responses"),
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(trimmed).expect("every stdout line must be JSON");
+        assert_eq!(
+            value.get("jsonrpc").and_then(Value::as_str),
+            Some("2.0"),
+            "a non-JSON-RPC object leaked onto stdout: {trimmed}"
+        );
+        // A response (has an id) is stored; a notification (no id) is skipped. A
+        // duplicate id is a protocol violation the server must not produce.
+        if let Some(id) = value.get("id").and_then(Value::as_u64) {
+            assert!(
+                got.insert(id, value).is_none(),
+                "the server sent a duplicate response for id {id}"
+            );
+        }
+    }
+
+    // Every burst response is a success of its expected shape — no orphaned,
+    // mixed, or corrupted result.
+    for (id, response) in &got {
+        assert!(
+            response.get("error").is_none(),
+            "burst request {id} must succeed, not error: {response}"
+        );
+        let key = expected_key[id];
+        assert!(
+            response
+                .get("result")
+                .and_then(|result| result.get(key))
+                .is_some(),
+            "burst response {id} must carry its `{key}` result (no mixing/corruption)"
+        );
+    }
+
+    // (3) EOF: tell the writer to release stdin, then confirm the graceful,
+    //     successful self-exit with no orphaned process.
+    let _ = drain_tx.send(());
+    writer
+        .await
+        .expect("the pipelined writer task must not panic");
+
+    // Drain any tail the server writes after the final response (it may emit a
+    // trailing notification); every tail line must still be JSON-RPC 2.0, and
+    // EOF ends the drain when the server closes stdout as it exits.
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            panic!("timed out draining the child's stdout after the burst");
+        }
+        let mut line = String::new();
+        match tokio::time::timeout(remaining, reader.read_line(&mut line)).await {
+            Ok(Ok(0)) => break, // EOF: the server closed stdout and exited.
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => panic!("reading the child's stdout failed: {error}"),
+            Err(_) => panic!("timed out draining the child's stdout after the burst"),
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value =
+            serde_json::from_str(trimmed).expect("every tail stdout line must be JSON");
+        assert_eq!(
+            value.get("jsonrpc").and_then(Value::as_str),
+            Some("2.0"),
+            "a non-JSON-RPC object leaked onto the tail of stdout: {trimmed}"
+        );
+    }
+
+    // The concrete "no orphaned process" claim: a clean, successful self-exit.
+    let status = match tokio::time::timeout(BUDGET, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => panic!("waiting on the child failed: {error}"),
+        Err(_) => panic!("the child did not exit within {BUDGET:?} — a likely orphan"),
+    };
+    assert!(
+        status.success(),
+        "after a clean EOF disconnect the server must exit successfully, got {status:?}"
+    );
+
+    // No orphaned *or* panicked work: the diagnostics carry no panic. A panic
+    // already forces a non-zero exit (caught above); this makes the "no orphaned
+    // work" claim explicit on the diagnostic stream too.
+    let stderr_bytes = stderr_task.await.expect("the stderr drain must finish");
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    assert!(
+        !stderr.contains("panic"),
+        "the server must not panic on EOF/cancellation; stderr: {stderr}"
+    );
+}
+
+/// Build the pipelined burst plan: every one of the five tools and both
+/// resources, several at a time, each a *valid* request (so every response is a
+/// success). Each entry is `(method, params, expected_result_key)`: the five
+/// tool calls surface `result.structuredContent`, the two resource reads
+/// surface `result.contents`.
+fn burst_plan() -> Vec<(String, Value, &'static str)> {
+    let section_uri = section_resource_uri("api-guidelines/about");
+    let mut plan: Vec<(String, Value, &'static str)> = Vec::new();
+    // Two interleaved rounds of the whole surface — a diverse, concurrent burst.
+    for _ in 0..2 {
+        plan.push((
+            "tools/call".to_string(),
+            json!({ "name": "list_sources", "arguments": {} }),
+            "structuredContent",
+        ));
+        plan.push((
+            "tools/call".to_string(),
+            json!({ "name": "search_docs", "arguments": { "query": "C-CONV" } }),
+            "structuredContent",
+        ));
+        plan.push((
+            "tools/call".to_string(),
+            json!({ "name": "search_docs", "arguments": { "query": "Rust", "limit": 1 } }),
+            "structuredContent",
+        ));
+        plan.push((
+            "tools/call".to_string(),
+            json!({ "name": "get_section", "arguments": { "section_id": "api-guidelines/about" } }),
+            "structuredContent",
+        ));
+        plan.push((
+            "tools/call".to_string(),
+            json!({ "name": "get_api_checklist", "arguments": { "category": "Conversions and From" } }),
+            "structuredContent",
+        ));
+        plan.push((
+            "tools/call".to_string(),
+            json!({ "name": "get_command_guidance", "arguments": { "command": "cargo build" } }),
+            "structuredContent",
+        ));
+        plan.push((
+            "resources/read".to_string(),
+            json!({ "uri": CATALOG_URI }),
+            "contents",
+        ));
+        plan.push((
+            "resources/read".to_string(),
+            json!({ "uri": &section_uri }),
+            "contents",
+        ));
+    }
+    plan
+}
+
+/// Encode one numbered JSON-RPC 2.0 request as a newline-framed string.
+fn request_frame(id: u64, method: &str, params: &Value) -> String {
+    let message = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    });
+    format!(
+        "{}\n",
+        serde_json::to_string(&message).expect("encoding a hand-built JSON value must not fail")
+    )
+}
+
+/// Write one numbered JSON-RPC request frame to the child's stdin and flush.
+async fn write_request(
+    stdin: &mut tokio::process::ChildStdin,
+    id: u64,
+    method: &str,
+    params: &Value,
+) {
+    let frame = request_frame(id, method, params);
+    stdin
+        .write_all(frame.as_bytes())
+        .await
+        .expect("writing a JSON-RPC request to the child's stdin must not fail");
+    stdin
+        .flush()
+        .await
+        .expect("flushing the child's stdin must not fail");
+}
+
+/// Write a JSON-RPC notification frame (no id, no response) and flush.
+async fn write_notify(stdin: &mut tokio::process::ChildStdin, method: &str) {
+    let message = json!({ "jsonrpc": "2.0", "method": method });
+    let frame =
+        serde_json::to_string(&message).expect("encoding a hand-built JSON value must not fail");
+    stdin
+        .write_all(format!("{frame}\n").as_bytes())
+        .await
+        .expect("writing a JSON-RPC notification to the child's stdin must not fail");
+    stdin
+        .flush()
+        .await
+        .expect("flushing the child's stdin must not fail");
+}
+
+/// Read stdout lines until the response whose `id` matches, asserting every line
+/// is a JSON-RPC 2.0 message; returns that response. A per-read deadline keeps a
+/// hung server from hanging the test forever.
+async fn read_response_until(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    id: u64,
+    deadline: tokio::time::Instant,
+) -> Value {
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            panic!("timed out waiting for the response to id {id}");
+        }
+        let mut line = String::new();
+        match tokio::time::timeout(remaining, reader.read_line(&mut line)).await {
+            Ok(Ok(0)) => {
+                panic!("the server closed stdout before answering id {id} — a disconnected server")
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => panic!("reading the child's stdout failed: {error}"),
+            Err(_) => panic!("timed out waiting for the response to id {id}"),
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(trimmed).expect("every stdout line must be JSON");
+        assert_eq!(
+            value.get("jsonrpc").and_then(Value::as_str),
+            Some("2.0"),
+            "a non-JSON-RPC object leaked onto stdout: {trimmed}"
+        );
+        if value.get("id").and_then(Value::as_u64) == Some(id) {
+            return value;
+        }
+    }
+}
