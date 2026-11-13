@@ -157,17 +157,17 @@ client actually writes are:
 
 ```jsonc
 // (0) handshake — the server echoes the negotiated version + its identity
-{"jsonrpc":"2.0","id":1,"method":"initialize",
+{"jsonrpc":"2.0","id":0,"method":"initialize",
  "params":{"protocolVersion":"2025-11-25","capabilities":{},
            "clientInfo":{"name":"first-client","version":"0.0.1"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 
 // (1) AC2(1) — list the sources
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_sources","arguments":{}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_sources","arguments":{}}}
 // (2) AC2(2) — search (a query that returns hits)
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_docs","arguments":{"query":"C-CONV"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_docs","arguments":{"query":"C-CONV"}}}
 // (3) AC2(3) — retrieve a section (with its citation/provenance)
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_section","arguments":{"section_id":"api-guidelines/about"}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_section","arguments":{"section_id":"api-guidelines/about"}}}
 ```
 
 The client matches each response to its request by `id` (the server may answer
@@ -176,9 +176,13 @@ out of order — a real JSON-RPC client must tolerate that, as
 
 ### 3.3 The real captured transcript
 
-The three responses below are the **actual output** of the session above,
-captured from the built binary (verified 2026-11-13; reproduced by
-`tests/first_client.rs`, §4).
+The three blocks below are the **`structuredContent` view** of each response —
+the machine-readable payload under `result.structuredContent` (verified
+2026-11-13, reproduced by `tests/first_client.rs`, §4). The `result` envelope's
+`content` (human-readable text) and `isError` fields are omitted, and the
+`structuredContent` object is shown directly. For `get_section` that object nests
+the section under a `section` key, with the `schema_version` and `truncated`
+fields as its siblings.
 
 **(1) `list_sources`** — returns the **eight canonical sources** and the active
 **snapshot id** (`rust-docs-bundled-seed`), plus the command-catalog keys:
@@ -231,20 +235,23 @@ its provenance**: the body, its `canonical_url`, and a **`citations`** array:
 
 ```json
 {
-  "id": "api-guidelines/about",
-  "source": "api-guidelines",
-  "doc_title": "The API Guidelines",
-  "snapshot_id": "rust-docs-bundled-seed",
   "schema_version": "1",
-  "content_hash": "c128-ffa531f24bfdd996c9ef3d1a076dd56a",
-  "freshness": "unknown",
-  "canonical_url": "https://rust-lang.github.io/api-guidelines/about.html",
-  "chapter_path": "about",
-  "body": "The Rust API Guidelines are recommendations for the design, documentation, and testing of Rust APIs. They help an API author write an API that is easy to use and hard to misuse. Each guideline carries a stable code (for example C-CONV) and is enforced in practice by Clippy lints.",
-  "citations": [
-    { "source": "api-guidelines", "section_id": "api-guidelines/about", "title": "The API Guidelines", "url": "https://rust-lang.github.io/api-guidelines/about.html", "note": "canonical upstream document" },
-    { "source": "api-guidelines", "section_id": "api-guidelines/about", "note": "guideline code: C-CONV" }
-  ]
+  "section": {
+    "id": "api-guidelines/about",
+    "source": "api-guidelines",
+    "doc_title": "The API Guidelines",
+    "snapshot_id": "rust-docs-bundled-seed",
+    "content_hash": "c128-ffa531f24bfdd996c9ef3d1a076dd56a",
+    "freshness": "unknown",
+    "canonical_url": "https://rust-lang.github.io/api-guidelines/about.html",
+    "chapter_path": "about",
+    "body": "The Rust API Guidelines are recommendations for the design, documentation, and testing of Rust APIs. They help an API author write an API that is easy to use and hard to misuse. Each guideline carries a stable code (for example C-CONV) and is enforced in practice by Clippy lints.",
+    "citations": [
+      { "source": "api-guidelines", "section_id": "api-guidelines/about", "title": "The API Guidelines", "url": "https://rust-lang.github.io/api-guidelines/about.html", "note": "canonical upstream document" },
+      { "source": "api-guidelines", "section_id": "api-guidelines/about", "note": "guideline code: C-CONV" }
+    ]
+  },
+  "truncated": false
 }
 ```
 
@@ -299,11 +306,11 @@ the three AC2 operations.
 
 ```sh
 printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"demo","version":"0.0.1"}}}' \
+  '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"demo","version":"0.0.1"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_sources","arguments":{}}}' \
-  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_docs","arguments":{"query":"C-CONV"}}}' \
-  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_section","arguments":{"section_id":"api-guidelines/about"}}}' \
+  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_sources","arguments":{}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_docs","arguments":{"query":"C-CONV"}}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_section","arguments":{"section_id":"api-guidelines/about"}}}' \
   | /Users/thiagoevoa/Projects/rust-mcp/target/release/rust-docs-mcp serve --data-dir /tmp/rust-docs-mcp-client-demo
 ```
 
