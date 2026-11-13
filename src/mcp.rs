@@ -516,6 +516,12 @@ where
 mod tests {
     use rmcp::ServerHandler;
 
+    use rmcp::model::{
+        CallToolRequestParams, CallToolResponse, CallToolResult, ProtocolVersion,
+        ReadResourceRequestParams, ReadResourceResponse, ResourceContents,
+    };
+    use serde_json::{Map, Value, json};
+
     use super::DocsServer;
 
     /// The handler advertises the `tools` and `resources` capabilities alongside
@@ -568,5 +574,278 @@ mod tests {
             info.capabilities.extensions.is_none(),
             "no MCP extensions are implemented; `extensions` must stay unadvertised"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC1 ([059]): concurrent reads do not mix snapshot identities or corrupt
+    // responses. The server owns ONE immutable snapshot and its handler futures
+    // are `Send`, so the real `LocalSpawner`-backed stdio transport can run many
+    // in-flight requests at once. This is proven here at the handler seam — the
+    // exact code path `call_tool`/`read_resource` delegate to (`dispatch_call` /
+    // `dispatch_read`, which differ from the trait methods only by extracting the
+    // negotiated `ProtocolVersion` from the `RequestContext`) — rather than
+    // through an in-process rmcp client, which the module docs explain is
+    // unavailable (`RunningService` is `!Send`). Transport-level concurrency over
+    // the wire is covered by the spawned-binary test in `tests/stdio_mcp.rs`.
+    // -----------------------------------------------------------------------
+
+    /// Many concurrent `call_tool` / `read_resource` calls on ONE shared,
+    /// immutable `&DocsServer` return byte-for-byte identical results for the
+    /// same input and all name the active snapshot — proving no snapshot-identity
+    /// mixing and no response corruption under concurrency.
+    ///
+    /// Each of the five tools and both resource reads is fired `COPIES` times,
+    /// all on the same `&server`, and each concurrent result is compared against
+    /// the single-threaded result for its own request. Comparing whole results
+    /// (not just the snapshot id) is the strongest "no corruption / no mixing"
+    /// check: a cross-call mix or a torn read would diverge from the reference.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_reads_share_one_snapshot_without_mixing_or_corruption() {
+        let server = DocsServer::new();
+        let version = ProtocolVersion::V_2025_11_25;
+        // The one identity every concurrent response must carry. Read straight
+        // from the snapshot the server serves, so the assertion never hard-codes
+        // a corpus-specific id.
+        let snapshot_id = server.manifest.body.snapshot_id.as_str();
+
+        // The five tools, each with a distinct, representative request.
+        let tool_requests: Vec<CallToolRequestParams> = vec![
+            CallToolRequestParams::new("list_sources"),
+            CallToolRequestParams::new("search_docs")
+                .with_arguments(call_args(&[("query", json!("C-CONV"))])),
+            CallToolRequestParams::new("search_docs")
+                .with_arguments(call_args(&[("query", json!("Rust")), ("limit", json!(1))])),
+            CallToolRequestParams::new("get_section")
+                .with_arguments(call_args(&[("section_id", json!("api-guidelines/about"))])),
+            CallToolRequestParams::new("get_api_checklist")
+                .with_arguments(call_args(&[("category", json!("Conversions and From"))])),
+            CallToolRequestParams::new("get_command_guidance")
+                .with_arguments(call_args(&[("command", json!("cargo build"))])),
+        ];
+
+        // (a) The single-threaded reference for each distinct request. Each
+        //     response names the active snapshot — at the top level for
+        //     list_sources/search_docs, nested under its sections for the rest —
+        //     so every `snapshot_id` the response carries is the active one.
+        let refs: Vec<CallToolResult> = futures_util::future::join_all(
+            tool_requests
+                .iter()
+                .map(|req| server.dispatch_call(req.clone(), Some(&version))),
+        )
+        .await
+        .into_iter()
+        .map(|r| complete_tool_result(r.expect("the reference tool call succeeds"), "reference"))
+        .collect();
+        for (i, reference) in refs.iter().enumerate() {
+            assert_snapshot_identity(reference, i, snapshot_id);
+        }
+
+        // (b) Fire N concurrent calls on the SAME `&server`, cycling through the
+        //     distinct requests. Each concurrent result must equal its own
+        //     single-threaded reference — the no-corruption / no-mixing proof.
+        const COPIES: usize = 8;
+        let n = tool_requests.len() * COPIES;
+        let results: Vec<CallToolResult> = futures_util::future::join_all((0..n).map(|i| {
+            let req = tool_requests[i % tool_requests.len()].clone();
+            server.dispatch_call(req, Some(&version))
+        }))
+        .await
+        .into_iter()
+        .map(|r| complete_tool_result(r.expect("the concurrent tool call succeeds"), "concurrent"))
+        .collect();
+
+        assert_eq!(results.len(), n, "every concurrent call answered");
+        for (i, got) in results.iter().enumerate() {
+            let kind = i % tool_requests.len();
+            // Whole-result equality: no corruption, no cross-call mixing.
+            assert_eq!(
+                got, &refs[kind],
+                "concurrent call {i} (request kind {kind}) must match its single-threaded reference"
+            );
+            // The snapshot identity is the same across every concurrent call.
+            assert_snapshot_identity(got, i, snapshot_id);
+        }
+
+        // (c) The catalog and section resource reads are likewise consistent
+        //     under concurrency: N concurrent reads, each byte-for-byte equal to
+        //     its single-threaded reference and naming the active snapshot.
+        let section_uri =
+            format!("rust-docs://snapshots/{snapshot_id}/sections/api-guidelines/about");
+        let resource_requests: Vec<ReadResourceRequestParams> = vec![
+            ReadResourceRequestParams::new("rust-docs://catalog"),
+            ReadResourceRequestParams::new(&section_uri),
+        ];
+        let resource_refs: Vec<String> = futures_util::future::join_all(
+            resource_requests
+                .iter()
+                .map(|req| server.dispatch_read(req.clone(), Some(&version))),
+        )
+        .await
+        .into_iter()
+        .map(|r| {
+            resource_text(
+                r.expect("the reference resource read succeeds"),
+                "reference",
+            )
+        })
+        .collect();
+        for reference in &resource_refs {
+            let payload: Value =
+                serde_json::from_str(reference).expect("the resource text is JSON");
+            assert_snapshot_ids(&payload, "reference resource", snapshot_id);
+        }
+
+        let rn = resource_requests.len() * COPIES;
+        let resource_results: Vec<String> = futures_util::future::join_all((0..rn).map(|i| {
+            let req = resource_requests[i % resource_requests.len()].clone();
+            server.dispatch_read(req, Some(&version))
+        }))
+        .await
+        .into_iter()
+        .map(|r| {
+            resource_text(
+                r.expect("the concurrent resource read succeeds"),
+                "concurrent",
+            )
+        })
+        .collect();
+
+        for (i, got) in resource_results.iter().enumerate() {
+            let kind = i % resource_requests.len();
+            assert_eq!(
+                got, &resource_refs[kind],
+                "concurrent resource read {i} (kind {kind}) must match its reference"
+            );
+            let payload: Value = serde_json::from_str(got).expect("the resource text is JSON");
+            assert_snapshot_ids(
+                &payload,
+                format!("concurrent resource read {i}"),
+                snapshot_id,
+            );
+        }
+    }
+
+    /// AC1 precondition: the handler's request futures are `Send` — the property
+    /// that lets the real `LocalSpawner`-backed stdio transport run many
+    /// in-flight requests concurrently (exercised over the wire by
+    /// `tests/stdio_mcp.rs`). The futures borrow only an immutable, `Sync`
+    /// `&DocsServer` plus owned locals, so they are `Send` by construction;
+    /// this asserts it at compile time, so a future that ever stopped being
+    /// `Send` fails the build rather than silently serialising the transport.
+    #[test]
+    fn handler_request_futures_are_send() {
+        fn assert_send<T: Send>(_: T) {}
+
+        let server = DocsServer::new();
+        let version = rmcp::model::ProtocolVersion::V_2025_11_25;
+        let call = server.dispatch_call(
+            rmcp::model::CallToolRequestParams::new("list_sources"),
+            Some(&version),
+        );
+        let read = server.dispatch_read(
+            rmcp::model::ReadResourceRequestParams::new("rust-docs://catalog"),
+            Some(&version),
+        );
+        assert_send(call);
+        assert_send(read);
+    }
+
+    /// Build a tool-call `arguments` object (`serde_json::Map`) from string to
+    /// JSON-value pairs.
+    fn call_args(pairs: &[(&str, Value)]) -> Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    /// Unwrap a `CallToolResponse` to its completed `CallToolResult`, panicking
+    /// on any MRTR intermediate variant (the five tools never return those).
+    fn complete_tool_result(resp: CallToolResponse, ctx: &str) -> CallToolResult {
+        match resp {
+            CallToolResponse::Complete(result) => result,
+            other => panic!("{ctx}: expected a completed tool result, got {other:?}"),
+        }
+    }
+
+    /// Assert that every `snapshot_id` a tool result names (at the top level or
+    /// nested under its sections) is the active snapshot — the "same identity"
+    /// half of AC1, independent of which tool produced the result.
+    fn assert_snapshot_identity(
+        result: &CallToolResult,
+        ctx: impl std::fmt::Display,
+        expected: &str,
+    ) {
+        let structured = result
+            .structured_content
+            .as_ref()
+            .unwrap_or_else(|| panic!("{ctx}: the tool result carries no structured content"));
+        assert_snapshot_ids(structured, ctx, expected);
+    }
+
+    /// Assert that every `snapshot_id` anywhere in `value` equals `expected`, and
+    /// that at least one is present (a response that named no snapshot at all
+    /// would be a regression this must catch).
+    fn assert_snapshot_ids(value: &Value, ctx: impl std::fmt::Display, expected: &str) {
+        let ids = collect_snapshot_ids(value);
+        assert!(
+            !ids.is_empty(),
+            "{ctx}: the response names no snapshot at all"
+        );
+        assert!(
+            ids.iter().all(|id| *id == expected),
+            "{ctx}: every snapshot id must be the active one {expected:?}, found {ids:?}"
+        );
+    }
+
+    /// Collect every `snapshot_id` string found anywhere in a JSON tree. Each of
+    /// the five tools carries the active snapshot's id — top-level for
+    /// list_sources/search_docs, nested under its sections for get_section /
+    /// get_api_checklist / get_command_guidance — so the returned set is exactly
+    /// the identities the response names.
+    fn collect_snapshot_ids(value: &Value) -> Vec<&str> {
+        let mut found = Vec::new();
+        collect_snapshot_ids_into(value, &mut found);
+        found
+    }
+
+    fn collect_snapshot_ids_into<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    if key == "snapshot_id" {
+                        if let Some(id) = child.as_str() {
+                            out.push(id);
+                        }
+                    } else {
+                        collect_snapshot_ids_into(child, out);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect_snapshot_ids_into(item, out);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+
+    /// Extract the single text payload from a completed resource read.
+    fn resource_text(resp: ReadResourceResponse, ctx: &str) -> String {
+        match resp {
+            ReadResourceResponse::Complete(result) => {
+                let content = result
+                    .contents
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| panic!("{ctx}: the resource read returned no content"));
+                match content {
+                    ResourceContents::TextResourceContents { text, .. } => text,
+                    other => panic!("{ctx}: expected a text resource, got {other:?}"),
+                }
+            }
+            other => panic!("{ctx}: expected a completed resource read, got {other:?}"),
+        }
     }
 }
