@@ -9,7 +9,8 @@ documentation; it does not execute commands, touch the project filesystem, or
 reach the network. The calling agent runs Rust and Cargo commands through its
 own terminal tools and inspects their results. See [`plan.md`](plan.md) for the
 full specification and [`docs/`](docs/) for the compatibility, licensing, CI, and
-client-configuration records.
+client-configuration records. Refresh, status, offline behavior, and troubleshooting
+are recorded in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
 
 ## What it is
 
@@ -228,6 +229,45 @@ activate the newer snapshot. A `sync` that fails to fetch or parse an expected
 document aborts and leaves the last valid corpus intact; it never publishes a
 partial corpus.
 
+## Freshness and version uncertainty
+
+`status` reports the snapshot and each source's freshness **without network
+access**. Staleness is **metadata, not a block** — a stale source is still served
+— and the threshold is **configurable**: `--stale-days DAYS` overrides the
+seven-day default. The same source is `stale` at `7` and `fresh` at `30`:
+
+```sh
+./target/release/rust-docs-mcp status --stale-days 14
+```
+
+```text
+rust-docs-mcp status:
+  snapshot: rust-docs-bundled-seed
+  source(s): 8, section(s): 8
+  freshness threshold: 14 day(s) (configured)
+  as_of: <as_of> (seconds since the Unix epoch)
+  [api-guidelines] Rust API Guidelines
+    last checked: unknown
+    fetched:      2026-10-30T00:00:00Z
+    upstream:     unknown
+    content:      c128-ffa5092e1f9db0151650f6e19369b606
+    stale:        unknown
+  [style-guide] Rust Style Guide
+    ...
+```
+
+Two values are **preserved as `unknown`, never guessed**. A source with no known
+`last checked` reports `stale: unknown`; on the bundled seed every source is
+`unknown` because it has not checked upstream yet (`sync` stamps the times). And
+**version compatibility** is one of `stable`, `nightly-only`, `rolling`, or
+`unknown`: when upstream does not pin a version it is reported as `unknown` rather
+than assumed, so **a commit-pinned rustfmt document is not automatically
+documentation for an installed stable release** — check the local tool versions and
+the local `--help` when compatibility is uncertain. The full freshness model, the
+three distinct times, the configurable staleness policy, and the failure-recovery
+and no-valid-corpus behavior are recorded in
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
 ## The first-sync exception
 
 Per [`plan.md`](plan.md) §5, when **no valid snapshot exists** the binary must
@@ -298,6 +338,21 @@ Global flags (accepted before or after the subcommand):
 
 `--help` and `--version` are available on the top-level command and each
 subcommand.
+
+## Troubleshooting
+
+In every case below the **last valid corpus is preserved**, and unless a bundle-less
+build is involved the server keeps serving the bundled snapshot — so a bad refresh is a
+diagnostic, not a downtime. The detailed guide — with the real diagnostics, the
+failure-recovery guarantees, and the no-valid-corpus error — is in
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md#8-troubleshooting).
+
+| Symptom | What it is | Check | Fix |
+| --- | --- | --- | --- |
+| `sync` fails to publish; a collection is missing | **Missing components** — a required source could not be **fetched** (`building the fetch client failed`, `a fetch failed`, `discovery failed`) | The `sync` stderr diagnostic; the source must resolve within its fixed host/path boundary | Re-run `sync` (the opt-in [Upstream ingestion](docs/CI.md#opt-in-upstream-ingestion-check) job); the previous/bundled corpus keeps serving |
+| `status` reports `stale: stale` for a source | **Stale content** — the last upstream check is older than the threshold; the content is **still served** | The `status` per-source block | Re-run `sync` then **restart `serve`**, or widen the verdict with `status --stale-days <N>` |
+| `sync` fetches a source but aborts | **Extraction failure** — a source fetched but failed to parse: `sync failed: extracting source \`<id>\` failed: <reason>` (a changed layout, not a silent empty corpus) | The `sync` per-source report names the failing collection; the other seven are unaffected | The last corpus still serves; re-run when restorable, or update the parser for a persistent layout break |
+| A client can't connect, the server exits, or stdout looks polluted | **Client connection failure** (stdio/transport) — wrong absolute path/args, stdout conflated with stderr, or a non-zero startup exit | The client config and the server's **stderr** (stdout is protocol-only) | See [`docs/CLIENTS.md`](docs/CLIENTS.md): absolute `command` + `serve`; don't redirect stderr into stdout; a clean disconnect exits `0`, a startup failure exits non-zero with an actionable stderr line |
 
 ## Offline use and trust boundaries
 
