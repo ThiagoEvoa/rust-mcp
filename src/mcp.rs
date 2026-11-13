@@ -51,12 +51,19 @@
 use std::process::ExitCode;
 
 use rmcp::{
-    RoleServer, ServerHandler, ServiceExt,
-    model::{Implementation, ServerCapabilities, ServerConfig},
-    service::RunningService,
+    ErrorData, RoleServer, ServerHandler, ServiceExt,
+    model::{
+        CallToolRequestParams, CallToolResponse, ErrorCode, Implementation, ListResourcesResult,
+        ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
+        ReadResourceResult, ResourceContents, ServerCapabilities, ServerConfig,
+    },
+    service::{RequestContext, RunningService},
 };
 
+use crate::commands::CommandCatalog;
 use crate::error::{AppError, AppResult};
+use crate::model::SnapshotManifest;
+use crate::provenance::{Instant, StaleThreshold};
 
 /// Protocol / tool error mapping for task `[048][M4]` (AC2): maps the crate's
 /// internal retrieval errors to version-aware `rmcp` [`rmcp::model::ErrorData`]
@@ -127,44 +134,265 @@ pub mod instructions;
 /// that module for the type catalogue and the agreement tests.
 pub mod schema;
 
-/// The documentation MCP server handler for the M1 skeleton.
+/// The documentation MCP server handler.
 ///
-/// A unit struct — it has no corpus or request state yet. It exists to
-/// [`impl`][ServerHandler] the server contract on the pinned SDK version so that
-/// [`serve_stdio`] (and the spawned-binary test) exercise a real, versioned
-/// connection. Tools and resources are added later; the capability surface stays
-/// empty until they land (see the module docs).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DocsServer;
+/// It owns the single immutable snapshot (plan §5) it serves for its entire
+/// lifetime, plus the command catalog the `get_command_guidance` tool and the
+/// catalog resource read over, and an `as_of` instant and staleness
+/// `threshold` the per-source freshness verdict is judged against. All state is
+/// `Clone + Send + Sync`, so the handler is cheaply clonable and safe to share
+/// across the connection. It advertises the `tools` and `resources`
+/// capabilities and dispatches all five tools and the two resource URIs.
+#[derive(Clone, Debug)]
+pub struct DocsServer {
+    /// The immutable snapshot the handler serves for its entire lifetime.
+    manifest: SnapshotManifest,
+    /// The command catalog the `get_command_guidance` tool and catalog resource read over.
+    catalog: CommandCatalog,
+    /// The "now" the per-source freshness verdict is judged against.
+    as_of: Instant,
+    /// The staleness threshold the per-source freshness verdict is judged against.
+    threshold: StaleThreshold,
+}
 
 impl DocsServer {
-    /// Construct the skeleton handler.
+    /// Build the handler over the shipped, in-memory bundled snapshot with a
+    /// "now" read from the wall clock and the default staleness threshold.
+    ///
+    /// The bundled snapshot is always present (it is a compile-time-embedded,
+    /// validated corpus), so this is the server's always-valid offline fallback:
+    /// it never starts an apparently-healthy empty server (plan §5). Used by the
+    /// `serve` CLI dispatch and by the transport-independent unit tests.
     pub fn new() -> Self {
-        Self
+        Self {
+            manifest: crate::bundled::manifest(),
+            catalog: CommandCatalog::combined(),
+            as_of: Instant::from_system_time(std::time::SystemTime::now()),
+            threshold: StaleThreshold::default(),
+        }
     }
 }
 
 impl ServerHandler for DocsServer {
-    /// Advertise the implementation identity and an empty capability set.
+    /// Advertise the implementation identity and the `tools` + `resources`
+    /// capabilities.
     ///
     /// `server_info` carries the binary's name and version so the client can
-    /// tell *which* server it is talking to; `capabilities` is empty because the
-    /// skeleton implements no tools or resources yet (plan §6, "advertise only
-    /// what is implemented") — the surface stays empty until handler dispatch;
-    /// `instructions` advertises the plan's §7 agent workflow (retrieval versus
-    /// execution, stale/unknown compatibility, adapt-to-the-repository), owned by
-    /// [`crate::mcp::instructions::INSTRUCTIONS`]. The
-    /// default `supported_protocol_versions` returns the SDK's full
-    /// `KNOWN_VERSIONS`, and the default `initialize`/`discover` handshake
-    /// negotiates the highest mutually supported, client-requested version —
-    /// which is exactly what the lifecycle tests assert.
+    /// tell *which* server it is talking to; `capabilities` now advertises the
+    /// `tools` and `resources` surfaces the handler dispatches (plan §6,
+    /// "advertise only what is implemented"); `instructions` advertises the
+    /// plan's §7 agent workflow (retrieval versus execution, stale/unknown
+    /// compatibility, adapt-to-the-repository), owned by
+    /// [`crate::mcp::instructions::INSTRUCTIONS`]. The default
+    /// `supported_protocol_versions` returns the SDK's full `KNOWN_VERSIONS`,
+    /// and the default `initialize`/`discover` handshake negotiates the highest
+    /// mutually supported, client-requested version — which is exactly what the
+    /// lifecycle tests assert.
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::default())
+        let capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .build();
+        ServerConfig::new(capabilities)
             .with_server_info(Implementation::new(
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(crate::mcp::instructions::INSTRUCTIONS)
+    }
+
+    /// List the five documentation tools. The `list_tools` cursor is accepted
+    /// but unused: the catalog is small and returned whole.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        Ok(ListToolsResult::with_all_items(
+            crate::mcp::schema::all_tools(),
+        ))
+    }
+
+    /// List the two resource identities (`rust-docs://catalog` and
+    /// `rust-docs://sections/<source>/<path>`).
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        Ok(ListResourcesResult::with_all_items(
+            crate::mcp::schema::all_resources(),
+        ))
+    }
+
+    /// Route a tool call to its module and lift its typed error into a
+    /// version-aware [`ErrorData`].
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let version = context.protocol_version();
+        self.dispatch_call(request, version.as_ref()).await
+    }
+
+    /// Route a `read_resource` request to the catalog or section resource view
+    /// and render it as a JSON text resource.
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        let version = context.protocol_version();
+        self.dispatch_read(request, version.as_ref()).await
+    }
+}
+
+impl DocsServer {
+    /// Dispatch a `call_tool` request by tool name. Deserializes the request
+    /// arguments into the tool's typed request struct, runs the module, and
+    /// builds the `CallToolResult`. Each tool's typed error is lifted into a
+    /// version-aware [`ErrorData`] via [`protocol_error::map`]; a malformed
+    /// arguments object is an `INVALID_PARAMS` error; an unknown tool name is a
+    /// `METHOD_NOT_FOUND` error. A blank query, an unknown source, or a cursor
+    /// mismatch surface as the tool's own protocol error so the client receives
+    /// the actionable guidance rather than a panicking server (plan §5).
+    async fn dispatch_call(
+        &self,
+        request: CallToolRequestParams,
+        version: Option<&rmcp::model::ProtocolVersion>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let args = request.arguments.unwrap_or_default();
+        let result = match request.name.as_ref() {
+            crate::mcp::list_sources::TOOL_NAME => {
+                // No request fields; the response is derived purely from the
+                // manifest snapshot.
+                let resp =
+                    crate::mcp::list_sources::response(&self.manifest, self.as_of, self.threshold)
+                        .map_err(|e| protocol_error::map(e, version))?;
+                crate::mcp::list_sources::result(&resp)
+                    .map_err(|e| protocol_error::map(e, version))?
+            }
+            crate::mcp::search_docs::TOOL_NAME => {
+                let req =
+                    self.parse_args::<crate::mcp::schema::SearchDocsRequest>("search_docs", &args)?;
+                let resp = crate::mcp::search_docs::search(&self.manifest, &req)
+                    .map_err(|e| protocol_error::map(e, version))?;
+                crate::mcp::search_docs::result(&resp)
+                    .map_err(|e| protocol_error::map(e, version))?
+            }
+            crate::mcp::get_section::TOOL_NAME => {
+                let req =
+                    self.parse_args::<crate::mcp::schema::GetSectionRequest>("get_section", &args)?;
+                let resp = crate::mcp::get_section::get_section(
+                    &self.manifest,
+                    &req,
+                    self.as_of,
+                    self.threshold,
+                )
+                .map_err(|e| protocol_error::map(e, version))?;
+                crate::mcp::get_section::result(&resp)
+                    .map_err(|e| protocol_error::map(e, version))?
+            }
+            crate::mcp::get_api_checklist::TOOL_NAME => {
+                let req = self.parse_args::<crate::mcp::schema::GetApiChecklistRequest>(
+                    "get_api_checklist",
+                    &args,
+                )?;
+                let resp = crate::mcp::get_api_checklist::checklist(&self.manifest, &req)
+                    .map_err(|e| protocol_error::map(e, version))?;
+                crate::mcp::get_api_checklist::result(&resp)
+                    .map_err(|e| protocol_error::map(e, version))?
+            }
+            crate::mcp::get_command_guidance::TOOL_NAME => {
+                let req = self.parse_args::<crate::mcp::schema::GetCommandGuidanceRequest>(
+                    "get_command_guidance",
+                    &args,
+                )?;
+                let resp = crate::mcp::get_command_guidance::get_command_guidance(
+                    &self.catalog,
+                    &self.manifest,
+                    &req,
+                    self.as_of,
+                    self.threshold,
+                )
+                .map_err(|e| protocol_error::map(e, version))?;
+                crate::mcp::get_command_guidance::result(&resp)
+                    .map_err(|e| protocol_error::map(e, version))?
+            }
+            other => {
+                return Err(ErrorData::new(
+                    ErrorCode::METHOD_NOT_FOUND,
+                    format!("unknown tool: {other}"),
+                    None,
+                ));
+            }
+        };
+        Ok(result.into())
+    }
+
+    /// Dispatch a `read_resource` request. The catalog resource returns the
+    /// `catalog` resource view as JSON; any other `rust-docs://sections/...`
+    /// URI is rendered as a single-section resource. An unknown source or an
+    /// unavailable section surfaces as a `RESOURCE_NOT_FOUND` protocol error via
+    /// the module's own typed error.
+    async fn dispatch_read(
+        &self,
+        request: ReadResourceRequestParams,
+        version: Option<&rmcp::model::ProtocolVersion>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        let uri = request.uri;
+        let structured = if uri == crate::mcp::resources::CATALOG_URI {
+            let view = crate::mcp::resources::catalog_resource_view(
+                &self.manifest,
+                &self.catalog,
+                None,
+                None,
+                self.as_of,
+                self.threshold,
+            )
+            .map_err(|e| protocol_error::map(e, version))?;
+            crate::mcp::resources::catalog_resource_result(&view)
+                .map_err(|e| protocol_error::map(e, version))?
+        } else {
+            let view = crate::mcp::resources::read_section_resource(
+                &self.manifest,
+                &uri,
+                self.as_of,
+                self.threshold,
+            )
+            .map_err(|e| protocol_error::map(e, version))?;
+            // Render the section view as the resource's JSON payload. The
+            // `structured_content` is built the same way the [056] resource
+            // layer would, so the catalog resource and the section resource
+            // share one JSON shape.
+            serde_json::to_value(crate::mcp::schema::SectionResourceView { section: view })
+                .map_err(|e| {
+                    ErrorData::internal_error(format!("encode section resource: {e}"), None)
+                })?
+        };
+        let text = serde_json::to_string(&structured)
+            .map_err(|e| ErrorData::internal_error(format!("render resource text: {e}"), None))?;
+        Ok(ReadResourceResponse::from(ReadResourceResult::new(vec![
+            ResourceContents::text(text, uri).with_mime_type("application/json"),
+        ])))
+    }
+
+    /// Deserialize the `call_tool` arguments object into the tool's typed
+    /// request struct, surfacing a malformed object as an `INVALID_PARAMS`
+    /// protocol error carrying the failing tool's name.
+    fn parse_args<T: for<'de> serde::Deserialize<'de>>(
+        &self,
+        tool: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<T, ErrorData> {
+        serde_json::from_value(serde_json::Value::Object(args.clone())).map_err(|e| {
+            ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                format!("the '{tool}' request arguments could not be parsed: {e}"),
+                Some(serde_json::json!({ "tool": tool })),
+            )
+        })
     }
 }
 
@@ -269,15 +497,15 @@ mod tests {
 
     use super::DocsServer;
 
-    /// M1 must advertise no capabilities: a direct unit assertion on the handler
-    /// config, independent of any transport or runtime.
+    /// The handler advertises the `tools` and `resources` capabilities alongside
+    /// the server identity, independent of any transport or runtime.
     #[test]
-    fn get_info_advertises_identity_and_no_capabilities() {
+    fn get_info_advertises_identity_and_capabilities() {
         let info = DocsServer::new().get_info();
         assert_eq!(info.server_info.name.as_str(), env!("CARGO_PKG_NAME"));
         assert_eq!(info.server_info.version.as_str(), env!("CARGO_PKG_VERSION"));
-        assert!(info.capabilities.tools.is_none());
-        assert!(info.capabilities.resources.is_none());
+        assert!(info.capabilities.tools.is_some());
+        assert!(info.capabilities.resources.is_some());
         assert!(info.capabilities.prompts.is_none());
     }
 }

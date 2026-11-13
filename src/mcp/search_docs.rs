@@ -25,10 +25,9 @@
 //!   or cursor failure into an MCP `error` data object, leaking no internal path
 //!   or stack-trace.
 //!
-//! The module is wired into the `mcp` namespace but the server has not yet wired
-//! this into the `list_tools`/`call_tool` response — like `list_sources`, it is
-//! assembled here and a later task advertises it. It is marked `#![allow(dead_code)]`
-//! accordingly; the tests below exercise every branch.
+//! The module is wired into the `mcp` namespace and the server's `call_tool`
+//! dispatch now consumes its `search` resolution and `result` assembly through the
+//! [048] `ProtocolError` mapping; the tests below exercise every branch.
 //!
 //! ## Snapshot-identity and no-network invariant
 //!
@@ -46,8 +45,6 @@
 //! client never sees an internal path, stack-trace, or a message that does not
 //! name the problem. The response text is a compact, structured summary, not a
 //! stack trace.
-
-#![allow(dead_code)]
 
 use rmcp::model::{CallToolResult, ContentBlock};
 

@@ -79,10 +79,14 @@
 
 // This module exposes the catalog/command-catalog resource logic (view
 // construction, URI building, rendering, and cap-bounded assembly). It is the
-// API surface the `crate::mcp` handler dispatch will call when a client lists or
-// reads the catalog resource. Until that dispatch is wired, the public functions
-// are un-reached from within this crate, which would trip `dead_code`; the allow
-// is lifted when the handler consumes them.
+// API surface the `crate::mcp` handler dispatch calls when a client lists or
+// reads the catalog resource. The core paths (the catalog view and its result,
+// and the section-resource read) are now consumed by that dispatch, but the
+// transitional `catalog_resource`/`section_resource_result` wrappers and the
+// test-only inventory helpers stay un-reached from the non-test build, which
+// would trip `dead_code`; the module therefore keeps `#![allow(dead_code)]`
+// until those wrappers are retired.
+
 #![allow(dead_code)]
 
 use rmcp::model::{CallToolResult, ContentBlock, Resource};

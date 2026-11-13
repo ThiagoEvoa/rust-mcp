@@ -41,11 +41,9 @@
 
 // This module exposes the `list_sources` tool logic (response construction,
 // rendering, and `CallToolResult` assembly). It is the API surface that the
-// handler dispatch in `crate::mcp` will call when a client invokes the tool.
-// Until that dispatch is wired, the public functions are intentionally
-// un-reached from within this crate, which would trip `dead_code`.
-// The allow is lifted when the handler consumes them.
-#![allow(dead_code)]
+// handler dispatch in `crate::mcp` calls when a client invokes the tool; now
+// that the dispatch consumes every public function, the module no longer needs
+// `#![allow(dead_code)]`.
 
 use rmcp::model::{CallToolResult, ContentBlock};
 
