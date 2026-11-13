@@ -205,40 +205,58 @@ async fn assembled_surface_serves_offline_without_network_or_sync() {
         "list_sources names the embedded snapshot"
     );
 
-    // (2) search_docs hits a section offline.
-    let search = complete(
-        server
-            .dispatch_call(
-                call(
-                    "search_docs",
-                    &[
-                        ("query", json!("cargo build")),
-                        ("source", json!("cargo")),
-                        ("limit", json!(5)),
-                    ],
-                ),
-                Some(&version),
-            )
-            .await,
-        "search_docs",
-    );
-    assert!(
-        !search.is_error.unwrap_or(false),
-        "search_docs must not error offline"
-    );
-    let search_structured = structured(&search, "search_docs");
-    let hits = search_structured
-        .get("hits")
-        .and_then(Value::as_array)
-        .expect("search_docs returns a hits array");
-    assert!(!hits.is_empty(), "search_docs hits a section offline");
-    assert_eq!(
-        structured(&search, "search_docs")
-            .get("snapshot_id")
-            .and_then(Value::as_str),
-        Some(snapshot_id),
-        "search_docs names the embedded snapshot"
-    );
+    // (2) search_docs works offline *across all eight sources* (plan §11: "search
+    //     across all eight sources"). Each source carries exactly one section in
+    //     the embedded bundle, so a source-specific query returns that section's
+    //     single hit offline. A per-source loop over the eight registry ids proves
+    //     cross-source search — not one source — while every response naming the
+    //     embedded snapshot proves the search is offline, not a network lookup.
+    let per_source_queries: &[(&str, &str)] = &[
+        ("api-guidelines", "guideline"),
+        ("style-guide", "conventions"),
+        ("cargo", "package"),
+        ("rustc", "diagnostics"),
+        ("rustup", "installer"),
+        ("rustfmt", "formatter"),
+        ("clippy", "renamed"),
+        ("rustdoc", "generator"),
+    ];
+    for (source, query) in per_source_queries {
+        let ctx = format!("search_docs {source}");
+        let search = complete(
+            server
+                .dispatch_call(
+                    call(
+                        "search_docs",
+                        &[
+                            ("query", json!(query)),
+                            ("source", json!(source)),
+                            ("limit", json!(5)),
+                        ],
+                    ),
+                    Some(&version),
+                )
+                .await,
+            &ctx,
+        );
+        assert!(
+            !search.is_error.unwrap_or(false),
+            "search_docs must not error offline for source {source}"
+        );
+        let search_structured = structured(&search, &ctx);
+        let hits = search_structured
+            .get("hits")
+            .and_then(Value::as_array)
+            .expect("search_docs returns a hits array");
+        assert!(!hits.is_empty(), "search_docs hits source {source} offline");
+        assert_eq!(
+            structured(&search, &ctx)
+                .get("snapshot_id")
+                .and_then(Value::as_str),
+            Some(snapshot_id),
+            "search_docs for source {source} names the embedded snapshot"
+        );
+    }
 
     // (3) get_api_checklist returns the C-CONV entry offline.
     let checklist = complete(
@@ -499,17 +517,21 @@ fn the_dispatch_read_path_touches_no_execution_or_network_primitive() {
     let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/mcp/resources.rs"));
     let forbidden = [
         "std::".to_string() + "process", // the standard-library process module
+        "std::".to_string() + "fs",      // the standard-library filesystem module
+        "std::".to_string() + "fs::File", // a filesystem read handle
         "std::".to_string() + "net",     // the standard-library network module
         "Command::".to_string() + "new", // the standard-library command constructor
         ".spaw".to_string() + "n(",      // the spawn method call
         ".exe".to_string() + "c(",       // the exec method call
+        ".read".to_string() + "(",       // a filesystem read call
+        "read_to_".to_string() + "string", // a read-to-string helper
         "req".to_string() + "west",      // the HTTP client
     ];
     for needle in &forbidden {
         assert!(
             !source.contains(needle.as_str()),
             "the dispatch_read refusal path (resources.rs) must contain no \
-             process/network primitive, but found: {needle}"
+             process/filesystem/network primitive, but found: {needle}"
         );
     }
 }
