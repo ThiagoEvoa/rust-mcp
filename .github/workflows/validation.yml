@@ -1,5 +1,24 @@
 name: Rust validation
 
+# ---------------------------------------------------------------------------
+# AC2 GUARD — this is the MANDATORY, OFFLINE suite.
+# [062] / issue #62 / plan.md §11 ("upstream ingestion checks are explicit
+# integration jobs rather than mandatory live-network unit tests").
+#
+# Every unit/integration/doc test in this workflow runs with
+# `CARGO_NET_OFFLINE: "true"` over LOCAL loopback fixtures
+# (src/ingest/http_fixture.rs::FixtureServer) and temporary directories. This
+# suite must NOT gain a live-network dependency: a normal test that reached a
+# real upstream would make CI flaky and violate AC2 ("normal unit/integration
+# tests do not depend on live upstream availability").
+#
+# Live upstream ingestion is deliberately a SEPARATE, opt-in job:
+# .github/workflows/upstream-ingestion.yml (workflow_dispatch / schedule only,
+# never a pull_request/push/merge_group trigger, never a required status, not in
+# this workflow's `needs:`). Do not move a live upstream check here and do not
+# remove the `CARGO_NET_OFFLINE` guards on the test steps below. See docs/CI.md.
+# ---------------------------------------------------------------------------
+
 on:
   pull_request:
   push:
@@ -45,6 +64,8 @@ jobs:
         run: cargo check --workspace --all-targets --locked
       - name: Check Clippy warnings
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # AC2: offline by construction — loopback fixtures + CARGO_NET_OFFLINE
+      # (see the AC2 guard at the top of this file and docs/CI.md).
       - name: Run unit and integration tests
         env:
           CARGO_NET_OFFLINE: "true"
@@ -76,6 +97,8 @@ jobs:
           cargo tree --locked -e features
       - name: Check all targets on MSRV
         run: cargo check --workspace --all-targets --locked
+      # AC2: offline by construction — loopback fixtures + CARGO_NET_OFFLINE
+      # (see the AC2 guard at the top of this file and docs/CI.md).
       - name: Run unit and integration tests on MSRV
         env:
           CARGO_NET_OFFLINE: "true"

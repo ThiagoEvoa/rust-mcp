@@ -24,13 +24,48 @@ Cargo commands use `--locked` wherever dependency resolution applies. Dependency
 and toolchain setup may download packages; test steps set `CARGO_NET_OFFLINE=true`
 after the compilation steps have populated Cargo's cache. Tests use local
 fixtures and temporary directories. This Cargo setting disables dependency
-downloads, not arbitrary networking by test code. Live upstream ingestion remains
-separate integration work ([#62](https://github.com/ThiagoEvoa/rust-mcp/issues/62)).
+downloads, not arbitrary networking by test code. **AC2 invariant:** every test
+step runs `CARGO_NET_OFFLINE=true` over local loopback fixtures
+(`src/ingest/http_fixture.rs::FixtureServer`) and temporary directories; the
+mandatory suite must not gain a live-network dependency (a guard comment at the
+top of `validation.yml` records this). Live upstream ingestion is instead a
+separate, opt-in job — see the next section and
+[#62](https://github.com/ThiagoEvoa/rust-mcp/issues/62).
 
 The workflow grants only `contents: read`, does not persist checkout credentials,
 and needs no secrets or external AI service. It uses `pull_request`, so executing
 PR code does not require the privileged `pull_request_target` event. Checkout is
 pinned to a reviewed commit; review and update the pin when upgrading the action.
+
+## Opt-in upstream-ingestion check
+
+Live upstream ingestion is **not** part of the mandatory `PR validation` gate.
+The separate workflow
+[Upstream ingestion](../.github/workflows/upstream-ingestion.yml) (added in
+[#62](https://github.com/ThiagoEvoa/rust-mcp/issues/62)) runs the real `sync`
+command against the eight registered collections, but only on explicit
+invocation:
+
+- **Triggers.** `workflow_dispatch` (a human clicks **Run workflow**) and an
+  optional weekly `schedule`. It is deliberately **not** triggered on
+  `pull_request`, `push`, or `merge_group`, and it is **not** listed in
+  `PR validation`'s `needs:` nor a branch-ruleset required check, so its result
+  can never gate a merge.
+- **Why it is separate.** Upstream is the project's one flaky input. Gating
+  pull requests on it would fail every change for a reason outside the change's
+  control, violating AC2 ("normal unit/integration tests do not depend on live
+  upstream availability") and plan.md §11 ("upstream ingestion checks are
+  explicit integration jobs rather than mandatory live-network unit tests").
+- **What it reports (AC1).** The `sync` command's own stderr *is* the per-source
+  report: one line per source (documents, sections, checklist, and commands, with
+  the inventory diff) on success, and a source-named extraction diagnostic
+  (`extracting source \`<id>\` failed: …`) or a URL-carrying fetch/discovery
+  diagnostic on failure, plus a non-zero exit. The job propagates that exit, so a
+  broken source fails the run with the per-source breakdown visible in the log.
+
+Run it from **Actions → Upstream ingestion → Run workflow**, or let the schedule
+trigger it. A failed run is informational, not a merge blocker; the offline
+`PR validation` gate is the source of merge-blocking evidence.
 
 ## Enforce validation before merging
 
