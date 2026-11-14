@@ -59,6 +59,7 @@
 //! (e.g. an unsupported protocol version) are not mapped here: they are returned
 //! *within* the protocol, not surfaced through the start path.
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use rmcp::{
@@ -183,11 +184,35 @@ impl DocsServer {
     ///
     /// The bundled snapshot is always present (it is a compile-time-embedded,
     /// validated corpus), so this is the server's always-valid offline fallback:
-    /// it never starts an apparently-healthy empty server (plan §5). Used by the
-    /// `serve` CLI dispatch and by the transport-independent unit tests.
+    /// it never starts an apparently-healthy empty server (plan §5). It is used
+    /// by the transport-independent unit tests; the `serve` CLI dispatch instead
+    /// builds the handler from the *selected* runtime snapshot through
+    /// [`DocsServer::with_snapshot`], so a freshly `sync`-ed local snapshot is
+    /// served rather than the embedded seed.
+    ///
+    /// It exists only for the `#[cfg(test)]` unit tests, which pin the handler
+    /// over the embedded seed without a data directory; production `serve` never
+    /// calls it, so it is test-gated to avoid a dead-code warning under
+    /// `clippy -D warnings`.
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_snapshot(crate::bundled::manifest())
+    }
+
+    /// Build the handler over an already-selected, immutable `manifest`.
+    ///
+    /// The `serve` CLI dispatch selects the fixed runtime snapshot **once** at
+    /// startup — the local published snapshot when present, otherwise the
+    /// validated snapshot embedded in the binary (`plan.md` §5, "keep one
+    /// snapshot fixed for the process lifetime … no hot reload") — and hands its
+    /// manifest here. The handler owns that manifest by value and serves it for
+    /// its entire lifetime; a later `sync` that publishes a newer snapshot to
+    /// disk cannot change a process already serving this one. `as_of` is read
+    /// from the wall clock and the threshold is the plan's seven-day default,
+    /// matching [`DocsServer::new`].
+    pub fn with_snapshot(manifest: SnapshotManifest) -> Self {
         Self {
-            manifest: crate::bundled::manifest(),
+            manifest,
             catalog: CommandCatalog::combined(),
             as_of: Instant::from_system_time(std::time::SystemTime::now()),
             threshold: StaleThreshold::default(),
@@ -439,15 +464,22 @@ impl DocsServer {
 }
 
 /// Start the MCP server over the process's real stdio and run until the client
-/// disconnects.
+/// disconnects, serving the fixed `manifest` selected at startup.
 ///
 /// This opens the standard input/output as the protocol transport, hands the
-/// split halves to [`DocsServer`], and blocks until the connection ends — which
+/// split halves to a [`DocsServer`] built over the *already-selected* `manifest`
+/// ([`DocsServer::with_snapshot`]), and blocks until the connection ends — which
 /// for a stdio server happens when the client closes its end (the canonical MCP
 /// shutdown trigger), or on a transport error. On a clean disconnect it returns
 /// [`Ok`]; on a start/transport failure it returns [`AppError::RuntimeStart`]
 /// carrying the cause so the CLI boundary can emit an actionable diagnostic to
 /// stderr and exit non-zero rather than panic on external input (plan §5).
+///
+/// The `manifest` is the one snapshot the process serves for its entire lifetime:
+/// the selection happens **once**, in [`serve`], via the same loader the `status`
+/// and `inspect` commands use (`plan.md` §5, "keep one snapshot fixed for the
+/// process lifetime … no hot reload"). This function never re-selects, so a
+/// `sync` that publishes a newer snapshot cannot change a running process.
 ///
 /// Signal-driven shutdown (Ctrl-C) is intentionally not implemented in M1: the
 /// stdio transport's read half terminating on EOF is the authoritative
@@ -455,15 +487,17 @@ impl DocsServer {
 /// concern left to task [050]/M4. A comment marks the seam.
 ///
 /// [`AppError::RuntimeStart`]: crate::error::AppError::RuntimeStart
-pub async fn serve_stdio() -> AppResult<()> {
-    tracing::info!("rust-docs-mcp: starting the stdio MCP runtime (M1 skeleton)");
+pub async fn serve_stdio(manifest: SnapshotManifest) -> AppResult<()> {
+    tracing::info!("rust-docs-mcp: starting the stdio MCP runtime");
 
     // `stdio()` adapts the process's std streams to the async transport. `?`
     // here is fine: transport construction is the one failure this function
     // owns, and a startup error must reach the CLI boundary as a typed value.
     let (reader, writer) = rmcp::transport::stdio();
 
-    let server: RunningService<RoleServer, DocsServer> = DocsServer::new()
+    // Serve the already-selected, immutable snapshot (not the embedded seed), so
+    // a freshly `sync`-ed local corpus is what the client actually reads.
+    let server: RunningService<RoleServer, DocsServer> = DocsServer::with_snapshot(manifest)
         .serve((reader, writer))
         .await
         .map_err(|error| {
@@ -487,14 +521,75 @@ pub async fn serve_stdio() -> AppResult<()> {
     }
 }
 
-/// Run the skeleton until a disconnect, and translate the end reason into a
+/// Run the server until a disconnect, and translate the end reason into a
 /// process exit code.
+///
+/// This is the `serve` CLI dispatch entry. It first **selects the fixed runtime
+/// snapshot once**, using the same loader the `status` and `inspect` commands
+/// use — [`crate::runtime::load_snapshot_embedded`], which prefers a valid local
+/// published snapshot (from a prior `sync`) and falls back to the validated
+/// snapshot embedded in the binary (`plan.md` §5). The selection is reported on
+/// stderr (which corpus is served, and why it fell back) so a successful refresh
+/// is observable to the operator. The selected manifest is then handed to
+/// [`serve_stdio`], which serves it for the process's entire lifetime — a later
+/// `sync` cannot change a running process, only a restart after publication can
+/// pick up the new snapshot (the plan's "no hot reload" contract).
+///
+/// When **no** valid corpus is available (neither a local snapshot nor the
+/// embedded bundle validates), the loader returns an actionable
+/// [`LoadError`](crate::runtime::LoadError); this is surfaced on stderr and
+/// translated into a non-zero exit **without** starting an apparently-healthy
+/// empty server (plan §5: "Do not start an apparently healthy empty server").
 ///
 /// [`serve_stdio`] returns typed errors for the CLI boundary; here it folds the
 /// outcome into an [`ExitCode`] for `main`, preserving the "non-zero on
 /// failure" contract of task [003]'s dispatch.
-pub fn serve() -> AppResult<ExitCode> {
-    run_runtime(serve_stdio())
+pub fn serve(data_dir: &Path) -> AppResult<ExitCode> {
+    // Select the fixed runtime snapshot ONCE, with the SAME loader `status` and
+    // `inspect` use, so the corpus a client reads and the one `status` reports
+    // agree for the same data directory. The result is immutable and fixed for
+    // the process lifetime: a later `sync` cannot change what a running process
+    // serves (plan §5 "no hot reload").
+    let snapshot =
+        match crate::runtime::load_snapshot_embedded(data_dir, crate::bundled::JSON.as_bytes()) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                // No valid corpus: never start an apparently-healthy empty server.
+                // The actionable message directs the operator to `sync`.
+                tracing::error!("rust-docs-mcp: serve failed to select a runtime snapshot: {err}");
+                return Ok(ExitCode::FAILURE);
+            }
+        };
+
+    // Report which corpus is being served — and, on a fallback, why — on stderr
+    // (diagnostics never touch the stdout-only protocol stream, plan §8/§9).
+    match &snapshot.source {
+        crate::runtime::SnapshotSource::Local { path } => tracing::info!(
+            "rust-docs-mcp: serving the local snapshot {} ({}); run `rust-docs-mcp sync` to refresh",
+            snapshot.manifest.body.snapshot_id.as_str(),
+            path.display(),
+        ),
+        crate::runtime::SnapshotSource::Bundle { path } => tracing::info!(
+            "rust-docs-mcp: serving the bundled snapshot {} ({})",
+            snapshot.manifest.body.snapshot_id.as_str(),
+            path.display(),
+        ),
+        crate::runtime::SnapshotSource::Embedded => match &snapshot.fallback_reason {
+            // A local snapshot was present but could not be served, or none was
+            // present: the loader records the reason so an operator can tell
+            // "no local snapshot present" apart from "present but invalid".
+            Some(reason) => tracing::info!(
+                "rust-docs-mcp: {reason}; serving the embedded bundled snapshot {}",
+                snapshot.manifest.body.snapshot_id.as_str(),
+            ),
+            None => tracing::info!(
+                "rust-docs-mcp: no valid local snapshot; serving the embedded bundled snapshot {}",
+                snapshot.manifest.body.snapshot_id.as_str(),
+            ),
+        },
+    }
+
+    run_runtime(serve_stdio(snapshot.manifest))
 }
 
 /// Build a multi-threaded async runtime and block on `future` to completion.

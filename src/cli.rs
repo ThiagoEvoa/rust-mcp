@@ -155,11 +155,18 @@ impl Cli {
         let data_dir = self.resolve_data_dir()?;
 
         match &self.command {
-            // `serve` is wired to the real (M1 skeleton) stdio runtime. Any
-            // startup/transport failure is surfaced as a typed `AppError` *here*
-            // so `main` turns it into a non-zero exit and an stderr diagnostic —
-            // never query text on stdout.
-            Command::Serve => crate::mcp::serve(),
+            // `serve` (task [005] + issue #145): wire the `serve` command to the
+            // real stdio runtime, selecting the fixed runtime snapshot ONCE at
+            // startup with the SAME loader `status`/`inspect` use
+            // (`crate::runtime::load_snapshot_embedded` — local preferred, embedded
+            // fallback). The resolved `data_dir` is passed through so a freshly
+            // `sync`-ed local corpus is served rather than the embedded seed, and
+            // `status` and the MCP identity agree for the same data directory.
+            // Any startup/transport failure, or a "no valid corpus" selection
+            // failure, is surfaced as a typed diagnostic and a non-zero exit
+            // *here* so `main` never starts an apparently-healthy empty server and
+            // never writes query text to stdout.
+            Command::Serve => crate::mcp::serve(&data_dir),
 
             // `sync` (task [027]): wire the explicit refresh command to the
             // bounded ingestion pipeline — discovery → fetch → extract →
