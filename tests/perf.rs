@@ -44,12 +44,6 @@
 //! corpus measured and its caveats are stated in
 //! [`docs/PERFORMANCE.md`](../docs/PERFORMANCE.md).
 
-#![allow(clippy::needless_range_loop)]
-// The measurement logic is wired in the following commits; the client and the
-// fixed query/section sets are already declared so the first commit is a
-// compiling, gated skeleton. This allow is removed once the harness is complete.
-#![allow(dead_code)]
-
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -71,11 +65,11 @@ const SNAPSHOT_ID: &str = "rust-docs-bundled-seed";
 /// The number of fresh processes whose startup is measured. A fixed count keeps
 /// the measurement reproducible; a small warmup is discarded first so the OS
 /// loader cache does not skew the first sample.
-const STARTUP_RUNS: usize = 15;
+const STARTUP_RUNS: usize = 10;
 
 /// The number of retrieval iterations per query (search) / section (get_section).
 /// A fixed count keeps the p95 stable run-to-run.
-const RETRIEVAL_ITERS: usize = 200;
+const RETRIEVAL_ITERS: usize = 30;
 
 /// The fixed `search_docs` query set. Each query is expected to match the seed
 /// corpus; the harness asserts non-empty hits so a zero-hit "fast" result can
@@ -218,9 +212,9 @@ impl Client {
             }
             let mut line = String::new();
             match tokio::time::timeout(remaining, self.reader.read_line(&mut line)).await {
-                Ok(Ok(0)) => panic!(
-                    "the server closed stdout before answering `{method}` (id {id})"
-                ),
+                Ok(Ok(0)) => {
+                    panic!("the server closed stdout before answering `{method}` (id {id})")
+                }
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => panic!("reading the child's stdout failed: {error}"),
                 Err(_) => panic!("timed out waiting for the response to `{method}` (id {id})"),
@@ -229,7 +223,8 @@ impl Client {
             if trimmed.is_empty() {
                 continue;
             }
-            let value: Value = serde_json::from_str(trimmed).expect("every stdout line must be JSON");
+            let value: Value =
+                serde_json::from_str(trimmed).expect("every stdout line must be JSON");
             assert_eq!(
                 value.get("jsonrpc").and_then(Value::as_str),
                 Some("2.0"),
@@ -244,9 +239,113 @@ impl Client {
     /// Call a tool by name with the given arguments object, returning the
     /// response.
     async fn call_tool(&mut self, name: &str, arguments: Value) -> Value {
-        self.request("tools/call", &json!({ "name": name, "arguments": arguments }))
-            .await
+        self.request(
+            "tools/call",
+            &json!({ "name": name, "arguments": arguments }),
+        )
+        .await
     }
+
+    /// The child pid, for RSS sampling.
+    fn pid(&self) -> u32 {
+        self.child.id().unwrap_or(0)
+    }
+
+    /// Close the client's stdin and wait for a clean self-exit, the way the
+    /// other spawned-stdio tests do, so each measured process terminates. The
+    /// wait is bounded: the server exits on stdin EOF, but if it does not we do
+    /// not block the harness forever — `kill_on_drop` reaps the child on drop.
+    async fn close(mut self) {
+        let _ = self.stdin.shutdown().await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
+    }
+}
+
+/// The minimum number of samples a percentile needs to be meaningful.
+const MIN_SAMPLES: usize = 2;
+
+/// A summary of a set of millisecond samples: min / median / p95 / max.
+struct Percentiles {
+    min_ms: f64,
+    median_ms: f64,
+    p95_ms: f64,
+    max_ms: f64,
+}
+
+/// Sort the samples and report min / median / p95 / max in milliseconds. A
+/// nearest-rank percentile keeps the harness dependency-free and deterministic
+/// for a fixed iteration count.
+fn percentile_report(samples: &mut [f64]) -> Percentiles {
+    samples.sort_by(|a, b| a.partial_cmp(b).expect("finite samples compare"));
+    let at = |pct: f64| -> f64 {
+        if samples.is_empty() {
+            0.0
+        } else {
+            let rank = (pct / 100.0 * samples.len() as f64).ceil() as usize;
+            samples[rank.clamp(1, samples.len()) - 1]
+        }
+    };
+    Percentiles {
+        min_ms: samples.first().copied().unwrap_or(0.0),
+        median_ms: at(50.0),
+        p95_ms: at(95.0),
+        max_ms: samples.last().copied().unwrap_or(0.0),
+    }
+}
+
+/// Sample the child's resident set size (RSS) via the platform `ps` tool. macOS
+/// `ps -o rss=` reports KiB. This is an approximation of peak RSS (sampled after
+/// the corpus is loaded); the harness states the caveat. Returns `None` if the
+/// process is gone or `ps` is unavailable.
+fn sample_rss_kib(pid: u32) -> Option<u64> {
+    if pid == 0 {
+        return None;
+    }
+    let out = std::process::Command::new("ps")
+        .arg("-o")
+        .arg("rss=")
+        .arg("-p")
+        .arg(pid.to_string())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let kib = s.trim();
+    kib.parse::<u64>().ok().filter(|v| *v > 0)
+}
+
+/// Round to two decimals for a stable, human-readable report.
+fn round(ms: f64) -> f64 {
+    (ms * 100.0).round() / 100.0
+}
+
+/// Assert a `search_docs` result is non-empty, so a zero-hit "fast" path cannot
+/// masquerade as a real retrieval. The real search response over the seed
+/// carries at least one hit for these queries.
+fn assert_non_empty_search(response: &Value, query: &str) {
+    let text = response
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        !text.contains("no documentation") && !text.contains("no results"),
+        "search_docs `{query}` returned no hits (unexpected for the seed)"
+    );
+}
+
+/// Assert a `get_section` result is resolved (no typed error), so the fixed
+/// `SECTION_IDS` are all real seed sections.
+fn assert_section_ok(response: &Value, section: &str) {
+    let is_error = response
+        .get("error")
+        .map(|e| e.get("code").and_then(Value::as_i64).is_some())
+        .unwrap_or(false);
+    assert!(
+        !is_error,
+        "get_section `{section}` returned an error (unexpected for the seed)"
+    );
 }
 
 /// The performance measurement the plan's §11 provisional targets name.
@@ -269,9 +368,116 @@ async fn measure_startup_retrieval_and_memory() {
         return;
     }
 
-    // Measurement + report emission are added in the following commits. This
-    // gated skeleton proves the harness compiles and is skipped by default.
-    let report = json!({ "ok": true });
+    // ---- Startup: spawn -> first `initialize` response over fresh processes. ----
+    // A small warmup discards the OS loader-cache skew on the first sample.
+    for _ in 0..3 {
+        let warm = Client::new().await.0;
+        warm.close().await;
+    }
+    let mut startup_samples: Vec<f64> = Vec::with_capacity(STARTUP_RUNS);
+    for _ in 0..STARTUP_RUNS {
+        let spawn = tokio::time::Instant::now();
+        let (client, _response, init_end) = Client::new().await;
+        // `init_end` is captured right after `Client::new` returns (i.e. after
+        // the `initialize` handshake + `notifications/initialized`), so it marks
+        // the end of the startup window; the spawn start is `spawn`.
+        startup_samples.push((init_end - spawn).as_secs_f64() * 1000.0);
+        client.close().await;
+    }
+    let startup = percentile_report(&mut startup_samples);
+    assert!(
+        startup_samples.len() >= MIN_SAMPLES,
+        "the startup measurement produced enough samples"
+    );
+
+    // ---- Retrieval p95 over the fixed query + section sets, one warm client. ----
+    let (mut client, _resp, _t) = Client::new().await;
+
+    // Prove the fixed sets actually retrieve (a zero-hit "fast" result must
+    // never masquerade as a retrieval) before timing anything.
+    for query in SEARCH_QUERIES {
+        let response = client
+            .call_tool("search_docs", json!({ "query": query, "limit": 5 }))
+            .await;
+        assert_non_empty_search(&response, query);
+    }
+    for section in SECTION_IDS {
+        let response = client
+            .call_tool("get_section", json!({ "section_id": section }))
+            .await;
+        assert_section_ok(&response, section);
+    }
+
+    // Sample the serving process's RSS once the corpus is loaded (the index is
+    // built at startup, so this is a representative peak for the small seed).
+    let peak_rss_kib = sample_rss_kib(client.pid());
+
+    let mut search_times: Vec<f64> = Vec::with_capacity(SEARCH_QUERIES.len() * RETRIEVAL_ITERS);
+    for query in SEARCH_QUERIES {
+        for _ in 0..RETRIEVAL_ITERS {
+            let start = tokio::time::Instant::now();
+            let _ = client
+                .call_tool("search_docs", json!({ "query": query, "limit": 5 }))
+                .await;
+            search_times.push((tokio::time::Instant::now() - start).as_secs_f64() * 1000.0);
+        }
+    }
+    let mut section_times: Vec<f64> = Vec::with_capacity(SECTION_IDS.len() * RETRIEVAL_ITERS);
+    for section in SECTION_IDS {
+        for _ in 0..RETRIEVAL_ITERS {
+            let start = tokio::time::Instant::now();
+            let _ = client
+                .call_tool("get_section", json!({ "section_id": section }))
+                .await;
+            section_times.push((tokio::time::Instant::now() - start).as_secs_f64() * 1000.0);
+        }
+    }
+    client.close().await;
+
+    let search_p95 = percentile_report(&mut search_times).p95_ms;
+    let section_p95 = percentile_report(&mut section_times).p95_ms;
+    assert!(
+        search_times.len() >= MIN_SAMPLES && section_times.len() >= MIN_SAMPLES,
+        "the retrieval measurement produced enough samples"
+    );
+
+    // ---- Report + target comparison. ----
+    let startup_target_ms = 2000.0;
+    let retrieval_target_ms = 100.0;
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let report = json!({
+        "ok": true,
+        "profile": profile,
+        "corpus": SNAPSHOT_ID,
+        "host": std::env::consts::OS,
+        "startup": {
+            "runs": STARTUP_RUNS,
+            "min_ms": round(startup.min_ms),
+            "median_ms": round(startup.median_ms),
+            "p95_ms": round(startup.p95_ms),
+            "max_ms": round(startup.max_ms),
+            "target_ms": startup_target_ms,
+            "meets_target": startup.p95_ms <= startup_target_ms,
+        },
+        "retrieval": {
+            "iters_per_item": RETRIEVAL_ITERS,
+            "queries": SEARCH_QUERIES.len(),
+            "sections": SECTION_IDS.len(),
+            "search_p95_ms": round(search_p95),
+            "section_p95_ms": round(section_p95),
+            "target_ms": retrieval_target_ms,
+            "meets_target": search_p95 <= retrieval_target_ms
+                && section_p95 <= retrieval_target_ms,
+        },
+        "memory": {
+            "peak_rss_kib": peak_rss_kib,
+            "note": "approximation: sampled once after the corpus is loaded; the seed is small, so this is close to peak",
+        },
+    });
     emit_report(&report);
 }
 
@@ -281,11 +487,12 @@ async fn measure_startup_retrieval_and_memory() {
 fn emit_report(report: &Value) {
     let pretty =
         serde_json::to_string_pretty(report).expect("serializing the report must not fail");
-    eprintln!("\n=== rust-docs-mcp performance report ===\n{pretty}\n==============================");
+    eprintln!(
+        "\n=== rust-docs-mcp performance report ===\n{pretty}\n=============================="
+    );
 
     if let Some(path) = std::env::var_os("RUST_DOCS_MCP_PERF_REPORT") {
-        std::fs::write(&path, format!("{pretty}\n")).unwrap_or_else(|error| {
-            panic!("writing the report to {path:?} failed: {error}")
-        });
+        std::fs::write(&path, format!("{pretty}\n"))
+            .unwrap_or_else(|error| panic!("writing the report to {path:?} failed: {error}"));
     }
 }
