@@ -111,10 +111,12 @@ pub struct RuntimeSnapshot {
     pub source: SnapshotSource,
     /// Why the preferred local source was *not* served, when this snapshot is a
     /// fallback (the embedded or bundled source): a short, operator-facing reason
-    /// naming the local snapshot as absent or present-but-invalid. `None` on the
-    /// local/bundle success paths, where the local snapshot was served and there
-    /// is no fallback to explain. Diagnostics-only — it never affects which
-    /// snapshot is served, nor the "no hot reload" contract.
+    /// naming the local snapshot as absent or present-but-invalid. `None` only
+    /// when the local snapshot was served itself (the local-success path), where
+    /// there is no fallback to explain; `Some` on the embedded/bundled fallback
+    /// paths, where a fallback was served instead of the local. Diagnostics-only
+    /// — it never affects which snapshot is served, nor the "no hot reload"
+    /// contract.
     pub fallback_reason: Option<String>,
 }
 
