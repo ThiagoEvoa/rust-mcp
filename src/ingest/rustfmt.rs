@@ -913,7 +913,7 @@ reference for the full list of options.
         assert_eq!(rev.len(), 40, "a git SHA is 40 characters: {rev}");
         assert!(
             rev.bytes()
-                .all(|b| (b'a'..=b'f').contains(&b) || (b'0'..=b'9').contains(&b)),
+                .all(|b| (b'a'..=b'f').contains(&b) || b.is_ascii_digit()),
             "a git SHA is lowercase hex: {rev}"
         );
         // Both approved documents are pinned under the rustfmt repository at that
