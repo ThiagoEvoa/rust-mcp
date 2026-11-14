@@ -109,6 +109,13 @@ pub struct RuntimeSnapshot {
     pub manifest: SnapshotManifest,
     /// Where the manifest came from.
     pub source: SnapshotSource,
+    /// Why the preferred local source was *not* served, when this snapshot is a
+    /// fallback (the embedded or bundled source): a short, operator-facing reason
+    /// naming the local snapshot as absent or present-but-invalid. `None` on the
+    /// local/bundle success paths, where the local snapshot was served and there
+    /// is no fallback to explain. Diagnostics-only — it never affects which
+    /// snapshot is served, nor the "no hot reload" contract.
+    pub fallback_reason: Option<String>,
 }
 
 /// A failure to select a valid runtime snapshot, each variant actionable.
@@ -229,6 +236,8 @@ pub fn load_snapshot(data_dir: &Path, bundle: Option<&Path>) -> Result<RuntimeSn
                 source: SnapshotSource::Local {
                     path: corpus::published_snapshot_path(data_dir),
                 },
+                // The local snapshot was served, so there is no fallback to explain.
+                fallback_reason: None,
             });
         }
         Err(err) => Some(err.reason()),
@@ -243,6 +252,8 @@ pub fn load_snapshot(data_dir: &Path, bundle: Option<&Path>) -> Result<RuntimeSn
                     source: SnapshotSource::Bundle {
                         path: path.to_path_buf(),
                     },
+                    // The bundle is a fallback, so record why the local was not used.
+                    fallback_reason: local,
                 });
             }
             Err(err) => Some(err.reason()),
@@ -327,17 +338,37 @@ pub fn load_snapshot_embedded(
                 source: SnapshotSource::Local {
                     path: corpus::published_snapshot_path(data_dir),
                 },
+                // The local snapshot was served, so there is no fallback to explain.
+                fallback_reason: None,
             });
         }
         Err(err) => Some(err.reason()),
     };
 
     // Step 2: the embedded, shipped fallback, validated with the same gate.
+    // The local source was not used (a read/validation failure above), so record
+    // *why* for the fallback diagnostic: a presence check distinguishes "no local
+    // snapshot present" (a fresh install — refresh with `sync` later) from "a
+    // local snapshot is present but could not be loaded or validated" (corrupt,
+    // truncated, non-UTF-8, oversized, or inconsistent — fix and `sync`).
+    let local_present = corpus::published_snapshot_path(data_dir).exists();
     match load_validated_json("bundled (embedded) snapshot", bundle.to_vec()) {
-        Ok(manifest) => Ok(RuntimeSnapshot {
-            manifest,
-            source: SnapshotSource::Embedded,
-        }),
+        // `local` is *borrowed* here, not moved, so the error arm below still
+        // owns it for `NoValidCorpus`.
+        Ok(manifest) => {
+            let fallback_reason = match local.as_ref() {
+                Some(reason) if local_present => {
+                    Some(format!("local snapshot present but invalid: {reason}"))
+                }
+                Some(_) => Some("no local snapshot present".to_string()),
+                None => None,
+            };
+            Ok(RuntimeSnapshot {
+                manifest,
+                source: SnapshotSource::Embedded,
+                fallback_reason,
+            })
+        }
         Err(err) => Err(LoadError::NoValidCorpus {
             local,
             bundle: Some(err.reason()),

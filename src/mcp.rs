@@ -574,10 +574,19 @@ pub fn serve(data_dir: &Path) -> AppResult<ExitCode> {
             snapshot.manifest.body.snapshot_id.as_str(),
             path.display(),
         ),
-        crate::runtime::SnapshotSource::Embedded => tracing::info!(
-            "rust-docs-mcp: no valid local snapshot; serving the embedded bundled snapshot {}",
-            snapshot.manifest.body.snapshot_id.as_str(),
-        ),
+        crate::runtime::SnapshotSource::Embedded => match &snapshot.fallback_reason {
+            // A local snapshot was present but could not be served, or none was
+            // present: the loader records the reason so an operator can tell
+            // "no local snapshot present" apart from "present but invalid".
+            Some(reason) => tracing::info!(
+                "rust-docs-mcp: {reason}; serving the embedded bundled snapshot {}",
+                snapshot.manifest.body.snapshot_id.as_str(),
+            ),
+            None => tracing::info!(
+                "rust-docs-mcp: no valid local snapshot; serving the embedded bundled snapshot {}",
+                snapshot.manifest.body.snapshot_id.as_str(),
+            ),
+        },
     }
 
     run_runtime(serve_stdio(snapshot.manifest))

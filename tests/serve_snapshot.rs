@@ -437,6 +437,66 @@ async fn invalid_local_corpus_falls_back_to_embedded_and_reports_why() {
 }
 
 // ---------------------------------------------------------------------------
+// Regression for review finding S-1: a corrupt/invalid local snapshot must report
+// a *distinct* "why" from an absent one. Before the fix, both fell back to the
+// embedded seed with the same generic "no valid local snapshot" message, so an
+// operator with a corrupt local snapshot could not tell it apart from a fresh
+// install. Now the fallback diagnostic distinguishes the two. This test drives
+// the real binary over stdio (CLI → startup → handler), per the task constraint.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn corrupt_local_reports_a_distinct_reason_from_an_absent_one() {
+    // (1) No local snapshot at all: the fallback reports that none is present.
+    let absent_dir = fresh_data_dir();
+    let mut absent_server = Server::spawn(&absent_dir).await;
+    absent_server.initialize().await;
+    let _ = absent_server.call_tool("list_sources", json!({})).await;
+    let absent_stderr = absent_server.close_and_read_stderr().await;
+    assert!(
+        absent_stderr.contains("no local snapshot present"),
+        "an absent local snapshot must report that none is present; got: {absent_stderr}"
+    );
+    assert!(
+        !absent_stderr.contains("present but invalid"),
+        "an absent local snapshot must not look like a corrupt one; got: {absent_stderr}"
+    );
+
+    // (2) A corrupt local snapshot: the fallback reports that it is present but
+    //     invalid, carrying the load/validation reason.
+    let corrupt_dir = fresh_data_dir();
+    let corpus_dir = corrupt_dir.join("corpus");
+    std::fs::create_dir_all(&corpus_dir).expect("create the corpus folder");
+    std::fs::write(corpus_dir.join("manifest.json"), b"not a snapshot manifest")
+        .expect("write the corrupt manifest");
+    let mut corrupt_server = Server::spawn(&corrupt_dir).await;
+    corrupt_server.initialize().await;
+    let _ = corrupt_server.call_tool("list_sources", json!({})).await;
+    let corrupt_stderr = corrupt_server.close_and_read_stderr().await;
+    assert!(
+        corrupt_stderr.contains("local snapshot present but invalid"),
+        "a corrupt local snapshot must report that it is present but invalid; got: {corrupt_stderr}"
+    );
+    assert!(
+        !corrupt_stderr.contains("no local snapshot present"),
+        "a corrupt local snapshot must not look like an absent one; got: {corrupt_stderr}"
+    );
+
+    // The two fallback diagnostics must be distinct — the core of the finding.
+    assert_ne!(
+        absent_stderr, corrupt_stderr,
+        "the absent and corrupt fallback diagnostics must differ: \nabsent:  {absent_stderr}\ncorrupt: {corrupt_stderr}"
+    );
+
+    // Both still fall back to the embedded seed (behavior preserved).
+    assert!(
+        absent_stderr.contains("embedded bundled snapshot")
+            && corrupt_stderr.contains("embedded bundled snapshot"),
+        "both cases must still fall back to the embedded bundled snapshot; absent: {absent_stderr}; corrupt: {corrupt_stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Acceptance 3: a running process stays on its original snapshot until it is
 // restarted; the restart selects the newly published snapshot.
 // ---------------------------------------------------------------------------
