@@ -8,10 +8,20 @@
 //! the registry-gated resolver (`crate::ingest::resolve::resolve_document`) so
 //! they stay valid and in-boundary. Reusable by the book, rustfmt, and clippy
 //! ingestion stages; no panics on malformed or hostile HTML.
+//!
+//! Content hyperlinks are *citations* the reader may follow, not links the
+//! crawler may fetch. They are serialized through
+//! [`crate::ingest::resolve::resolve_citation`], which preserves any safe
+//! `http`/`https` citation — including an external host such as `github.com` that
+//! is not a registered source — resolves relative and intra-document links, and
+//! drops dangerous schemes, **without ever fetching a target**. The fetch
+//! boundary (`resolve_document`) stays where it belongs: the inventory/crawler
+//! ([`crate::ingest::books::build_inventory`]). Conflating the two was the bug
+//! that aborted the sync on a `CONTRIBUTING.md` link (#146).
 
 #![allow(dead_code)] // transitional: first consumer is the [014] section-splitting stage
 
-use crate::ingest::resolve::resolve_document;
+use crate::ingest::resolve::{Citation, resolve_citation};
 use reqwest::Url;
 use scraper::{ElementRef, Html, Node, Selector};
 
@@ -44,18 +54,14 @@ pub struct ArticleExtraction {
 ///
 /// Mirrors the "no avoidable panic on external input" posture of task `[004]`.
 /// HTML *parsing* itself is not a failure mode — scraper's `parse_fragment` is
-/// lenient and never fails — so the failure paths are a link the registry
-/// refuses and an article that yields no content after chrome stripping.
+/// lenient and never fails. A content link is a *citation*, not a fetch target:
+/// it is serialized through [`crate::ingest::resolve::resolve_citation`], which
+/// preserves safe `http`/`https` citations and drops dangerous schemes *without
+/// fetching*, so a link can never be an extraction failure. The only remaining
+/// failure is an article that yields no content after chrome stripping.
 #[allow(dead_code)] // first consumer is the [014] section-splitting stage
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtractionError {
-    /// A content link could not be resolved to a valid in-boundary URL.
-    UnresolvableLink {
-        /// The raw `href` reference that failed.
-        link: String,
-        /// The resolver's reason.
-        reason: String,
-    },
     /// No article content remained after stripping chrome.
     EmptyArticle,
 }
@@ -63,9 +69,6 @@ pub enum ExtractionError {
 impl std::fmt::Display for ExtractionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExtractionError::UnresolvableLink { link, reason } => {
-                write!(f, "content link {link:?} could not be resolved: {reason}")
-            }
             ExtractionError::EmptyArticle => {
                 write!(f, "no article content after stripping chrome")
             }
@@ -97,11 +100,16 @@ impl std::error::Error for ExtractionError {}
 /// - `ul`/`ol` → `- ` / `1. ` list items
 /// - `blockquote` → `> ` (stability/version callout)
 /// - `pre > code` (class `language-rust`/`lang-rust`) → ```rust fence
-/// - `a[href]` → resolve via `resolve_document`; keep as absolute link if valid
+/// - `a[href]` → preserve as a citation through `resolve_citation`: any safe
+///   `http`/`https` link (external, standard-library, or relative-resolved) is
+///   kept as `[text](url)`, and a dangerous scheme is dropped (text kept, URL
+///   dropped) — the link is never fetched.
 ///
 /// # Errors
 ///
-/// Returns `ExtractionError` for empty content or an unresolvable link.
+/// Returns [`ExtractionError::EmptyArticle`] when chrome stripping leaves no
+/// content — never a panic on malformed or hostile HTML, and never a link
+/// failure (citations are serialized, not fetched).
 pub fn convert_article(html: &str, base_url: &Url) -> Result<ArticleExtraction, ExtractionError> {
     let document = Html::parse_fragment(html);
     let main = select_main(&document);
@@ -233,14 +241,15 @@ fn render_children(
                             continue;
                         }
                         match elem.attr("href") {
-                            Some(href) => match resolve_document(href, base_url) {
-                                Ok(rd) => out.push(format!("[{text}]({})", rd.canonical_url)),
-                                Err(e) => {
-                                    return Err(ExtractionError::UnresolvableLink {
-                                        link: href.to_string(),
-                                        reason: e.to_string(),
-                                    });
-                                }
+                            Some(href) => match resolve_citation(href, base_url) {
+                                // A safe citation (an external host such as
+                                // `github.com`, a standard-library link, or a
+                                // relative link resolved against this document)
+                                // is preserved; a dangerous or empty scheme is
+                                // dropped (text kept, URL not serialized). The
+                                // link is a citation, never fetched.
+                                Citation::Link(url) => out.push(format!("[{text}]({url})")),
+                                Citation::Drop => out.push(text),
                             },
                             None => out.push(text),
                         }
@@ -325,14 +334,9 @@ fn render_inline(el: &ElementRef, base_url: &Url) -> Result<String, ExtractionEr
                         continue;
                     }
                     match elem.attr("href") {
-                        Some(href) => match resolve_document(href, base_url) {
-                            Ok(rd) => parts.push(format!("[{inner}]({})", rd.canonical_url)),
-                            Err(e) => {
-                                return Err(ExtractionError::UnresolvableLink {
-                                    link: href.to_string(),
-                                    reason: e.to_string(),
-                                });
-                            }
+                        Some(href) => match resolve_citation(href, base_url) {
+                            Citation::Link(url) => parts.push(format!("[{inner}]({url})")),
+                            Citation::Drop => parts.push(inner),
                         },
                         None => parts.push(inner),
                     }
@@ -549,9 +553,10 @@ pub struct ArticleSection {
 ///
 /// # Errors
 ///
-/// Returns [`ExtractionError::UnresolvableLink`] when a content link escapes
-/// the registry and [`ExtractionError::EmptyArticle`] when nothing survives
-/// chrome stripping — never a panic on malformed or hostile HTML.
+/// Returns [`ExtractionError::EmptyArticle`] when nothing survives chrome
+/// stripping — never a panic on malformed or hostile HTML, and never a link
+/// failure (content links are citations serialized by `resolve_citation`, not
+/// fetch targets).
 pub fn split_article_sections(
     html: &str,
     base_url: &Url,
@@ -696,14 +701,9 @@ fn render_content_block(
                 return Ok(None);
             }
             match elem.attr("href") {
-                Some(href) => match resolve_document(href, base_url) {
-                    Ok(rd) => parts.push(format!("[{text}]({})", rd.canonical_url)),
-                    Err(e) => {
-                        return Err(ExtractionError::UnresolvableLink {
-                            link: href.to_string(),
-                            reason: e.to_string(),
-                        });
-                    }
+                Some(href) => match resolve_citation(href, base_url) {
+                    Citation::Link(url) => parts.push(format!("[{text}]({url})")),
+                    Citation::Drop => parts.push(text),
                 },
                 None => parts.push(text),
             }
@@ -1023,46 +1023,108 @@ mod tests {
                     a.body
                 );
             }
+            // With #146, `ExtractionError` has exactly one variant — `EmptyArticle`
+            // — so this arm is exhaustive on its own. A future variant would make
+            // the match non-exhaustive and force it to be handled here.
             Err(ExtractionError::EmptyArticle) => {
                 // scraper parsed an empty fragment after chrome-strip: acceptable.
             }
-            Err(other) => panic!("unexpected error variant: {other:?}"),
         }
     }
 
-    /// A content link the registry refuses (foreign host / off-boundary path)
-    /// surfaces as `ExtractionError::UnresolvableLink` — it is never silently
-    /// dropped, never re-rendered as a live link, and never panics.
+    /// An external citation the fetch gate would refuse (a `github.com`
+    /// `CONTRIBUTING.md` link — the exact reported bug in #146) is *preserved* as
+    /// a Markdown citation: not dropped, not re-fetched, and not fatal. This is
+    /// the core of the fix — preserving a link does not require following it, so
+    /// the citation serializer is decoupled from the fetch boundary.
     #[test]
-    fn test_unresolvable_link_fails_the_article() {
-        // `evil.example.com` is not a registered source → `UnregisteredHost`.
+    fn test_external_citation_is_preserved_not_refused() {
+        let html = r#"<!DOCTYPE html>
+<body>
+  <main>
+    <h1>Contributing</h1>
+    <p>See <a href="https://github.com/rust-lang/api-guidelines/blob/master/CONTRIBUTING.md">the upstream CONTRIBUTING file</a> for the full process.</p>
+  </main>
+</body>
+</html>"#;
+        let r =
+            convert_article(html, &base()).expect("an external citation must not fail extraction");
+        let body = &r.body;
+        // The citation is preserved verbatim as a Markdown link.
+        assert!(
+            body.contains(
+                "[the upstream CONTRIBUTING file](https://github.com/rust-lang/api-guidelines/blob/master/CONTRIBUTING.md)"
+            ),
+            "the external citation must be preserved verbatim:\n{body}"
+        );
+        // The link text is retained.
+        assert!(
+            body.contains("the upstream CONTRIBUTING file"),
+            "the link text must be retained:\n{body}"
+        );
+    }
+
+    /// A dangerous scheme (`javascript:`) is *dropped*: the link's visible text
+    /// is kept but its URL is not serialized, and the target is never fetched.
+    /// This is the explicit safe-handling policy for hostile links (#146 AC3).
+    #[test]
+    fn test_dangerous_scheme_is_dropped_without_serializing_its_url() {
         let html = r#"<!DOCTYPE html>
 <body>
   <main>
     <h1>Page</h1>
-    <p>See <a href="https://evil.example.com/x">the off-source link</a>.</p>
+    <p>Click <a href="javascript:alert(document.domain)">this link</a> and nothing bad happens.</p>
   </main>
 </body>
 </html>"#;
-        let r = convert_article(html, &base());
-        match r {
-            Ok(a) => {
-                // The link must NOT have been resolved into a live absolute URL.
-                assert!(
-                    !a.body.contains("evil.example.com"),
-                    "off-source link must not survive as a rendered link:\n{}",
-                    a.body
-                );
-                panic!("expected UnresolvableLink, got Ok:\n{}", a.body);
-            }
-            Err(ExtractionError::UnresolvableLink { link, .. }) => {
-                assert!(
-                    link.contains("evil.example.com"),
-                    "offending link not named: {link}"
-                );
-            }
-            Err(other) => panic!("unexpected error variant: {other:?}"),
-        }
+        let r = convert_article(html, &base()).expect("a dropped link must not fail extraction");
+        let body = &r.body;
+        // The visible text is retained so the reader's content is not lost…
+        assert!(
+            body.contains("this link"),
+            "the dropped link's text must be retained:\n{body}"
+        );
+        // …but its URL is never serialized, so no script can be emitted.
+        assert!(
+            !body.contains("javascript:") && !body.contains("alert(document.domain)"),
+            "a dangerous-scheme URL must not be serialized:\n{body}"
+        );
+        // With no other link in this body, a dropped link must render its text
+        // bare — no `[text](url)` Markdown link at all.
+        assert!(
+            !body.contains("]("),
+            "a dropped link must not render as a Markdown link:\n{body}"
+        );
+    }
+
+    /// Relative content links and intra-document `#anchor` links survive
+    /// extraction: a relative link resolves to an absolute in-document URL and an
+    /// `#anchor` resolves to the same document with its fragment preserved (#146
+    /// AC2: relative links survive).
+    #[test]
+    fn test_relative_and_intra_document_links_survive() {
+        let html = r##"<!DOCTYPE html>
+<body>
+  <main>
+    <h1 id="top">Page</h1>
+    <p>Read the <a href="chapters/commands.html">command reference</a> or jump to <a href="#top">the top</a>.</p>
+  </main>
+</body>
+</html>"##;
+        let r = convert_article(html, &base()).expect("relative/anchor links must not fail");
+        let body = &r.body;
+        // A relative link resolves against the document origin.
+        assert!(
+            body.contains(
+                "[command reference](https://doc.rust-lang.org/cargo/chapters/commands.html)"
+            ),
+            "a relative link must resolve to an absolute URL:\n{body}"
+        );
+        // An intra-document anchor resolves to the same document with the fragment.
+        assert!(
+            body.contains("](https://doc.rust-lang.org/cargo/#top)"),
+            "an intra-document anchor must be preserved:\n{body}"
+        );
     }
 
     /// `heading_path` contains heading texts in document order.

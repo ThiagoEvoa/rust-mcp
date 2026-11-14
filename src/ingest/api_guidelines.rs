@@ -1282,4 +1282,80 @@ mod tests {
             "only explanation_sections is populated, pointing at the code's section"
         );
     }
+
+    // -- Issue #146: an external citation on an API Guidelines page is preserved
+    //    rather than aborting extraction. The recorded `about` page links to the
+    //    upstream `github.com` CONTRIBUTING.md — a host the fetch gate refuses —
+    //    so before the fix the whole sync failed at this page. The citation
+    //    serializer preserves it instead. --
+
+    /// The exact reported bug shape (AC1): an API Guidelines page whose body
+    /// links to the upstream `github.com` CONTRIBUTING file. Before #146 this
+    /// aborted the run with an unresolvable-link error naming `github.com`; now
+    /// the citation is preserved, extraction succeeds, and a relative link on the
+    /// same page also survives.
+    #[tokio::test]
+    async fn an_external_contributing_citation_is_preserved_not_refused() {
+        let about_html = r##"<!DOCTYPE html>
+<html><body>
+  <nav id="sidebar"><ol class="chapter"><li><a href="checklist.html">Checklist</a></li></ol></nav>
+  <main id="main-content">
+    <h1 id="about">About the API Guidelines</h1>
+    <p>To contribute, read the <a href="https://github.com/rust-lang/api-guidelines/blob/master/CONTRIBUTING.md">CONTRIBUTING guide</a> in the upstream repository.</p>
+    <p>See the <a href="naming.html">naming conventions</a> for the details.</p>
+  </main>
+</body></html>"##;
+        let server = FixtureServer::start(vec![(
+            "/api-guidelines/about.html".to_string(),
+            Behavior::Text {
+                body: about_html.as_bytes().to_vec(),
+                etag: Some("\"about-1\"".to_string()),
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+            },
+        )]);
+        let client = loopback_client().expect("loopback client builds");
+        let base_url = Url::parse(&format!("http://{}/api-guidelines/about.html", server.addr))
+            .expect("a valid loopback about-page URL");
+
+        let fetched = client
+            .fetch(&base_url)
+            .await
+            .expect("the about page fetches offline");
+
+        // Before #146 this extraction failed naming github.com; now it succeeds.
+        let sections =
+            ingest_chapter(&fetched).expect("an external citation must not fail extraction");
+
+        // AC1: the page extracts successfully and retains its citation.
+        let joined: String = sections
+            .iter()
+            .map(|s| s.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains(
+                "https://github.com/rust-lang/api-guidelines/blob/master/CONTRIBUTING.md"
+            ),
+            "the external CONTRIBUTING citation must be retained:\n{joined}"
+        );
+        assert!(
+            joined.contains("CONTRIBUTING guide"),
+            "the citation's link text must be retained:\n{joined}"
+        );
+        // A relative content link on the same page resolves and survives too.
+        let expected_relative = format!("http://{}/api-guidelines/naming.html", server.addr);
+        assert!(
+            joined.contains(&expected_relative),
+            "a relative link must resolve and survive:\n{joined}"
+        );
+
+        // AC2: the fixture server received only the document page — the external
+        // `github.com` citation was serialized, never fetched.
+        assert_eq!(
+            server.request_count(),
+            1,
+            "no external target may be requested; only the about page was fetched"
+        );
+    }
 }

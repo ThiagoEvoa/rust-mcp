@@ -926,4 +926,143 @@ mod tests {
         let other = new_snapshot_id("test/2", &created_at);
         assert_ne!(id, other);
     }
+
+    // -- Issue #146: the pipeline *proceeds past* an API Guidelines page that
+    //    carries an external citation, and requests no external target. --
+
+    /// AC2/AC5 (hermetic): the pipeline proceeds past an API Guidelines page that
+    /// carries an external `github.com` citation. Before #146 the run aborted at
+    /// this page (the citation was treated as an unauthorized fetch and the whole
+    /// sync failed with no manifest). Now the citation is serialized, the run
+    /// publishes a snapshot that retains it, and the fixture server received only
+    /// the document page — proving no external target was requested.
+    #[tokio::test]
+    async fn the_pipeline_proceeds_past_an_external_citation_and_requests_no_external_target() {
+        let about_html = r##"<!DOCTYPE html>
+<html><body>
+  <nav id="sidebar"><ol class="chapter"><li><a href="checklist.html">Checklist</a></li></ol></nav>
+  <main id="main-content">
+    <h1 id="about">About the API Guidelines</h1>
+    <p>To contribute, read the <a href="https://github.com/rust-lang/api-guidelines/blob/master/CONTRIBUTING.md">CONTRIBUTING guide</a> upstream.</p>
+  </main>
+</body></html>"##;
+        let server = FixtureServer::start(vec![(
+            "/api-guidelines/about.html".to_string(),
+            Behavior::Text {
+                body: about_html.as_bytes().to_vec(),
+                etag: Some("\"about-1\"".to_string()),
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+            },
+        )]);
+        let client = loopback_client().expect("the loopback client builds");
+        let data_dir = temp_data_dir();
+        let about_url =
+            reqwest::Url::parse(&format!("http://{}/api-guidelines/about.html", server.addr))
+                .expect("a valid loopback about-page URL");
+
+        let mut direct: BTreeMap<String, Vec<reqwest::Url>> = BTreeMap::new();
+        direct.insert("api-guidelines".to_string(), vec![about_url]);
+        let config = SyncConfig {
+            parser_version: "test/146".to_string(),
+            sources: vec![SourceId::new("api-guidelines").expect("a registry id is URI-safe")],
+            direct: Some(direct),
+        };
+
+        // AC5: the run proceeds past the page and publishes a new snapshot.
+        let report = sync(&config, &data_dir, &client)
+            .await
+            .expect("a citation must not abort the sync");
+        assert!(
+            !report.snapshot.as_str().is_empty(),
+            "a snapshot must be published"
+        );
+        let api = report
+            .sources
+            .iter()
+            .find(|s| s.id == "api-guidelines")
+            .expect("the api-guidelines result is present");
+        assert_eq!(api.documents, 1, "the one about page was fetched");
+        assert!(
+            api.sections >= 1,
+            "the about page yielded at least one section"
+        );
+
+        // AC2: the fixture server received ONLY the document page — the external
+        // `github.com` citation was serialized, never fetched.
+        assert_eq!(
+            server.request_count(),
+            1,
+            "no external target may be requested; only the about page was fetched"
+        );
+
+        // The published snapshot actually carries the citation.
+        let loaded = crate::corpus::load_published_snapshot(&data_dir)
+            .expect("the snapshot is published and loadable");
+        let bodies: String = loaded
+            .body
+            .sections
+            .iter()
+            .map(|s| s.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            bodies.contains(
+                "https://github.com/rust-lang/api-guidelines/blob/master/CONTRIBUTING.md"
+            ),
+            "the published snapshot must retain the external citation"
+        );
+    }
+
+    /// AC5 (opt-in, live): the production sync proceeds past the API Guidelines
+    /// `about` page that carries the `github.com` CONTRIBUTING citation. This is
+    /// the real-network verification of the fix and the explicit acceptance
+    /// check "the sync proceeds past this page." It is `#[ignore]`d and gated on
+    /// the `RUST_DOCS_MCP_LIVE_SYNC` environment variable so the hermetic suite
+    /// never touches the network. Opt in with:
+    ///
+    /// ```sh
+    /// RUST_DOCS_MCP_LIVE_SYNC=1 cargo test -- --ignored \
+    ///   the_pipeline_proceeds_live_past_the_contributing_citation
+    /// ```
+    #[tokio::test]
+    #[ignore = "opt-in live sync — run with `RUST_DOCS_MCP_LIVE_SYNC=1 cargo test -- --ignored`; see docs/CI.md"]
+    async fn the_pipeline_proceeds_live_past_the_contributing_citation() {
+        // The env-var guard keeps the live path out of the hermetic suite; a bare
+        // `--ignored` run is a fast no-op unless the operator explicitly opts in.
+        if std::env::var_os("RUST_DOCS_MCP_LIVE_SYNC").is_none() {
+            eprintln!(
+                "[live-sync] RUST_DOCS_MCP_LIVE_SYNC is unset — skipping the live sync \
+                 (fast no-op). Run with `RUST_DOCS_MCP_LIVE_SYNC=1 cargo test -- --ignored`."
+            );
+            return;
+        }
+
+        let client = super::production_client().expect("the production client builds");
+        let data_dir = temp_data_dir();
+        // A focused live sync over just the real api-guidelines collection must
+        // now proceed past the about page (which carries the github.com citation)
+        // rather than aborting on it — the original reported failure mode.
+        let config = SyncConfig {
+            parser_version: "test/live-146".to_string(),
+            sources: vec![SourceId::new("api-guidelines").expect("a registry id is URI-safe")],
+            direct: None,
+        };
+        let report = sync(&config, &data_dir, &client)
+            .await
+            .expect("the live sync proceeds past the external citation");
+        assert!(
+            !report.snapshot.as_str().is_empty(),
+            "a snapshot must be published"
+        );
+        let api = report
+            .sources
+            .iter()
+            .find(|s| s.id == "api-guidelines")
+            .expect("the api-guidelines result is present");
+        assert!(
+            api.documents > 0,
+            "the api-guidelines collection must yield at least one document"
+        );
+    }
 }
