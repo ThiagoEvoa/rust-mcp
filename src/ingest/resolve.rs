@@ -32,11 +32,12 @@
 //!
 //! ## No network, no panics
 //!
-//! [`resolve_document`] performs no fetch: it only *resolves a reference into a
-//! normalized, gated identity* (the thing a subsequent fetch would download).
-//! Every failure mode is a typed [`ResolveError`] that names the offending
-//! reference and the registry's reason — the "no avoidable panic on external
-//! input" posture of task `[004]`, applied to links.
+//! Neither resolver performs a fetch: [`resolve_document`] only *resolves a
+//! reference into a normalized, gated identity* (the thing a subsequent fetch
+//! would download), and [`resolve_citation`] only *serializes* a content link
+//! (never following it). Every failure mode is a typed [`ResolveError`] that
+//! names the offending reference and the registry's reason — the "no avoidable
+//! panic on external input" posture of task `[004]`, applied to links.
 //!
 //! ## Relationship to the fetcher's per-hop redirect gate
 //!
@@ -236,6 +237,106 @@ pub fn resolve_document(reference: &str, base: &Url) -> Result<ResolvedDocument,
         anchor,
         entry,
     })
+}
+
+/// The outcome of resolving a content hyperlink for **citation**, in contrast to
+/// [`resolve_document`], which resolves a reference for **fetching**.
+///
+/// A content hyperlink is a link the *reader* may follow to an external resource
+/// (a citation). A document reference, by contrast, is a link the *crawler* may
+/// fetch as the next page in the corpus. The two must use different rules:
+/// the crawler stays inside the approved-source boundaries ([`resolve_document`]
+/// re-gates through the registry), while a citation is only ever *serialized
+/// back* into the rendered Markdown and is **never fetched**. Conflating the two
+/// is the bug this type separates: an external citation (e.g. a `github.com`
+/// `CONTRIBUTING.md` link on an API Guidelines page) must survive extraction
+/// even though its host is not an approved source, because *preserving* a link
+/// does not require *following* it.
+///
+/// The result is decided by the resolved URL's scheme, with no network access:
+///
+/// - [`Citation::Link`] — a safe `http`/`https` URL (an external citation, a
+///   relative link resolved against the source document, or an intra-document
+///   `#anchor` link) to render as `[text](url)`.
+/// - [`Citation::Drop`] — an empty reference or a non-`http(s)` scheme
+///   (`javascript:`, `data:`, `file:`, `mailto:`, `gopher:`, …): the link's
+///   visible text is kept but its URL is dropped, and the target is **never
+///   fetched**.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Citation {
+    /// A safe `http`/`https` citation to render as `[text](url)`.
+    Link(Url),
+    /// An empty reference or a non-`http(s)` scheme: keep the visible text, drop
+    /// the URL, and fetch nothing.
+    Drop,
+}
+
+/// Resolve a content **citation** (a hyperlink in a page's rendered body) for
+/// *serialization*, not for fetching — the sibling of [`resolve_document`]
+/// that the HTML converter uses for `<a href>` links.
+///
+/// It deliberately does **not** re-gate through the source registry: the
+/// registry is the *fetch* boundary ([`resolve_document`],
+/// [`crate::ingest::books::build_inventory`], and
+/// [`crate::ingest::fetch::RegistryGate`] are the gate), and a citation to an
+/// external host must survive even though that host is not an approved source.
+/// Broadening the registry here would widen the network surface, which is
+/// explicitly out of scope.
+///
+/// The reference is resolved in two steps that mirror [`resolve_document`] up to
+/// the gate, then diverge at the gate:
+///
+/// 1. **Resolve** the reference against the source document's `base` URL with
+///    [`Url::join`] (RFC 3986), exactly as the fetch gate does, so a relative
+///    link (`naming.html`, `../intro.html`) and an intra-document `#anchor`
+///    resolve to a concrete `http`/`https` URL on the source document's origin.
+/// 2. **Classify** the resolved URL by scheme *without* consulting the registry:
+///    - `http`/`https` → [`Citation::Link`], the resolved URL preserved as a
+///      citation (this includes an external host such as `github.com` that is
+///      not a registered source — precisely the citation the fetch gate would
+///      refuse);
+///    - any other scheme, or a reference that cannot be joined at all, or an
+///      empty reference → [`Citation::Drop`]: the link's text is retained but
+///      its URL is not serialized, and the target is never fetched.
+///
+/// No network is performed: this is a serializer, so it cannot (and must not)
+/// fetch an external target. It never panics on malformed or hostile input —
+/// an unjoinable or empty reference is dropped rather than surfaced as an error,
+/// so a single hostile link can never abort extraction.
+///
+/// # Intra-document links
+///
+/// An `#anchor` reference resolves (via [`Url::join`]) to the source document's
+/// own URL with the new fragment, which is `http`/`https`, so it is preserved as
+/// a [`Citation::Link`] to the same document — safe to render and never fetched.
+pub fn resolve_citation(reference: &str, base: &Url) -> Citation {
+    // Skip empty and whitespace-only references, exactly as the fetch gate does
+    // for a link with no target: there is no citation to preserve, so drop it
+    // rather than fetch (or even attempt to join) a non-existent target.
+    if reference.trim().is_empty() {
+        return Citation::Drop;
+    }
+
+    // Step 1 — resolve the reference against the source document, the same way
+    // the fetch gate does (`resolve_document` step 1). A relative ref and an
+    // intra-document `#anchor` resolve to a concrete URL on the base's origin; an
+    // already-absolute URL is taken as-is. A reference that does not join is
+    // dropped rather than fetched or surfaced as an extraction error.
+    let joined = match base.join(reference) {
+        Ok(url) => url,
+        Err(_err) => return Citation::Drop,
+    };
+
+    // Step 2 — classify by scheme, WITHOUT re-gating through the registry. Only
+    // the web schemes are safe to preserve as citations; every other scheme
+    // (`javascript:`, `data:`, `file:`, `mailto:`, `gopher:`, …) is a dangerous
+    // or non-web scheme that is dropped. The URL is never fetched: this is a
+    // serializer, not the crawler, so a foreign host is preserved, not refused.
+    if matches!(joined.scheme(), "http" | "https") {
+        Citation::Link(joined)
+    } else {
+        Citation::Drop
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -570,5 +671,154 @@ mod tests {
         let base = cargo_base();
         assert!(resolve_document("../build/building.html", &base).is_ok());
         assert!(resolve_document("../build/building.html#anything", &base).is_ok());
+    }
+
+    // -- resolve_citation: the citation/serialization path (issue #146) --
+    //
+    // The bug: the converter routed content hyperlinks through `resolve_document`
+    // (the *fetch* gate), so an external citation whose host is not a registered
+    // source aborted the whole sync. `resolve_citation` separates *preserving a
+    // link* from *fetching a link*: it keeps any safe `http`/`https` citation
+    // (external, standard-library, or relative-resolved), preserves intra-document
+    // `#anchor` links, and drops dangerous schemes — never fetching a target.
+
+    #[test]
+    fn an_external_citation_is_preserved_not_refused_by_the_registry() {
+        // The exact shape of the reported bug: an API Guidelines page that links
+        // to a `github.com` CONTRIBUTING file. The *fetch* gate refuses the
+        // foreign host, but the *citation* path must preserve it — preserving a
+        // link does not require following it.
+        let base = Url::parse("https://rust-lang.github.io/api-guidelines/about.html")
+            .expect("a valid api-guidelines base");
+        let contributing =
+            "https://github.com/rust-lang/api-guidelines/blob/master/CONTRIBUTING.md";
+
+        // The two paths diverge on the same reference: the fetch gate refuses it,
+        // the citation serializer preserves it. This is the separation #146 asks
+        // for.
+        let fetch_err = resolve_document(contributing, &base).unwrap_err();
+        assert!(
+            matches!(fetch_err, ResolveError::OutOfBoundary { .. }),
+            "the fetch gate must still refuse the foreign host, got {fetch_err:?}"
+        );
+        match resolve_citation(contributing, &base) {
+            Citation::Link(url) => {
+                assert_eq!(
+                    url.as_str(),
+                    contributing,
+                    "the external citation must be preserved verbatim"
+                );
+            }
+            other => panic!("the external citation must be preserved as a Link, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn standard_library_citation_is_preserved() {
+        // A `doc.rust-lang.org/std/` link on a rustc page is a safe external
+        // citation that must survive extraction.
+        let base = Url::parse("https://doc.rust-lang.org/rustc/1.70.0/index.html")
+            .expect("a valid rustc base");
+        let std_link = "https://doc.rust-lang.org/std/primitive.str.html";
+        match resolve_citation(std_link, &base) {
+            Citation::Link(url) => assert_eq!(url.as_str(), std_link),
+            other => panic!("a std citation must be preserved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_relative_reference_resolves_against_the_document_as_a_citation() {
+        // A relative content link resolves against the source document and is
+        // preserved as an absolute citation.
+        let base = cargo_base();
+        match resolve_citation("../concepts/dependencies.html", &base) {
+            Citation::Link(url) => {
+                assert_eq!(
+                    url.as_str(),
+                    "https://doc.rust-lang.org/cargo/concepts/dependencies.html"
+                );
+            }
+            other => panic!("a relative citation must resolve and be preserved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_intra_document_anchor_is_preserved_as_a_link() {
+        // An `#anchor` reference resolves to the source document with the new
+        // fragment and is preserved (safe to render, never fetched).
+        let base = cargo_base();
+        match resolve_citation("#creating-a-project", &base) {
+            Citation::Link(url) => assert_eq!(
+                url.as_str(),
+                "https://doc.rust-lang.org/cargo/getting-started/creating-a-project.html#creating-a-project"
+            ),
+            other => panic!("an intra-document anchor must be preserved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_relative_escape_off_the_boundary_is_still_preserved_as_a_citation() {
+        // A relative link that climbs off the `/cargo/` boundary (but stays on a
+        // registered host) is still a valid *citation* the reader may follow. The
+        // fetch gate refuses it (off-boundary), but the citation path preserves
+        // it — the separation that keeps off-boundary links out of the crawler
+        // while keeping them in the reader's document.
+        let base = cargo_base();
+        let reference = "../../book/ch01-00/hello.html";
+        let fetch_err = resolve_document(reference, &base).unwrap_err();
+        assert!(
+            matches!(fetch_err, ResolveError::OutOfBoundary { .. }),
+            "the fetch gate must refuse the off-boundary target, got {fetch_err:?}"
+        );
+        match resolve_citation(reference, &base) {
+            Citation::Link(url) => assert_eq!(
+                url.as_str(),
+                "https://doc.rust-lang.org/book/ch01-00/hello.html"
+            ),
+            other => panic!("an off-boundary citation must be preserved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dangerous_schemes_are_dropped_without_fetching() {
+        // A non-`http(s)` scheme is dropped (text kept, URL not serialized, target
+        // never fetched) rather than surfaced as an extraction error. This is the
+        // explicit safe-handling policy for hostile links (#146 AC3).
+        let base = cargo_base();
+        for scheme_url in [
+            "javascript:alert(document.domain)",
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "gopher://evil.example.com:70/",
+            "mailto:someone@example.com",
+            "tel:+15555550123",
+        ] {
+            assert_eq!(
+                resolve_citation(scheme_url, &base),
+                Citation::Drop,
+                "{scheme_url} must be dropped (not preserved, not fetched)"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_or_whitespace_reference_is_dropped() {
+        // An `href=""` or whitespace-only `href` has no target to preserve or
+        // fetch, so it is dropped rather than joined.
+        let base = cargo_base();
+        assert_eq!(resolve_citation("", &base), Citation::Drop);
+        assert_eq!(resolve_citation("   ", &base), Citation::Drop);
+    }
+
+    #[test]
+    fn resolve_citation_is_offline_and_never_panics_on_hostile_input() {
+        // A hostile or malformed reference is dropped, never panicking — the
+        // "no avoidable panic on external input" posture applied to citations.
+        let base = cargo_base();
+        for hostile in ["///no-host/x", "http://[::1]/", "", "  "] {
+            // A single hostile link must not abort extraction; the call returns a
+            // decision, not an error, and never panics.
+            let _ = resolve_citation(hostile, &base);
+        }
     }
 }

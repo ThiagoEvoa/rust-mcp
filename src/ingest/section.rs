@@ -21,8 +21,10 @@
 //!   with a deterministic [`Continuation`] `{ part, parts }` so its id differs
 //!   and the split is explicit — never a silent clip.
 //!
-//! No panics on malformed or hostile input: a refused link or an empty article
-//! surface as a typed [`SplitError`].
+//! No panics on malformed or hostile input: an empty article surfaces as a typed
+//! [`SplitError`]. Content links are citations the reader may follow, not fetch
+//! targets, so a link is never a failure (it is preserved or dropped by
+//! `resolve_citation`, never refused — #146).
 
 #![allow(dead_code)] // transitional: first consumer is the [015]/[016] ingestion orchestration
 
@@ -63,9 +65,10 @@ impl Default for SplitConfig {
 /// A typed, non-panicking failure from splitting an article into sections.
 #[derive(Debug)]
 pub enum SplitError {
-    /// The article could not be converted to Markdown — a link the registry
-    /// refused, or an article with no content after chrome stripping — preserved
-    /// from the `[013]` converter.
+    /// The article could not be converted to Markdown — an article with no
+    /// content after chrome stripping — preserved from the `[013]` converter.
+    /// A content link is never a failure: it is a citation, serialized (or
+    /// dropped, for a dangerous scheme) by `resolve_citation`, not fetched.
     Extraction(ExtractionError),
     /// A section's identity could not be derived (e.g. an empty chapter path or
     /// an invalid continuation), preserved from the schema layer.
@@ -107,9 +110,11 @@ impl std::error::Error for SplitError {
 ///
 /// # Errors
 ///
-/// Returns [`SplitError::Extraction`] when the article cannot be converted
-/// (refused link / empty article) and [`SplitError::Schema`] when a section's
-/// identity cannot be derived. Never panics on external input.
+/// Returns [`SplitError::Extraction`] when the article yields no content after
+/// chrome stripping and [`SplitError::Schema`] when a section's identity cannot
+/// be derived. A content link is never a failure (it is a citation, serialized
+/// by `resolve_citation`), so a page is only un-extractable when it has no
+/// content. Never panics on external input.
 ///
 /// This is the HTML *entry*: it converts the page to heading-delimited
 /// [`ArticleSection`]s ([`split_article_sections`]) and then hands them to the
@@ -333,14 +338,13 @@ fn part_body(heading: &Option<String>, segments: &[String]) -> String {
 // ---------------------------------------------------------------------------
 // Offline tests — plan.md §11 / task [014]
 //
-// All fixtures are static HTML: the splitter is pure (link resolution is
-// registry-gated, not a network fetch), so no server or fixture server is
-// needed.
+// All fixtures are static HTML: the splitter is pure (content links are
+// serialized as citations, not fetched — #146), so no server or fixture server
+// is needed.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_MAX_SECTION_BYTES, SplitConfig, SplitError, split_article};
-    use crate::ingest::html::ExtractionError;
     use crate::model::{SectionId, SourceId};
     use reqwest::Url;
 
@@ -599,34 +603,43 @@ let epsilon = 5;
         );
     }
 
-    /// A content link the registry refuses surfaces as a typed extraction error
-    /// naming the offending link.
+    /// A content link the fetch gate would refuse (a foreign host — the exact
+    /// reported bug, a `github.com` CONTRIBUTING link) is *preserved* as a
+    /// citation: splitting succeeds and the section body retains the link, rather
+    /// than the link aborting the whole run. This is the #146 behavior at the
+    /// splitting seam.
     #[test]
-    fn unresolvable_link_surfaces_as_extraction_error() {
+    fn an_external_citation_is_preserved_through_splitting() {
         let html = r#"<!DOCTYPE html><html><body>
           <div id="main-content">
-            <h1 id="p">Page</h1>
-            <p>See <a href="https://evil.example.com/x">the off-source link</a>.</p>
+            <h1 id="p">Contributing</h1>
+            <p>See <a href="https://github.com/rust-lang/api-guidelines/blob/master/CONTRIBUTING.md">the upstream CONTRIBUTING file</a> for the full process.</p>
           </div>
         </body></html>"#;
         let source = SourceId::new("cargo").unwrap();
-        let r = split_article(
+        let sections = split_article(
             html,
             &cargo_base("guide.html"),
             &source,
             "guide",
             "Guide",
             &SplitConfig::default(),
+        )
+        .expect("an external citation must not fail splitting");
+
+        // The citation is preserved in a section body — it is a citation the
+        // reader may follow, not a fetch target, so it is not refused.
+        let joined: String = sections
+            .iter()
+            .map(|s| s.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains(
+                "https://github.com/rust-lang/api-guidelines/blob/master/CONTRIBUTING.md"
+            ),
+            "the external citation must be retained through splitting:\n{joined}"
         );
-        match r {
-            Err(SplitError::Extraction(ExtractionError::UnresolvableLink { link, .. })) => {
-                assert!(
-                    link.contains("evil.example.com"),
-                    "offending link must be named: {link}"
-                );
-            }
-            other => panic!("expected UnresolvableLink, got {other:?}"),
-        }
     }
 
     /// An empty chapter path cannot derive a section id and is a typed schema
