@@ -67,6 +67,80 @@ pub const SOURCE: &str = "rustfmt";
 /// section's `doc_title` provenance.
 pub const DOC_TITLE: &str = "rustfmt reference";
 
+// ---------------------------------------------------------------------------
+// Approved, commit-pinned source discovery (issue #147)
+//
+// rustfmt's human-facing registry entry points at
+// `https://github.com/rust-lang/rustfmt#readme`, but the rendered
+// `rust-lang.github.io/rustfmt/` site requires JavaScript (an "empty HTML
+// shell is not a successful ingestion") and `github.com` is refused by the
+// fetch boundary by design. The generic book discovery
+// ([`crate::ingest::books::discover_inventory`]) therefore fails for rustfmt:
+// it fetches a generated navigation page the registry will not serve. Instead,
+// rustfmt is discovered from its two approved, commit-pinned
+// `raw.githubusercontent.com` Markdown documents — `README.md` and
+// `Configurations.md` — and fed to the [`ingest_markdown`] adapter unchanged.
+//
+// The revision is a bounded, explicit, operator-refreshable constant
+// ([`APPROVED_REVISION`]), not a live HEAD lookup, so an all-sources sync is
+// reproducible and never fetches a moving upstream head. The discovery selects
+// exactly these two files at that revision and nothing else: no navigation page,
+// no link extraction, and no broadening of the network boundary.
+//
+// `#[allow(dead_code)]` on the items below is inherited from the module's
+// `#![allow(dead_code)]` (they are the `[022]` ingestion API, first wired by the
+// sync pipeline's rustfmt branch); the pipeline consumes [`approved_documents`]
+// and its tests exercise it directly.
+
+/// The approved upstream commit that pins the rustfmt Markdown sources.
+///
+/// This is the single, bounded, explicit revision the two [`approved_documents`]
+/// are fetched from — `README.md` and `Configurations.md` under
+/// `raw.githubusercontent.com/rust-lang/rustfmt/{revision}/`. It is a
+/// documented constant the operator refreshes to an approved rustfmt commit SHA
+/// and re-syncs; the opt-in live sync verifies it resolves. A 40-character
+/// lowercase-hex SHA. Refreshing it is the only way to move the pinned revision
+/// (there is no live lookup), keeping the all-sources sync reproducible.
+///
+/// The value is a *real, resolvable* `rust-lang/rustfmt` commit (`main`),
+/// verified to carry both `README.md` and `Configurations.md` at the raw URL
+/// (`HTTP 200`) — not a placeholder — so the opt-in live sync (AC5) actually
+/// demonstrates both files in the published inventory. It is the current
+/// `rust-lang/rustfmt` `main` head as of the task; an operator refreshes it by
+/// replacing this constant with a later approved SHA. Guarded by
+/// [`the_approved_revision_is_a_40_char_lowercase_hex_sha`].
+pub const APPROVED_REVISION: &str = "702df60b87e5047276b0d4c36c989e8095555e00";
+
+/// The two approved rustfmt source file names, in fetch order: the repository's
+/// `README.md` (the "Configuration" / options reference) first, then
+/// `Configurations.md` (the configuration-options reference). These are exactly
+/// the files the registry's rustfmt boundary
+/// ([`crate::registry::SourceCollection::Rustfmt`]) permits.
+const APPROVED_FILES: [&str; 2] = ["README.md", "Configurations.md"];
+
+/// The two approved, commit-pinned `raw.githubusercontent.com` Markdown document
+/// URLs rustfmt is discovered from: the upstream repository's `README.md` and
+/// `Configurations.md` at [`APPROVED_REVISION`], in that order.
+///
+/// Both URLs fall inside the registry's rustfmt boundary
+/// (`raw.githubusercontent.com` host, `rust-lang/rustfmt/` path prefix, the two
+/// approved file names), so each passes `crate::registry::resolve_url` — the
+/// fetch layer's single boundary seam. This is the discovery surface that
+/// replaces the generic book discovery for rustfmt: it never fetches a
+/// generated navigation page and never broadens the network boundary.
+pub fn approved_documents() -> Vec<Url> {
+    APPROVED_FILES
+        .iter()
+        .map(|file| {
+            let path = format!(
+                "https://raw.githubusercontent.com/rust-lang/rustfmt/{revision}/{file}",
+                revision = APPROVED_REVISION,
+            );
+            Url::parse(&path).expect("the approved rustfmt raw URLs are well-formed http(s) URLs")
+        })
+        .collect()
+}
+
 /// A typed, non-panicking failure from ingesting a rustfmt Markdown source.
 ///
 /// The two failure modes the acceptance criteria hinge on are both preserved
@@ -688,5 +762,172 @@ A section whose heading text slugs to nothing.
             "a bare `# ` heading must have no anchor: {:?}",
             bare_section.anchor
         );
+    }
+
+    // -- Issue #147: approved, commit-pinned source discovery. --
+
+    /// AC1/AC2: the discovery selects exactly the two approved raw Markdown files
+    /// at the pinned revision and nothing else — no navigation page, no link
+    /// extraction. The order and the file names are fixed and deterministic.
+    #[test]
+    fn approved_documents_are_two_raw_files_at_the_pinned_revision() {
+        let docs = approved_documents();
+        assert_eq!(docs.len(), 2, "exactly the two approved files");
+        let expected_readme = format!(
+            "https://raw.githubusercontent.com/rust-lang/rustfmt/{revision}/README.md",
+            revision = APPROVED_REVISION,
+        );
+        let expected_configs = format!(
+            "https://raw.githubusercontent.com/rust-lang/rustfmt/{revision}/Configurations.md",
+            revision = APPROVED_REVISION,
+        );
+        assert_eq!(docs[0], expected_readme.parse::<Url>().unwrap());
+        assert_eq!(docs[1], expected_configs.parse::<Url>().unwrap());
+
+        // The host is the approved raw host, not the human-facing `github.com`
+        // entry the generic book discovery would try to fetch.
+        assert_eq!(docs[0].host_str(), Some("raw.githubusercontent.com"));
+        assert_eq!(docs[1].host_str(), Some("raw.githubusercontent.com"));
+        // The path routes through the approved repo prefix at the pinned revision.
+        assert!(docs[0].as_str().contains("/rust-lang/rustfmt/"));
+        assert!(docs[1].as_str().contains("/rust-lang/rustfmt/"));
+        assert!(docs[0].as_str().contains(APPROVED_REVISION));
+        assert!(docs[1].as_str().contains(APPROVED_REVISION));
+    }
+
+    /// AC1/AC3: each approved document passes the registry boundary — the fetch
+    /// layer's single seam — and resolves to the rustfmt collection. This is the
+    /// hermetic proof the discovery stays inside the approved commit/file boundary
+    /// (it never broadens the network) without any live fetch.
+    #[test]
+    fn approved_documents_pass_the_registry_boundary() {
+        use crate::registry::{SourceCollection, resolve_url};
+        for url in approved_documents() {
+            let resolved = resolve_url(url.as_str())
+                .expect("each approved rustfmt document passes the registry boundary");
+            assert_eq!(resolved.collection, SourceCollection::Rustfmt);
+            assert_eq!(resolved.boundary.host, "raw.githubusercontent.com");
+        }
+    }
+
+    /// AC1/AC4: each approved document is ingested through the rustfmt Markdown
+    /// adapter (not the HTML book adapter), and the configuration content survives
+    /// as sections rather than being swallowed into prose.
+    #[test]
+    fn approved_documents_route_to_the_markdown_adapter_and_emit_sections() {
+        let docs = approved_documents();
+        // `README.md` carries a configuration section; `Configurations.md`
+        // carries the option reference (reusing the module's representative body).
+        let readme_body = "\
+# rustfmt
+
+rustfmt is a tool for formatting Rust code.
+
+## Configuration
+
+rustfmt reads its options from a `rustfmt.toml` file. See the configuration
+reference for the full list of options.
+";
+        let sections_readme =
+            ingest_markdown(&fetched(readme_body, &docs[0])).expect("README.md ingests");
+        let sections_configs =
+            ingest_markdown(&fetched(CONFIG_MD, &docs[1])).expect("Configurations.md ingests");
+
+        // Both files yielded sections; neither was swallowed into prose or
+        // rejected as an empty shell.
+        assert!(!sections_readme.is_empty(), "README.md emitted sections");
+        assert!(
+            !sections_configs.is_empty(),
+            "Configurations.md emitted sections"
+        );
+
+        // AC4: a `## Configuration` heading survives as its own section, with the
+        // surrounding explanation preserved in its body (not swallowed into prose
+        // or dropped).
+        let configuration = sections_readme
+            .iter()
+            .find(|s| s.heading_path.iter().any(|h| h == "Configuration"))
+            .expect("the `## Configuration` section survives as a section");
+        assert!(
+            configuration.body.contains("rustfmt.toml"),
+            "the configuration section keeps its explanation: {:?}",
+            configuration.body
+        );
+        // The configuration options survive as sections in the reference file too.
+        assert!(
+            sections_configs
+                .iter()
+                .any(|s| s.anchor.as_deref() == Some("edition")),
+            "the `edition` option survives as a section"
+        );
+    }
+
+    /// AC2 (deterministic mismatch regression): the *human-facing* registry entry
+    /// that the generic book discovery would try to fetch —
+    /// `github.com/rustfmt#readme` — is refused by the registry boundary, while
+    /// the two *approved raw* documents pass it. This makes the exact defect #147
+    /// reports ("host `github.com` is not a registered source host") a
+    /// deterministic, regression-proof assertion: a future edit that routes
+    /// rustfmt back through the human entry (or the JS-only rendered site) would
+    /// make this fail, even though the old behavior aborted the whole sync.
+    #[test]
+    fn the_human_entry_is_refused_but_the_approved_raw_documents_pass() {
+        use crate::registry::{RegistryError, SourceCollection, resolve_url};
+
+        // The human-facing entry the generic book discovery would fetch — it is
+        // rustfmt's `entry_url`, the source of the original failure.
+        let entry = SourceCollection::Rustfmt.entry_url();
+        assert_eq!(entry, "https://github.com/rust-lang/rustfmt#readme");
+        // It is refused: `github.com` is not a registered source host — the
+        // exact error the issue's audit probe observed, before any network.
+        match resolve_url(entry) {
+            Err(RegistryError::UnregisteredHost { host }) => {
+                assert_eq!(host, "github.com", "the human entry's host is refused")
+            }
+            other => panic!("the human entry must be refused by the boundary, got {other:?}"),
+        }
+
+        // The two approved raw documents are the ones that DO pass, and the
+        // human entry is not among them: discovery selects the approved raw
+        // files, never the rendered/JS site or the `github.com` README.
+        let approved = approved_documents();
+        for url in &approved {
+            resolve_url(url.as_str())
+                .expect("each approved raw document passes the registry boundary");
+            assert_ne!(
+                url.as_str(),
+                entry,
+                "the approved documents must exclude the human entry"
+            );
+        }
+    }
+
+    /// The approved revision is a 40-character lowercase-hex git SHA — the shape
+    /// a real `rust-lang/rustfmt` commit has. This guards the constant against a
+    /// placeholder or a malformed edit (which would 404 in the live sync),
+    /// independently of the network. The opt-in live sync (AC5) is the proof the
+    /// SHA *resolves*; this is the proof it is *well-formed*.
+    #[test]
+    fn the_approved_revision_is_a_40_char_lowercase_hex_sha() {
+        let rev = APPROVED_REVISION;
+        assert_eq!(rev.len(), 40, "a git SHA is 40 characters: {rev}");
+        assert!(
+            rev.bytes()
+                .all(|b| (b'a'..=b'f').contains(&b) || (b'0'..=b'9').contains(&b)),
+            "a git SHA is lowercase hex: {rev}"
+        );
+        // Both approved documents are pinned under the rustfmt repository at that
+        // revision (the exact commit/file boundary the registry enforces).
+        for url in approved_documents() {
+            assert!(
+                url.as_str().contains("/rust-lang/rustfmt/"),
+                "the revision is pinned under the rustfmt repository: {}",
+                url
+            );
+            assert!(
+                url.as_str().contains(rev),
+                "the URL pins the approved revision: {url}"
+            );
+        }
     }
 }

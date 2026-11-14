@@ -89,6 +89,13 @@ pub struct SyncConfig {
     pub sources: Vec<SourceId>,
     /// Per-source document-URL overrides; `None` uses live book discovery.
     pub direct: Option<DirectSources>,
+    /// A test-only override for rustfmt's *live* discovery: when `Some`, these
+    /// document URLs are used instead of [`rustfmt::approved_documents`], so a
+    /// hermetic test can point rustfmt at a loopback fixture. `None` (the
+    /// production default) discovers rustfmt from the two approved,
+    /// commit-pinned raw documents. The override is read on every run, so it is
+    /// not dead code; production sets it to `None`.
+    pub rustfmt_urls: Option<Vec<Url>>,
 }
 
 impl SyncConfig {
@@ -102,6 +109,7 @@ impl SyncConfig {
                 .map(|c| SourceId::new(c.id()).expect("a registry id is URI-safe"))
                 .collect(),
             direct: None,
+            rustfmt_urls: None,
         }
     }
 }
@@ -248,15 +256,37 @@ pub async fn sync(
                 (urls, diff)
             }
             None => {
-                // Live discovery: fetch the source's entry page, read its
-                // navigation, and resolve the document URLs against the
-                // registry. No `expected` set is passed, so the diff is empty
-                // (the caller knows no canonical index here).
-                let base_url = reqwest::Url::parse(collection.entry_url())
-                    .map_err(|e| SyncError::Discover(DiscoveryError::Fetch(e.to_string())))?;
-                let (inventory, diff) =
-                    discover_inventory(client, &base_url, collection.id(), None).await?;
-                (inventory.urls, diff)
+                // Live discovery.
+                //
+                // rustfmt is discovered through its own adapter, not the generic
+                // book discovery (issue #147): its human-facing `github.com`
+                // entry is refused by the fetch boundary and the rendered
+                // `rust-lang.github.io/rustfmt/` site is a JavaScript shell, so
+                // `discover_inventory`'s navigation-page fetch fails for it.
+                // rustfmt's only fetchable boundary is the two approved,
+                // commit-pinned `raw.githubusercontent.com` Markdown documents
+                // (`README.md` + `Configurations.md`). A test-only override
+                // (`rustfmt_urls`) can point this at a loopback fixture;
+                // production uses the approved documents.
+                if collection == SourceCollection::Rustfmt {
+                    let urls = config
+                        .rustfmt_urls
+                        .clone()
+                        .unwrap_or_else(rustfmt::approved_documents);
+                    let previous_urls = previous_document_urls(&previous, collection.id());
+                    let diff = diff_against_previous(&urls, &previous_urls);
+                    (urls, diff)
+                } else {
+                    // Every other source: fetch the source's entry page, read its
+                    // navigation, and resolve the document URLs against the
+                    // registry. No `expected` set is passed, so the diff is empty
+                    // (the caller knows no canonical index here).
+                    let base_url = reqwest::Url::parse(collection.entry_url())
+                        .map_err(|e| SyncError::Discover(DiscoveryError::Fetch(e.to_string())))?;
+                    let (inventory, diff) =
+                        discover_inventory(client, &base_url, collection.id(), None).await?;
+                    (inventory.urls, diff)
+                }
             }
         };
 
@@ -473,9 +503,26 @@ fn build_source_record(
 
 /// The release/channel a source record carries. The registry does not yet expose
 /// per-collection release metadata, so the stable channel is recorded as the
-/// default; unknown releases are preserved through [`Release`].
-fn release_for(_collection: SourceCollection) -> Release {
-    Release::channel_only(Channel::Stable)
+/// default for the book-shaped collections; unknown releases are preserved
+/// through [`Release`]. The one exception is `rustfmt`: its documents are
+/// commit-pinned (issue #147), so its record carries the approved upstream
+/// revision ([`crate::ingest::rustfmt::APPROVED_REVISION`]) as `revision`
+/// provenance — the "record an approved revision" part of the fix — while the
+/// channel stays the transitional stable default.
+fn release_for(collection: SourceCollection) -> Release {
+    match collection {
+        // rustfmt's documents are commit-pinned, so record the approved revision
+        // as the corpus's provenance for this source. Per `plan.md` §5 a
+        // commit-pinned rustfmt document is not automatically a stable release,
+        // so the *revision* (not a toolchain version) is the meaningful
+        // provenance here; the channel keeps the transitional default.
+        SourceCollection::Rustfmt => Release {
+            channel: Channel::Stable,
+            documentation_release: None,
+            revision: Some(rustfmt::APPROVED_REVISION.to_string()),
+        },
+        _ => Release::channel_only(Channel::Stable),
+    }
 }
 
 /// Read the previously published snapshot, if any. A missing or unreadable
@@ -743,6 +790,7 @@ mod tests {
             parser_version: "test/1".to_string(),
             sources: vec![SourceId::new("style-guide").expect("a registry id is URI-safe")],
             direct: Some(direct),
+            rustfmt_urls: None,
         }
     }
 
@@ -788,6 +836,7 @@ mod tests {
             parser_version: "test/1".to_string(),
             sources: vec![SourceId::new("style-guide").expect("a registry id is URI-safe")],
             direct: Some(direct),
+            rustfmt_urls: None,
         };
 
         let report = sync(&config, &data_dir, &client)
@@ -833,6 +882,129 @@ mod tests {
             loaded.body.sources.len(),
             8,
             "the published manifest records all eight approved sources"
+        );
+    }
+
+    /// AC1/AC2 (issue #147): a live (non-`direct`) sync discovers rustfmt
+    /// through its own adapter — the two approved Markdown documents, here pointed
+    /// at a loopback fixture via the test-only `rustfmt_urls` override — and
+    /// never fetches a generic-book navigation page for it. The fixture receives
+    /// exactly the two raw documents and nothing else, proving no book discovery
+    /// ran for rustfmt.
+    #[tokio::test]
+    async fn rustfmt_live_discovery_routes_to_the_markdown_adapter_without_book_nav() {
+        // Two approved rustfmt documents served from loopback, in fetch order:
+        // `README.md` (a configuration section) then `Configurations.md` (the
+        // option reference). Each starts with a preamble and carries a `## `
+        // section with content, so every section has a non-empty body (the corpus
+        // validator rejects an empty section body) and the adapter emits sections
+        // rather than swallowing the body into prose.
+        let readme = "rustfmt is a tool for formatting Rust code.\n\n## Configuration\n\nrustfmt reads its options from a `rustfmt.toml` file.\n";
+        let configs = "The rustfmt configuration options reference.\n\n## Stable options\n\nA stable formatting option that is always available.\n";
+        let server = FixtureServer::start(vec![
+            (
+                "/rustfmt/README.md".to_string(),
+                Behavior::Text {
+                    body: readme.as_bytes().to_vec(),
+                    etag: Some("\"readme-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/markdown; charset=utf-8".to_string()),
+                },
+            ),
+            (
+                "/rustfmt/Configurations.md".to_string(),
+                Behavior::Text {
+                    body: configs.as_bytes().to_vec(),
+                    etag: Some("\"configs-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/markdown; charset=utf-8".to_string()),
+                },
+            ),
+        ]);
+        let client = loopback_client().expect("the loopback client builds");
+        let data_dir = temp_data_dir();
+
+        // Point rustfmt's live discovery at the two loopback raw documents via
+        // the test-only override (production uses `rustfmt::approved_documents`).
+        let readme_url = reqwest::Url::parse(&format!("http://{}/rustfmt/README.md", server.addr))
+            .expect("a valid loopback rustfmt README URL");
+        let configs_url =
+            reqwest::Url::parse(&format!("http://{}/rustfmt/Configurations.md", server.addr))
+                .expect("a valid loopback rustfmt Configurations URL");
+        let config = SyncConfig {
+            parser_version: "test/147".to_string(),
+            sources: vec![SourceId::new("rustfmt").expect("a registry id is URI-safe")],
+            // Live discovery (no `direct` override), but rustfmt pointed at the
+            // fixture — so the live-dispatch branch is exercised, not `direct`.
+            direct: None,
+            rustfmt_urls: Some(vec![readme_url, configs_url]),
+        };
+
+        let report = sync(&config, &data_dir, &client)
+            .await
+            .expect("the rustfmt live sync succeeds through its own adapter");
+
+        // The rustfmt result was ingested and emitted sections: the Markdown
+        // adapter (not the HTML book adapter) ran.
+        let rustfmt = report
+            .sources
+            .iter()
+            .find(|s| s.id == "rustfmt")
+            .expect("the rustfmt result is present");
+        assert_eq!(rustfmt.documents, 2, "both approved documents were fetched");
+        assert!(
+            rustfmt.sections >= 2,
+            "the Markdown adapter emitted sections, got {}",
+            rustfmt.sections
+        );
+
+        // No generic-book navigation page was fetched for rustfmt: the fixture
+        // received exactly the two raw documents and nothing else. A book
+        // discovery would have fetched a navigation page first (a third request).
+        assert_eq!(
+            server.request_count(),
+            2,
+            "only the two approved raw documents were fetched; no book navigation page"
+        );
+
+        // The published snapshot actually carries the two rustfmt sections and
+        // the two approved document URLs on the source record.
+        let loaded = crate::corpus::load_published_snapshot(&data_dir)
+            .expect("the snapshot is published and loadable");
+        let record = loaded
+            .body
+            .sources
+            .iter()
+            .find(|s| s.id.as_str() == "rustfmt")
+            .expect("the rustfmt source record is published");
+        assert_eq!(
+            record.document_urls.len(),
+            2,
+            "the record carries the two documents"
+        );
+        // The published snapshot is the full all-eight-source manifest (every
+        // approved collection is always recorded); rustfmt is the source whose
+        // routing this hermetic sync exercises.
+        assert_eq!(
+            loaded.body.sources.len(),
+            8,
+            "the published manifest records all eight approved sources"
+        );
+        // AC4 (the "record an approved revision" part): the rustfmt source record
+        // carries the approved upstream commit as its revision provenance, so the
+        // corpus records where the commit-pinned documents came from.
+        assert_eq!(
+            record.release.revision.as_deref(),
+            Some(crate::ingest::rustfmt::APPROVED_REVISION),
+            "the rustfmt record records the approved revision"
+        );
+        assert!(
+            loaded
+                .body
+                .sections
+                .iter()
+                .any(|s| s.source_id.as_str() == "rustfmt"),
+            "the published snapshot carries rustfmt sections"
         );
     }
 
@@ -967,6 +1139,7 @@ mod tests {
             parser_version: "test/146".to_string(),
             sources: vec![SourceId::new("api-guidelines").expect("a registry id is URI-safe")],
             direct: Some(direct),
+            rustfmt_urls: None,
         };
 
         // AC5: the run proceeds past the page and publishes a new snapshot.
@@ -1047,6 +1220,7 @@ mod tests {
             parser_version: "test/live-146".to_string(),
             sources: vec![SourceId::new("api-guidelines").expect("a registry id is URI-safe")],
             direct: None,
+            rustfmt_urls: None,
         };
         let report = sync(&config, &data_dir, &client)
             .await
@@ -1063,6 +1237,63 @@ mod tests {
         assert!(
             api.documents > 0,
             "the api-guidelines collection must yield at least one document"
+        );
+    }
+
+    /// AC5 (opt-in, live, issue #147): the production rustfmt discovery fetches
+    /// the two approved, commit-pinned `raw.githubusercontent.com` Markdown
+    /// documents (`README.md` + `Configurations.md`) and ingests them through the
+    /// Markdown adapter. This is the real-network verification that
+    /// `rustfmt::approved_documents()` resolves at the pinned revision through the
+    /// registry-gated client, rather than failing on the refused `github.com`
+    /// entry. It is `#[ignore]`d and gated on `RUST_DOCS_MCP_LIVE_SYNC` so the
+    /// hermetic suite never touches the network. Opt in with:
+    ///
+    /// ```sh
+    /// RUST_DOCS_MCP_LIVE_SYNC=1 cargo test -- --ignored \
+    ///   rustfmt_live_sync_ingests_the_approved_raw_documents
+    /// ```
+    #[tokio::test]
+    #[ignore = "opt-in live sync — run with `RUST_DOCS_MCP_LIVE_SYNC=1 cargo test -- --ignored`"]
+    async fn rustfmt_live_sync_ingests_the_approved_raw_documents() {
+        // The env-var guard keeps the live path out of the hermetic suite; a bare
+        // `--ignored` run is a fast no-op unless the operator explicitly opts in.
+        if std::env::var_os("RUST_DOCS_MCP_LIVE_SYNC").is_none() {
+            eprintln!(
+                "[live-sync] RUST_DOCS_MCP_LIVE_SYNC is unset — skipping the live sync \
+                 (fast no-op). Run with `RUST_DOCS_MCP_LIVE_SYNC=1 cargo test -- --ignored`."
+            );
+            return;
+        }
+
+        let client = super::production_client().expect("the production client builds");
+        let data_dir = temp_data_dir();
+        // A focused live sync over just rustfmt, using the production discovery
+        // (`rustfmt_urls: None` → `rustfmt::approved_documents()` at the pinned
+        // revision). This must succeed through the registry-gated client rather
+        // than failing on the refused `github.com` entry — the original bug.
+        let config = SyncConfig {
+            parser_version: "test/live-147".to_string(),
+            sources: vec![SourceId::new("rustfmt").expect("a registry id is URI-safe")],
+            direct: None,
+            rustfmt_urls: None,
+        };
+        let report = sync(&config, &data_dir, &client)
+            .await
+            .expect("the live rustfmt sync ingests the approved raw documents");
+        assert!(
+            !report.snapshot.as_str().is_empty(),
+            "a snapshot must be published"
+        );
+        let rustfmt = report
+            .sources
+            .iter()
+            .find(|s| s.id == "rustfmt")
+            .expect("the rustfmt result is present");
+        assert_eq!(rustfmt.documents, 2, "both approved documents were fetched");
+        assert!(
+            rustfmt.sections > 0,
+            "the Markdown adapter emitted sections"
         );
     }
 }
