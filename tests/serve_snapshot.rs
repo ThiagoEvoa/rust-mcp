@@ -319,16 +319,13 @@ async fn serve_serves_the_local_snapshot_for_all_tools_and_resources() {
     let section = server
         .call_tool(
             "get_section",
-            json!({ "section_id": "api-guidelines/about" }),
+            json!({ "section_id": "api-guidelines/about#rust-api-guidelines" }),
         )
         .await;
     assert_serves_snapshot(&section, LOCAL_ID, true);
 
     let checklist = server
-        .call_tool(
-            "get_api_checklist",
-            json!({ "category": "Conversions and From" }),
-        )
+        .call_tool("get_api_checklist", json!({ "category": "Naming" }))
         .await;
     assert_serves_snapshot(&checklist, LOCAL_ID, true);
 
@@ -357,7 +354,9 @@ async fn serve_serves_the_local_snapshot_for_all_tools_and_resources() {
 
     // The section resource serves a section that exists in the local snapshot
     // (the section ids are identical across the derived snapshot).
-    let section_uri = format!("rust-docs://snapshots/{LOCAL_ID}/sections/api-guidelines/about");
+    let section_uri = format!(
+        "rust-docs://snapshots/{LOCAL_ID}/sections/api-guidelines/about#rust-api-guidelines"
+    );
     let section_resource = server.read_resource(&section_uri).await;
     assert_eq!(
         section_resource.get("error"),
@@ -371,7 +370,7 @@ async fn serve_serves_the_local_snapshot_for_all_tools_and_resources() {
     let payload: Value = serde_json::from_str(text).expect("the section resource text is JSON");
     assert_eq!(
         payload["section"]["id"],
-        json!("api-guidelines/about"),
+        json!("api-guidelines/about#rust-api-guidelines"),
         "the section resource serves the requested section"
     );
 

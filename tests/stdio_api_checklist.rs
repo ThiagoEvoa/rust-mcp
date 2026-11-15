@@ -19,8 +19,8 @@
 //!
 //! The published snapshot is derived from the committed bundled seed by changing
 //! *only* the top-level `snapshot_id`, so it carries the seed's real `C-CONV`
-//! checklist entry (category `Conversions and From`, explanation
-//! `api-guidelines/about`) and the section that explains it. The loader
+//! checklist entry (category `Naming`, explanation
+//! `api-guidelines/naming`) and the section that explains it. The loader
 //! re-parses and re-validates, so semantic validity — including every
 //! entry's `explanation_sections` resolving — is preserved.
 
@@ -47,9 +47,10 @@ const LOCAL_SNAPSHOT_ID: &str = "rust-docs-stdapi-148";
 
 /// The checklist entry the published snapshot carries (the seed's real entry).
 const CHECKLIST_CODE: &str = "C-CONV";
-const CHECKLIST_CATEGORY: &str = "Conversions and From";
-const CHECKLIST_LOCATION: &str = "Conversions and From#C-CONV";
-const CHECKLIST_EXPLANATION: &str = "api-guidelines/about";
+const CHECKLIST_CATEGORY: &str = "Naming";
+const CHECKLIST_LOCATION: &str = "Naming#C-CONV";
+const CHECKLIST_EXPLANATION: &str =
+    "api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv";
 
 /// A per-process unique, empty data directory, given to the child as `--data-dir`
 /// so the process never writes the host's real application cache.

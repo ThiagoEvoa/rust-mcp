@@ -576,7 +576,7 @@ async fn call_get_section(client: &mut Client) {
     let response = client
         .call_tool(
             "get_section",
-            json!({ "section_id": "api-guidelines/about" }),
+            json!({ "section_id": "api-guidelines/about#rust-api-guidelines" }),
         )
         .await;
     assert_eq!(
@@ -585,7 +585,7 @@ async fn call_get_section(client: &mut Client) {
         "a valid section must resolve: {response}"
     );
     let section = &response["result"]["structuredContent"]["section"];
-    assert_eq!(section["id"], "api-guidelines/about");
+    assert_eq!(section["id"], "api-guidelines/about#rust-api-guidelines");
     assert_eq!(section["source"], "api-guidelines");
     // The body is served verbatim (non-empty).
     assert!(
@@ -643,10 +643,7 @@ async fn call_get_section(client: &mut Client) {
 async fn call_get_api_checklist(client: &mut Client) {
     // --- A valid category filter. -------------------------------------------
     let response = client
-        .call_tool(
-            "get_api_checklist",
-            json!({ "category": "Conversions and From" }),
-        )
+        .call_tool("get_api_checklist", json!({ "category": "Naming" }))
         .await;
     assert_eq!(
         response.get("error"),
@@ -656,7 +653,7 @@ async fn call_get_api_checklist(client: &mut Client) {
     let structured = &response["result"]["structuredContent"];
     assert_eq!(
         structured["category"],
-        json!("Conversions and From"),
+        json!("Naming"),
         "the response echoes the requested category"
     );
     let entries = structured["entries"]
@@ -664,7 +661,7 @@ async fn call_get_api_checklist(client: &mut Client) {
         .expect("an `entries` array");
     assert!(
         !entries.is_empty(),
-        "the `Conversions and From` category has entries in the seed corpus"
+        "the `Naming` category has entries in the seed corpus"
     );
     for entry in entries {
         assert!(
@@ -673,7 +670,7 @@ async fn call_get_api_checklist(client: &mut Client) {
         );
         assert_eq!(
             entry["category"],
-            json!("Conversions and From"),
+            json!("Naming"),
             "a filtered entry belongs to the requested category"
         );
     }
@@ -874,7 +871,7 @@ async fn read_catalog_resource(client: &mut Client) {
 /// A section resource: its JSON payload carries the section body + provenance
 /// citations; an invalid section URI is a typed error.
 async fn read_section_resource(client: &mut Client) {
-    let uri = section_resource_uri("api-guidelines/about");
+    let uri = section_resource_uri("api-guidelines/about#rust-api-guidelines");
     let response = client.read_resource(&uri).await;
     assert_eq!(
         response.get("error"),
@@ -900,7 +897,7 @@ async fn read_section_resource(client: &mut Client) {
     let section = &payload["section"];
     assert_eq!(
         section["id"],
-        json!("api-guidelines/about"),
+        json!("api-guidelines/about#rust-api-guidelines"),
         "the section resource carries its section"
     );
     assert!(
@@ -1274,7 +1271,7 @@ async fn concurrent_burst_exits_cleanly_on_eof_without_orphaned_work() {
 /// tool calls surface `result.structuredContent`, the two resource reads
 /// surface `result.contents`.
 fn burst_plan() -> Vec<(String, Value, &'static str)> {
-    let section_uri = section_resource_uri("api-guidelines/about");
+    let section_uri = section_resource_uri("api-guidelines/about#rust-api-guidelines");
     let mut plan: Vec<(String, Value, &'static str)> = Vec::new();
     // Two interleaved rounds of the whole surface — a diverse, concurrent burst.
     for _ in 0..2 {
@@ -1295,12 +1292,12 @@ fn burst_plan() -> Vec<(String, Value, &'static str)> {
         ));
         plan.push((
             "tools/call".to_string(),
-            json!({ "name": "get_section", "arguments": { "section_id": "api-guidelines/about" } }),
+            json!({ "name": "get_section", "arguments": { "section_id": "api-guidelines/about#rust-api-guidelines" } }),
             "structuredContent",
         ));
         plan.push((
             "tools/call".to_string(),
-            json!({ "name": "get_api_checklist", "arguments": { "category": "Conversions and From" } }),
+            json!({ "name": "get_api_checklist", "arguments": { "category": "Naming" } }),
             "structuredContent",
         ));
         plan.push((

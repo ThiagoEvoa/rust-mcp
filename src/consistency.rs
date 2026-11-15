@@ -752,7 +752,9 @@ fn ac2_unknown_compatibility_is_preserved() {
 #[test]
 fn ac1_and_ac2_resolution_is_deterministic_over_one_snapshot() {
     let m = manifest();
-    let id: SectionId = "api-guidelines/about".parse().expect("a valid id");
+    let id: SectionId = "api-guidelines/about#rust-api-guidelines"
+        .parse()
+        .expect("a valid id");
 
     // The index and the reads seam agree on the record.
     let via_index = SectionIndex::build(&m).get(&id).expect("resolves").clone();

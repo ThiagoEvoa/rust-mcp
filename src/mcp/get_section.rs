@@ -503,12 +503,12 @@ mod tests {
         let m = manifest();
         let resp = get_section(
             &m,
-            &request("cargo/commands%2Fcargo-build", None),
+            &request("cargo/commands%2Fcargo-build#cargo-build1", None),
             as_of(),
             threshold(),
         )
         .expect("the id resolves");
-        assert_eq!(resp.section.id, "cargo/commands%2Fcargo-build");
+        assert_eq!(resp.section.id, "cargo/commands%2Fcargo-build#cargo-build1");
         assert_eq!(resp.section.source, "cargo");
         assert!(!resp.section.body.is_empty(), "the body is served");
         assert!(!resp.truncated, "a small section is not truncated");
@@ -526,7 +526,7 @@ mod tests {
         // AC2: markdown, heading context, citations, freshness, and snapshot
         // identity in the response match the [036] corpus read verbatim.
         let m = manifest();
-        let id = "api-guidelines/about";
+        let id = "api-guidelines/about#rust-api-guidelines";
         let read =
             crate::reads::get_section(&m, &SectionId::from_str(id).unwrap(), as_of(), threshold())
                 .expect("the [036] read resolves");
@@ -766,7 +766,7 @@ mod tests {
         let err = get_section(
             &m,
             &request(
-                "cargo/commands%2Fcargo-build",
+                "cargo/commands%2Fcargo-build#cargo-build1",
                 Some("not-a-cursor".to_string()),
             ),
             as_of(),
@@ -791,7 +791,7 @@ mod tests {
         let m = manifest();
         let resp = get_section(
             &m,
-            &request("cargo/commands%2Fcargo-build", None),
+            &request("cargo/commands%2Fcargo-build#cargo-build1", None),
             as_of(),
             threshold(),
         )
@@ -804,7 +804,7 @@ mod tests {
         );
         assert_eq!(
             call.structured_content.as_ref().unwrap()["section"]["id"],
-            "cargo/commands%2Fcargo-build"
+            "cargo/commands%2Fcargo-build#cargo-build1"
         );
     }
 
@@ -813,7 +813,7 @@ mod tests {
         // A response whose body alone exceeds the cap is rejected defensively.
         let mut resp = get_section(
             &manifest(),
-            &request("cargo/commands%2Fcargo-build", None),
+            &request("cargo/commands%2Fcargo-build#cargo-build1", None),
             as_of(),
             threshold(),
         )
@@ -831,7 +831,7 @@ mod tests {
     #[test]
     fn not_found_message_is_actionable_and_leak_free() {
         let err = GetSectionError::UnknownSection {
-            id: "cargo/commands%2Fcargo-build".to_string(),
+            id: "cargo/commands%2Fcargo-build#cargo-build1".to_string(),
         };
         let msg = err.message();
         assert!(

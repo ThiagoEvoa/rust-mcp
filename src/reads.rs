@@ -307,6 +307,25 @@ mod tests {
             .expect("well-formed id parses")
     }
 
+    /// A real, faithfully captured api-guidelines section in the committed seed —
+    /// the "about" page, preserved with its heading anchor. The seed is now the
+    /// full upstream corpus, so the old single `api-guidelines/about` id is a
+    /// heading-anchored section (`about#rust-api-guidelines`).
+    fn about_section_id() -> SectionId {
+        "api-guidelines/about#rust-api-guidelines"
+            .parse()
+            .expect("a real seed section id parses")
+    }
+
+    /// The real seed section carrying the `C-CONV` guideline code: the ad-hoc
+    /// `as_`/`to_`/`into_` conversion naming rule that `C-CONV` resolves to
+    /// (distinct from `C-CONV-TRAITS`, the interoperability standard-traits rule).
+    fn c_conv_section_id() -> SectionId {
+        "api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv"
+            .parse()
+            .expect("a real seed section id parses")
+    }
+
     /// The `as_of` instant the seed sources were captured at (their
     /// `fetched_at`), used as the freshness evaluation point.
     fn seed_as_of() -> Instant {
@@ -340,7 +359,9 @@ mod tests {
     /// known id in the committed corpus.
     #[test]
     fn get_section_preserves_the_full_record() {
-        let id: SectionId = "api-guidelines/about".parse().expect("valid id");
+        // A real section that carries a guideline-code citation, so the read's
+        // citation-preservation is exercised on captured upstream content.
+        let id = c_conv_section_id();
         let read = get_section(&manifest(), &id, seed_as_of(), StaleThreshold::default())
             .expect("known id resolves");
 
@@ -353,7 +374,8 @@ mod tests {
                 .expect("valid source id")
         );
 
-        // Markdown body is preserved verbatim (non-empty; the seed's about page).
+        // Markdown body is preserved verbatim (non-empty; the seed's C-CONV
+        // section).
         assert!(
             !read.section.body.is_empty(),
             "the Markdown body must be preserved, not truncated or dropped"
@@ -404,7 +426,7 @@ mod tests {
         ];
         about.qualifications = vec!["Stable since Rust 1.0".to_string()];
 
-        let id: SectionId = "api-guidelines/about".parse().expect("valid id");
+        let id = about_section_id();
         let read = get_section(&m, &id, seed_as_of(), StaleThreshold::default()).expect("resolves");
 
         assert_eq!(
@@ -434,7 +456,7 @@ mod tests {
             .expect("seed source present")
             .last_checked =
             Some(crate::model::Timestamp::new("2026-01-01T00:00:00Z").expect("valid ts"));
-        let id: SectionId = "api-guidelines/about".parse().expect("valid id");
+        let id = about_section_id();
         let read =
             get_section(&stale, &id, seed_as_of(), StaleThreshold::default()).expect("resolves");
         assert_eq!(
@@ -508,7 +530,7 @@ mod tests {
         // every read would hand back regardless of the record's contents.
         let unsplit = get_section(
             &manifest(),
-            &"api-guidelines/about".parse().expect("valid id"),
+            &about_section_id(),
             seed_as_of(),
             StaleThreshold::default(),
         )
@@ -547,13 +569,23 @@ mod tests {
     /// and explanatory section ids, plus the snapshot identity.
     #[test]
     fn get_api_checklist_returns_matching_entries() {
-        let read =
-            get_api_checklist(&manifest(), Some("Conversions and From")).expect("known category");
-        assert_eq!(read.category, Some("Conversions and From".to_string()));
-        assert_eq!(read.entries.len(), 1, "the seed has one checklist entry");
+        // The "Naming" category carries the upstream naming guidelines, among
+        // them C-CONV (the ad-hoc as_/to_/into_ conversion rule).
+        let read = get_api_checklist(&manifest(), Some("Naming")).expect("known category");
+        assert_eq!(read.category, Some("Naming".to_string()));
+        assert_eq!(
+            read.entries.len(),
+            7,
+            "the Naming category has seven guidelines"
+        );
 
-        let entry = &read.entries[0];
-        assert_eq!(entry.code, "C-CONV");
+        // C-CONV is among the entries, with its upstream title and a single
+        // retrievable explanation.
+        let entry = read
+            .entries
+            .iter()
+            .find(|e| e.code == "C-CONV")
+            .expect("C-CONV is a Naming-category entry");
         assert!(!entry.title.is_empty(), "the entry's title is preserved");
         assert_eq!(
             entry.explanation_sections.len(),
@@ -588,7 +620,7 @@ mod tests {
             title: "Panic-free error handling".to_string(),
             category: "Error Handling".to_string(),
             location: "Error Handling#E-RESCUE".to_string(),
-            explanation_sections: vec!["api-guidelines/about".parse().expect("resolves")],
+            explanation_sections: vec![about_section_id()],
         };
         m.body.checklist.push(extra);
 
@@ -596,14 +628,13 @@ mod tests {
         assert_eq!(read.category, None);
         assert_eq!(
             read.entries.len(),
-            2,
-            "omitted category returns every entry"
+            16,
+            "omitted category returns the 15 seed entries plus the added one"
         );
         assert!(read.entries.iter().any(|e| e.category == "Error Handling"));
         assert!(
-            read.entries
-                .iter()
-                .any(|e| e.category == "Conversions and From")
+            read.entries.iter().any(|e| e.category == "Naming"),
+            "a real seed category is present"
         );
     }
 
@@ -616,7 +647,7 @@ mod tests {
             title: "Panic-free error handling".to_string(),
             category: "Error Handling".to_string(),
             location: "Error Handling#E-RESCUE".to_string(),
-            explanation_sections: vec!["api-guidelines/about".parse().expect("resolves")],
+            explanation_sections: vec![about_section_id()],
         });
 
         let read = get_api_checklist(&m, Some("Error Handling")).expect("known category");
@@ -641,11 +672,13 @@ mod tests {
             entry.explanation_sections.push(dangling.clone());
         }
 
-        let err = get_api_checklist(&m, Some("Conversions and From"));
+        let err = get_api_checklist(&m, Some("Naming"));
         assert_eq!(
             err,
             Err(ReadError::DanglingExplanation {
-                code: "C-CONV".to_string(),
+                // The first Naming-category entry is C-CASE, so its dangling
+                // explanation surfaces first.
+                code: "C-CASE".to_string(),
                 missing: dangling,
             })
         );
@@ -661,8 +694,7 @@ mod tests {
             entry.explanation_sections.clear();
         }
 
-        let read =
-            get_api_checklist(&m, Some("Conversions and From")).expect("vacuously satisfiable");
+        let read = get_api_checklist(&m, Some("Naming")).expect("vacuously satisfiable");
         assert_eq!(read.entries[0].explanation_sections.len(), 0);
     }
 }

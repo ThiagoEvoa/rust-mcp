@@ -1,4 +1,5 @@
-//! The bundled documentation snapshot — task `[031]` M2 (issue #31, `plan.md` §10).
+//! The bundled documentation snapshot — task `[031]` M2 (issue #31, `plan.md` §10),
+//! regenerated faithfully from upstream in issue #150.
 //!
 //! The binary ships a **validated, attributed** eight-source snapshot so a fresh
 //! install serves the Rust toolchain documentation **without any network access**
@@ -6,6 +7,18 @@
 //! from [`JSON`] (committed at `data/bundled/snapshot.json`); the canonical
 //! builder for that file is [`manifest`], and the drift test
 //! `the_committed_bundle_matches_the_builder` keeps the two in lockstep.
+//!
+//! **Faithful, not hand-authored** (issue #150). The corpus is **not** written by
+//! hand. It is generated at build time by [`crate::ingest::bundle::build_seed_corpus`],
+//! which ingests the recorded upstream fixtures (`tests/fixtures/upstream/`) through
+//! the *same* ingestion adapters and `parse_checklist` + `link_explanations`
+//! stages the live pipeline uses, then assembles a
+//! [`crate::model::SnapshotManifest`]. The result carries faithful upstream bodies
+//! (the real C-CONV / C-CONV-TRAITS explanations, clippy lint details, the rustfmt
+//! check-mode, …), deterministic content hashes, a parsed checklist, and per-source
+//! provenance (commit / revision / ETag). Generation is deterministic and hermetic:
+//! it reads the recorded fixtures from disk, makes no network call, and reproduces
+//! byte-for-byte. See [`crate::ingest::bundle`] for the procedure and provenance.
 //!
 //! **Attribution** (acceptance criterion 2). Every captured document's licence
 //! and origin are carried in [`ManifestBody::attribution`] ([`AttributionRef`]),
@@ -23,16 +36,16 @@
 //! exception would ship; the tests exercise it so the fallback is proven even
 //! while no source currently triggers it.
 //!
-//! The builder assembles a **representative** corpus: one section per collection,
-//! the API-guidelines `C-CONV` checklist entry, and a few cited command entries.
-//! A full, current corpus is produced by [`crate::ingest::sync`](crate::ingest)
-//! and published to the data directory by the `sync` command; the bundle is the
+//! The builder assembles the **full ingested corpus**: one faithful section per
+//! recorded fixture, the parsed checklist kept to the codes whose explanations
+//! are shipped, and the command catalog derived from the sections. A full,
+//! *current* corpus is produced by [`crate::ingest::sync`](crate::ingest) and
+//! published to the data directory by the `sync` command; the bundle is the
 //! offline seed that makes the *first* launch usable.
 
 use crate::model::{
-    AttributionRef, Channel, ChecklistEntry, ManifestBody, Release, SchemaVersion, Section,
-    SectionBuilder, SectionId, SnapshotId, SnapshotManifest, Source, SourceId, Timestamp, Url,
-    ValidationSummary,
+    AttributionRef, ChecklistEntry, ManifestBody, SchemaVersion, Section, SnapshotId,
+    SnapshotManifest, Source, SourceId, Timestamp, ValidationSummary,
 };
 use crate::registry::SourceCollection;
 
@@ -50,13 +63,9 @@ pub const JSON: &str = include_str!(concat!(
 /// The snapshot identifier of the bundled seed.
 pub const SNAPSHOT_ID: &str = "rust-docs-bundled-seed";
 
-/// The parser that produced the seed (a seed, not the live ingestion pipeline).
-const PARSER_VERSION: &str = "rust-docs-mcp/seed-1";
-
 /// The fixed point in time the seed was assembled. Fixed so the bundle is
 /// deterministic across builds; the live `sync` pipeline stamps a real time.
 const CREATED_AT: &str = "2026-10-30T00:00:00Z";
-const FETCHED_AT: &str = "2026-10-30T00:00:00Z";
 
 /// The sources a documented bundling exception (`docs/LICENSING.md` §5)
 /// currently excludes from the bundle because they cannot be bundled.
@@ -89,23 +98,19 @@ pub fn manifest() -> SnapshotManifest {
 /// drop out; any checklist entry or command cited only to an omitted section is
 /// also dropped, so the result never carries an unresolvable reference.
 pub fn manifest_with_exclusions(excluded: &[&str]) -> SnapshotManifest {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
     let excluded_set: HashSet<&str> = excluded.iter().copied().collect();
 
-    // --- One representative section per collection, built through
-    // `SectionBuilder` so each section's id and content hash are the consistent
-    // values the validator requires. ---
-    let sections = vec![
-        api_guidelines_section(),
-        style_guide_section(),
-        cargo_section(),
-        rustc_section(),
-        rustup_section(),
-        rustfmt_section(),
-        clippy_section(),
-        rustdoc_section(),
-    ];
+    // --- Seed corpus, generated from the recorded upstream fixtures via the real
+    // ingestion adapters (issue #150). `build_seed_corpus()` is the canonical
+    // seed: faithful bodies, deterministic content hashes, a parsed checklist, and
+    // per-source provenance. `excluded` is the documented first-sync-required set
+    // ([`FIRST_SYNC_REQUIRED`], empty today); a source in it — together with any
+    // section or checklist entry that resolves only to it — is then dropped, so
+    // the manifest never carries an unresolvable reference. ---
+    let corpus = crate::ingest::bundle::build_seed_corpus()
+        .expect("the faithful seed corpus builds from the recorded upstream fixtures");
 
     // The survivor set: every collection except the excluded ones.
     let surviving: HashSet<&str> = SourceCollection::ALL
@@ -114,39 +119,33 @@ pub fn manifest_with_exclusions(excluded: &[&str]) -> SnapshotManifest {
         .filter(|id| !excluded_set.contains(*id))
         .collect();
 
-    // Keep only sections whose source survives.
-    let sections: Vec<Section> = sections
+    // Keep only the sections and sources whose source survives the exclusion.
+    let sections: Vec<Section> = corpus
+        .sections
         .into_iter()
         .filter(|s| surviving.contains(s.source_id.as_str()))
         .collect();
-
-    // A source id -> that source's section id, for cross-references.
-    let section_id_of: HashMap<&str, SectionId> = sections
-        .iter()
-        .map(|s| (s.source_id.as_str(), s.id.clone()))
+    let sources: Vec<Source> = corpus
+        .sources
+        .into_iter()
+        .filter(|s| surviving.contains(s.id.as_str()))
         .collect();
 
-    // --- Sources: one per surviving collection. ---
-    let sources: Vec<Source> = SourceCollection::ALL
-        .iter()
-        .copied()
-        .filter(|c| surviving.contains(c.id()))
-        .map(source_for)
+    // Re-point the parsed checklist's explanation links at the surviving sections
+    // and drop any entry whose explanation no longer resolves — so every shipped
+    // checklist entry links to a section actually present in the snapshot.
+    let section_ids: HashSet<&str> = sections.iter().map(|s| s.id.as_str()).collect();
+    let checklist: Vec<ChecklistEntry> = corpus
+        .checklist
+        .into_iter()
+        .map(|mut entry| {
+            entry
+                .explanation_sections
+                .retain(|s| section_ids.contains(s.as_str()));
+            entry
+        })
+        .filter(|e| !e.explanation_sections.is_empty())
         .collect();
-
-    // --- Checklist: the API-guidelines C-CONV entry, kept only if its target
-    // section survives. It cites the *derived* section id, so it always resolves. ---
-    let checklist = if let Some(target) = section_id_of.get("api-guidelines") {
-        vec![ChecklistEntry {
-            code: "C-CONV".into(),
-            title: "Prefer `From`/`Into` for conversions".into(),
-            category: "Conversions and From".into(),
-            location: "Conversions and From#C-CONV".into(),
-            explanation_sections: vec![target.clone()],
-        }]
-    } else {
-        vec![]
-    };
 
     // --- Commands: [149] the unified catalog is derived from the sections the
     // snapshot actually carries — one entry per distinct command key those
@@ -191,7 +190,7 @@ pub fn manifest_with_exclusions(excluded: &[&str]) -> SnapshotManifest {
         body: ManifestBody {
             snapshot_id: SnapshotId::new(SNAPSHOT_ID).expect("a URI-safe snapshot id"),
             created_at: Timestamp::new(CREATED_AT).expect("a valid timestamp"),
-            parser_version: PARSER_VERSION.to_string(),
+            parser_version: crate::ingest::bundle::SEED_PARSER_VERSION.to_string(),
             sources,
             sections,
             checklist,
@@ -199,177 +198,6 @@ pub fn manifest_with_exclusions(excluded: &[&str]) -> SnapshotManifest {
             attribution,
             validation: summary,
         },
-    }
-}
-
-// --- Section builders ------------------------------------------------------
-//
-// One representative section per collection. Each body is a short, faithful
-// distillation of the upstream document's purpose (not verbatim prose); the live
-// `sync` pipeline ingests the full content. Each is attributed through the
-// source's `attribution` record.
-
-fn api_guidelines_section() -> Section {
-    SectionBuilder::new(
-        SourceId::new("api-guidelines").expect("a registry id builds a SourceId"),
-        "The API Guidelines",
-        "about",
-        Url::new("https://rust-lang.github.io/api-guidelines/about.html").expect("a valid URL"),
-        "The Rust API Guidelines are recommendations for the design, documentation, and testing of \
-         Rust APIs. They help an API author write an API that is easy to use and hard to misuse. \
-         Each guideline carries a stable code (for example C-CONV) and is enforced in practice by \
-         Clippy lints.",
-    )
-    .guideline_codes(["C-CONV"])
-    .build()
-    .expect("a well-formed section")
-}
-
-fn style_guide_section() -> Section {
-    SectionBuilder::new(
-        SourceId::new("style-guide").expect("a registry id builds a SourceId"),
-        "The Rust Style Guide",
-        "intro",
-        Url::new("https://doc.rust-lang.org/nightly/style-guide/intro.html").expect("a valid URL"),
-        "The Rust Style Guide captures the common style conventions of the Rust community: \
-         naming, whitespace, comments, error handling, and more. It is a style reference, not a \
-         compiler or linter, and is updated on the nightly documentation.",
-    )
-    .build()
-    .expect("a well-formed section")
-}
-
-fn cargo_section() -> Section {
-    SectionBuilder::new(
-        SourceId::new("cargo").expect("a registry id builds a SourceId"),
-        "The Cargo Book",
-        "commands/cargo-build",
-        Url::new("https://doc.rust-lang.org/cargo/commands/cargo-build.html").expect("a valid URL"),
-        "The Cargo Book documents the Rust build system and package manager. `cargo build` compiles \
-         the current package (and its dependencies) for the target platform, writing artifacts under \
-         `target/`. Run `cargo <command> --help` for the full option list; the book explains each \
-         command, its flags, and their effects.",
-    )
-    .command_keys(["cargo build", "cargo test"])
-    .qualifications(["Run `cargo build --help` for the authoritative, version-specific option list."])
-    .build()
-    .expect("a well-formed section")
-}
-
-fn rustc_section() -> Section {
-    SectionBuilder::new(
-        SourceId::new("rustc").expect("a registry id builds a SourceId"),
-        "The Rustc Book",
-        "introduction",
-        Url::new("https://doc.rust-lang.org/rustc/introduction.html").expect("a valid URL"),
-        "The Rustc Book is a reference for the `rustc` compiler: how to invoke it, its command-line \
-         options, and how to read its diagnostics. Because the reference tracks the nightly toolchain, \
-         a stable `rustc` may differ from the documented flags.",
-    )
-    .qualifications(["The rustc reference tracks the nightly toolchain; flag behaviour can differ on stable."])
-    .build()
-    .expect("a well-formed section")
-}
-
-fn rustup_section() -> Section {
-    SectionBuilder::new(
-        SourceId::new("rustup").expect("a registry id builds a SourceId"),
-        "The Rustup Book",
-        "common-install-problems",
-        Url::new("https://doc.rust-lang.org/rustup/common-install-problems.html").expect("a valid URL"),
-        "The Rustup Book documents the Rust toolchain installer: installing, updating, and managing \
-         toolchains and components. `rustup show` reports the installed and active toolchains; \
-         `rustup update` brings a toolchain current.",
-    )
-    .command_keys(["rustup show"])
-    .build()
-    .expect("a well-formed section")
-}
-
-fn rustfmt_section() -> Section {
-    SectionBuilder::new(
-        SourceId::new("rustfmt").expect("a registry id builds a SourceId"),
-        "The rustfmt Book",
-        "options",
-        Url::new("https://doc.rust-lang.org/nightly/rustfmt/options.html").expect("a valid URL"),
-        "The rustfmt Book documents `rustfmt`, the code formatter that ships as a component of the \
-         Rust distribution. It lists the options `rustfmt` accepts and how to configure it via a \
-         `rustfmt.toml` file. Because rustfmt is a nightly component, its option set can change.",
-    )
-    .qualifications(["rustfmt is a nightly component; its option set can change between releases."])
-    .build()
-    .expect("a well-formed section")
-}
-
-fn clippy_section() -> Section {
-    SectionBuilder::new(
-        SourceId::new("clippy").expect("a registry id builds a SourceId"),
-        "Clippy Lint Configuration",
-        "configuration",
-        Url::new("https://doc.rust-lang.org/clippy/configuration.html").expect("a valid URL"),
-        "The Clippy configuration reference documents the lint groups, individual lint levels, and \
-         per-lint options. Clippy is a nightly component, so a specific lint may be added, renamed, or \
-         removed between releases; treat an unfamiliar lint as possibly version-dependent.",
-    )
-    .qualifications(["Clippy is a nightly component; a lint may be added or removed between releases."])
-    .build()
-    .expect("a well-formed section")
-}
-
-fn rustdoc_section() -> Section {
-    SectionBuilder::new(
-        SourceId::new("rustdoc").expect("a registry id builds a SourceId"),
-        "The Rustdoc Book",
-        "command-line-arguments",
-        Url::new("https://doc.rust-lang.org/rustdoc/command-line-arguments.html")
-            .expect("a valid URL"),
-        "The Rustdoc Book documents `rustdoc`, the documentation generator for Rust. It lists the \
-         command-line options that control the generated documentation, from output formats to the \
-         HTML template and theme. Because rustdoc tracks the compiler, option behaviour can differ \
-         between toolchains.",
-    )
-    .qualifications([
-        "rustdoc tracks the compiler; option behaviour can differ between toolchains.",
-    ])
-    .build()
-    .expect("a well-formed section")
-}
-
-// --- Sources ---------------------------------------------------------------
-
-/// Build a source record for a collection, attributed to its registry entry.
-fn source_for(collection: SourceCollection) -> Source {
-    let id = SourceId::new(collection.id()).expect("a registry id builds a SourceId");
-    Source {
-        id,
-        title: collection.title().to_string(),
-        entry_url: Url::new(collection.entry_url()).expect("a registry URL is valid"),
-        document_urls: vec![Url::new(collection.entry_url()).expect("a registry URL is valid")],
-        last_checked: None, // a seed has not verified the upstream; `sync` stamps this.
-        fetched_at: Timestamp::new(FETCHED_AT).expect("a valid timestamp"),
-        upstream_modified: None,
-        content_hash: crate::model::CorpusHash::compute(b"seed-document"),
-        release: Release::channel_only(channel_for(collection)),
-        parser: PARSER_VERSION.to_string(),
-    }
-}
-
-// --- Command entries -------------------------------------------------------
-
-/// A representative seed channel for a collection. The live `sync` pipeline
-/// stamps the channel actually captured from upstream; a seed snapshot has not
-/// checked upstream, so it records a representative channel (stable-distribution
-/// docs on `doc.rust-lang.org` are `Stable`; project-hosted docs are `Rolling`).
-fn channel_for(collection: SourceCollection) -> Channel {
-    match collection {
-        SourceCollection::Cargo
-        | SourceCollection::Rustc
-        | SourceCollection::StyleGuide
-        | SourceCollection::Clippy
-        | SourceCollection::Rustdoc => Channel::Stable,
-        SourceCollection::ApiGuidelines | SourceCollection::Rustup | SourceCollection::Rustfmt => {
-            Channel::Rolling
-        }
     }
 }
 

@@ -602,6 +602,31 @@ fn is_container(name: &str) -> bool {
     matches!(name, "div" | "section" | "article" | "main" | "header")
 }
 
+/// The anchor a heading carries for its section id.
+///
+/// The Rust docs (mdbook) nest the anchor on an inner
+/// `<a class="header" id="slug" href="#slug">` link rather than on the heading
+/// element itself, so a bare `el.attr("id")` reads `None` for the real upstream
+/// HTML and every heading in a page collapses to one section id. Prefer the
+/// heading's own `id` (some renderings put it there); otherwise take the id of
+/// the heading's first `<a>` child — the mdbook header link — which is the
+/// canonical slug. A heading with neither yields no anchor (the rare heading-less
+/// preamble).
+fn heading_anchor(el: &ElementRef) -> Option<String> {
+    if let Some(id) = el.attr("id") {
+        return Some(id.to_string());
+    }
+    for child in el.children() {
+        if let Node::Element(a) = child.value()
+            && a.name() == "a"
+            && let Some(id) = a.attr("id")
+        {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
 /// Walk `parent`'s block-level children into a flat, ordered [`Block`] list.
 ///
 /// Chrome is skipped; a heading becomes a [`Block::Heading`] boundary; a generic
@@ -632,7 +657,7 @@ fn render_blocks(parent: &ElementRef, base_url: &Url) -> Result<Vec<Block>, Extr
                         continue;
                     }
                     let level = heading_level(name);
-                    let anchor = el.attr("id").map(|s| s.to_string());
+                    let anchor = heading_anchor(&elem);
                     let line = format!("{} {text}", "#".repeat(level));
                     out.push(Block::Heading {
                         level,
