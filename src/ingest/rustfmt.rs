@@ -67,6 +67,80 @@ pub const SOURCE: &str = "rustfmt";
 /// section's `doc_title` provenance.
 pub const DOC_TITLE: &str = "rustfmt reference";
 
+// ---------------------------------------------------------------------------
+// Approved, commit-pinned source discovery (issue #147)
+//
+// rustfmt's human-facing registry entry points at
+// `https://github.com/rust-lang/rustfmt#readme`, but the rendered
+// `rust-lang.github.io/rustfmt/` site requires JavaScript (an "empty HTML
+// shell is not a successful ingestion") and `github.com` is refused by the
+// fetch boundary by design. The generic book discovery
+// ([`crate::ingest::books::discover_inventory`]) therefore fails for rustfmt:
+// it fetches a generated navigation page the registry will not serve. Instead,
+// rustfmt is discovered from its two approved, commit-pinned
+// `raw.githubusercontent.com` Markdown documents — `README.md` and
+// `Configurations.md` — and fed to the [`ingest_markdown`] adapter unchanged.
+//
+// The revision is a bounded, explicit, operator-refreshable constant
+// ([`APPROVED_REVISION`]), not a live HEAD lookup, so an all-sources sync is
+// reproducible and never fetches a moving upstream head. The discovery selects
+// exactly these two files at that revision and nothing else: no navigation page,
+// no link extraction, and no broadening of the network boundary.
+//
+// `#[allow(dead_code)]` on the items below is inherited from the module's
+// `#![allow(dead_code)]` (they are the `[022]` ingestion API, first wired by the
+// sync pipeline's rustfmt branch); the pipeline consumes [`approved_documents`]
+// and its tests exercise it directly.
+
+/// The approved upstream commit that pins the rustfmt Markdown sources.
+///
+/// This is the single, bounded, explicit revision the two [`approved_documents`]
+/// are fetched from — `README.md` and `Configurations.md` under
+/// `raw.githubusercontent.com/rust-lang/rustfmt/{revision}/`. It is a
+/// documented constant the operator refreshes to an approved rustfmt commit SHA
+/// and re-syncs; the opt-in live sync verifies it resolves. A 40-character
+/// lowercase-hex SHA. Refreshing it is the only way to move the pinned revision
+/// (there is no live lookup), keeping the all-sources sync reproducible.
+///
+/// The value is a *real, resolvable* `rust-lang/rustfmt` commit (`main`),
+/// verified to carry both `README.md` and `Configurations.md` at the raw URL
+/// (`HTTP 200`) — not a placeholder — so the opt-in live sync (AC5) actually
+/// demonstrates both files in the published inventory. It is the current
+/// `rust-lang/rustfmt` `main` head as of the task; an operator refreshes it by
+/// replacing this constant with a later approved SHA. Guarded by
+/// [`the_approved_revision_is_a_40_char_lowercase_hex_sha`].
+pub const APPROVED_REVISION: &str = "702df60b87e5047276b0d4c36c989e8095555e00";
+
+/// The two approved rustfmt source file names, in fetch order: the repository's
+/// `README.md` (the "Configuration" / options reference) first, then
+/// `Configurations.md` (the configuration-options reference). These are exactly
+/// the files the registry's rustfmt boundary
+/// ([`crate::registry::SourceCollection::Rustfmt`]) permits.
+const APPROVED_FILES: [&str; 2] = ["README.md", "Configurations.md"];
+
+/// The two approved, commit-pinned `raw.githubusercontent.com` Markdown document
+/// URLs rustfmt is discovered from: the upstream repository's `README.md` and
+/// `Configurations.md` at [`APPROVED_REVISION`], in that order.
+///
+/// Both URLs fall inside the registry's rustfmt boundary
+/// (`raw.githubusercontent.com` host, `rust-lang/rustfmt/` path prefix, the two
+/// approved file names), so each passes `crate::registry::resolve_url` — the
+/// fetch layer's single boundary seam. This is the discovery surface that
+/// replaces the generic book discovery for rustfmt: it never fetches a
+/// generated navigation page and never broadens the network boundary.
+pub fn approved_documents() -> Vec<Url> {
+    APPROVED_FILES
+        .iter()
+        .map(|file| {
+            let path = format!(
+                "https://raw.githubusercontent.com/rust-lang/rustfmt/{revision}/{file}",
+                revision = APPROVED_REVISION,
+            );
+            Url::parse(&path).expect("the approved rustfmt raw URLs are well-formed http(s) URLs")
+        })
+        .collect()
+}
+
 /// A typed, non-panicking failure from ingesting a rustfmt Markdown source.
 ///
 /// The two failure modes the acceptance criteria hinge on are both preserved
@@ -359,8 +433,18 @@ fn github_slug(text: &str) -> String {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
+    //! `FetchError` carries a `Url` (a large type), so suppress the lint for the
+    //! rustfmt-path fetch tests below — the same suppression the sibling
+    //! fetch-using adapter tests (`cargo`, `rustdoc`, `clippy`, `pipeline`)
+    //! already use.
+    #![allow(clippy::result_large_err)]
+
     use super::*;
+    use crate::ingest::fetch::{BoundClient, FetchError, FetchPolicy, LoopbackGate};
+    use crate::ingest::http_fixture::{Behavior, FixtureServer};
     use reqwest::StatusCode;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     /// A minimal `Fetched` carrying `body` as UTF-8, served from `url`.
     fn fetched(body: &str, url: &Url) -> Fetched {
@@ -688,5 +772,386 @@ A section whose heading text slugs to nothing.
             "a bare `# ` heading must have no anchor: {:?}",
             bare_section.anchor
         );
+    }
+
+    // -- Issue #147: approved, commit-pinned source discovery. --
+
+    /// AC1/AC2: the discovery selects exactly the two approved raw Markdown files
+    /// at the pinned revision and nothing else — no navigation page, no link
+    /// extraction. The order and the file names are fixed and deterministic.
+    #[test]
+    fn approved_documents_are_two_raw_files_at_the_pinned_revision() {
+        let docs = approved_documents();
+        assert_eq!(docs.len(), 2, "exactly the two approved files");
+        let expected_readme = format!(
+            "https://raw.githubusercontent.com/rust-lang/rustfmt/{revision}/README.md",
+            revision = APPROVED_REVISION,
+        );
+        let expected_configs = format!(
+            "https://raw.githubusercontent.com/rust-lang/rustfmt/{revision}/Configurations.md",
+            revision = APPROVED_REVISION,
+        );
+        assert_eq!(docs[0], expected_readme.parse::<Url>().unwrap());
+        assert_eq!(docs[1], expected_configs.parse::<Url>().unwrap());
+
+        // The host is the approved raw host, not the human-facing `github.com`
+        // entry the generic book discovery would try to fetch.
+        assert_eq!(docs[0].host_str(), Some("raw.githubusercontent.com"));
+        assert_eq!(docs[1].host_str(), Some("raw.githubusercontent.com"));
+        // The path routes through the approved repo prefix at the pinned revision.
+        assert!(docs[0].as_str().contains("/rust-lang/rustfmt/"));
+        assert!(docs[1].as_str().contains("/rust-lang/rustfmt/"));
+        assert!(docs[0].as_str().contains(APPROVED_REVISION));
+        assert!(docs[1].as_str().contains(APPROVED_REVISION));
+    }
+
+    /// AC1/AC3: each approved document passes the registry boundary — the fetch
+    /// layer's single seam — and resolves to the rustfmt collection. This is the
+    /// hermetic proof the discovery stays inside the approved commit/file boundary
+    /// (it never broadens the network) without any live fetch.
+    #[test]
+    fn approved_documents_pass_the_registry_boundary() {
+        use crate::registry::{SourceCollection, resolve_url};
+        for url in approved_documents() {
+            let resolved = resolve_url(url.as_str())
+                .expect("each approved rustfmt document passes the registry boundary");
+            assert_eq!(resolved.collection, SourceCollection::Rustfmt);
+            assert_eq!(resolved.boundary.host, "raw.githubusercontent.com");
+        }
+    }
+
+    /// AC1/AC4: each approved document is ingested through the rustfmt Markdown
+    /// adapter (not the HTML book adapter), and the configuration content survives
+    /// as sections rather than being swallowed into prose.
+    #[test]
+    fn approved_documents_route_to_the_markdown_adapter_and_emit_sections() {
+        let docs = approved_documents();
+        // `README.md` carries a configuration section; `Configurations.md`
+        // carries the option reference (reusing the module's representative body).
+        let readme_body = "\
+# rustfmt
+
+rustfmt is a tool for formatting Rust code.
+
+## Configuration
+
+rustfmt reads its options from a `rustfmt.toml` file. See the configuration
+reference for the full list of options.
+";
+        let sections_readme =
+            ingest_markdown(&fetched(readme_body, &docs[0])).expect("README.md ingests");
+        let sections_configs =
+            ingest_markdown(&fetched(CONFIG_MD, &docs[1])).expect("Configurations.md ingests");
+
+        // Both files yielded sections; neither was swallowed into prose or
+        // rejected as an empty shell.
+        assert!(!sections_readme.is_empty(), "README.md emitted sections");
+        assert!(
+            !sections_configs.is_empty(),
+            "Configurations.md emitted sections"
+        );
+
+        // AC4: a `## Configuration` heading survives as its own section, with the
+        // surrounding explanation preserved in its body (not swallowed into prose
+        // or dropped).
+        let configuration = sections_readme
+            .iter()
+            .find(|s| s.heading_path.iter().any(|h| h == "Configuration"))
+            .expect("the `## Configuration` section survives as a section");
+        assert!(
+            configuration.body.contains("rustfmt.toml"),
+            "the configuration section keeps its explanation: {:?}",
+            configuration.body
+        );
+        // The configuration options survive as sections in the reference file too.
+        assert!(
+            sections_configs
+                .iter()
+                .any(|s| s.anchor.as_deref() == Some("edition")),
+            "the `edition` option survives as a section"
+        );
+    }
+
+    /// AC2 (deterministic mismatch regression): the *human-facing* registry entry
+    /// that the generic book discovery would try to fetch —
+    /// `github.com/rustfmt#readme` — is refused by the registry boundary, while
+    /// the two *approved raw* documents pass it. This makes the exact defect #147
+    /// reports ("host `github.com` is not a registered source host") a
+    /// deterministic, regression-proof assertion: a future edit that routes
+    /// rustfmt back through the human entry (or the JS-only rendered site) would
+    /// make this fail, even though the old behavior aborted the whole sync.
+    #[test]
+    fn the_human_entry_is_refused_but_the_approved_raw_documents_pass() {
+        use crate::registry::{RegistryError, SourceCollection, resolve_url};
+
+        // The human-facing entry the generic book discovery would fetch — it is
+        // rustfmt's `entry_url`, the source of the original failure.
+        let entry = SourceCollection::Rustfmt.entry_url();
+        assert_eq!(entry, "https://github.com/rust-lang/rustfmt#readme");
+        // It is refused: `github.com` is not a registered source host — the
+        // exact error the issue's audit probe observed, before any network.
+        match resolve_url(entry) {
+            Err(RegistryError::UnregisteredHost { host }) => {
+                assert_eq!(host, "github.com", "the human entry's host is refused")
+            }
+            other => panic!("the human entry must be refused by the boundary, got {other:?}"),
+        }
+
+        // The two approved raw documents are the ones that DO pass, and the
+        // human entry is not among them: discovery selects the approved raw
+        // files, never the rendered/JS site or the `github.com` README.
+        let approved = approved_documents();
+        for url in &approved {
+            resolve_url(url.as_str())
+                .expect("each approved raw document passes the registry boundary");
+            assert_ne!(
+                url.as_str(),
+                entry,
+                "the approved documents must exclude the human entry"
+            );
+        }
+    }
+
+    /// The approved revision is a 40-character lowercase-hex git SHA — the shape
+    /// a real `rust-lang/rustfmt` commit has. This guards the constant against a
+    /// placeholder or a malformed edit (which would 404 in the live sync),
+    /// independently of the network. The opt-in live sync (AC5) is the proof the
+    /// SHA *resolves*; this is the proof it is *well-formed*.
+    #[test]
+    fn the_approved_revision_is_a_40_char_lowercase_hex_sha() {
+        let rev = APPROVED_REVISION;
+        assert_eq!(rev.len(), 40, "a git SHA is 40 characters: {rev}");
+        assert!(
+            rev.bytes()
+                .all(|b| (b'a'..=b'f').contains(&b) || b.is_ascii_digit()),
+            "a git SHA is lowercase hex: {rev}"
+        );
+        // Both approved documents are pinned under the rustfmt repository at that
+        // revision (the exact commit/file boundary the registry enforces).
+        for url in approved_documents() {
+            assert!(
+                url.as_str().contains("/rust-lang/rustfmt/"),
+                "the revision is pinned under the rustfmt repository: {}",
+                url
+            );
+            assert!(
+                url.as_str().contains(rev),
+                "the URL pins the approved revision: {url}"
+            );
+        }
+    }
+
+    // -- S-1 / AC3: the byte cap and the redirect cap on the *rustfmt*
+    //    discovery/fetch path (issue #147) -------------------------------
+    //
+    // The shared fetcher (`fetch.rs`) already proves the byte cap and the
+    // redirect cap in isolation. The reviewer's point (S-1) is that no
+    // *rustfmt-specific* test drives the rustfmt path through either limit, so
+    // the limits could silently stop protecting rustfmt discovery/fetch without
+    // a test failing. The tests below exercise the rustfmt adapter's own
+    // ingestion path — a gated fetch (the same `BoundClient` + policy the
+    // pipeline uses for `SourceCollection::Rustfmt`), then
+    // `rustfmt::ingest_markdown` — over a loopback fixture, asserting the
+    // transfer *aborts* on the byte cap and is *refused/terminal* on the
+    // redirect limits, rather than returning a partial body.
+
+    /// The rustfmt raw document path at the approved revision — the exact shape
+    /// `approved_documents()` builds, used as a loopback fixture route key.
+    fn rustfmt_path(file: &str) -> String {
+        format!("/rust-lang/rustfmt/{rev}/{file}", rev = APPROVED_REVISION)
+    }
+
+    /// A loopback URL carrying the rustfmt raw document path for `file` — the
+    /// shape the production discovery fetches, pointed at `server` instead of the
+    /// real raw host so the test is offline.
+    fn rustfmt_loopback_url(server: &FixtureServer, file: &str) -> Url {
+        Url::parse(&format!(
+            "http://{addr}{path}",
+            addr = server.addr,
+            path = rustfmt_path(file)
+        ))
+        .expect("a well-formed loopback URL")
+    }
+
+    /// A fast loopback policy: a configurable body cap and redirect limit, with
+    /// retries and backoff disabled so the offline fixtures complete quickly.
+    fn cap_policy(cap: usize, max_redirects: usize) -> FetchPolicy {
+        FetchPolicy {
+            max_retries: 0,
+            transient_backoff: Duration::ZERO,
+            retry_after_max: Duration::ZERO,
+            max_redirects,
+            max_body_bytes: Some(cap),
+            ..FetchPolicy::default()
+        }
+    }
+
+    /// The gated fetcher the rustfmt discovery/fetch path uses, driven over
+    /// loopback (any `127.0.0.1`/`localhost` HTTP target is allowed) with the
+    /// policy under test.
+    fn loopback_client(policy: FetchPolicy) -> BoundClient {
+        BoundClient::with_gate(policy, Arc::new(LoopbackGate)).expect("the loopback client builds")
+    }
+
+    /// The genuine rustfmt tie: the driven loopback URL carries the path of the
+    /// approved rustfmt `file` document (`0` = `README.md`, `1` =
+    /// `Configurations.md`), and that path resolves to the `rustfmt`
+    /// collection. This makes the cap/redirect assertion genuinely "on the
+    /// rustfmt discovery/fetch path," not an arbitrary host.
+    fn assert_rustfmt_boundary(driven: &Url, file: usize) {
+        use crate::registry::{SourceCollection, resolve_url};
+        let approved = &approved_documents()[file];
+        assert_eq!(
+            driven.path(),
+            approved.path(),
+            "the driven loopback URL carries the approved rustfmt path"
+        );
+        assert_eq!(
+            resolve_url(approved.as_str()).map(|resolved| resolved.collection),
+            Ok(SourceCollection::Rustfmt),
+            "the approved rustfmt path resolves to the rustfmt collection"
+        );
+    }
+
+    /// S-1 / AC3: the per-transfer byte cap is enforced *on the rustfmt
+    /// discovery/fetch path* — not only by the shared fetcher in isolation. A
+    /// within-cap `README.md` body fetches and ingests through the rustfmt
+    /// adapter's own path; a body far larger than the cap over the *same path*
+    /// must abort the transfer (`FetchError::Oversized`) rather than return a
+    /// truncated body — so no partial rustfmt document can corrupt the corpus.
+    #[tokio::test]
+    async fn an_oversized_rustfmt_document_aborts_the_transfer_not_a_partial_ingestion() {
+        const CAP: usize = 512;
+
+        // Positive control: a small, valid `README.md` body (well under the cap)
+        // fetches through the rustfmt path and ingests into sections — so the
+        // path itself works and the cap is the only thing that flips it.
+        let ok_body = "# rustfmt\n\n## Configuration\n\nrustfmt reads its options from a `rustfmt.toml` file.\n";
+        let ok_server = FixtureServer::start(vec![(
+            rustfmt_path("README.md"),
+            Behavior::Text {
+                body: ok_body.as_bytes().to_vec(),
+                etag: Some("\"readme-1\"".to_string()),
+                last_modified: None,
+                content_type: Some("text/markdown; charset=utf-8".to_string()),
+            },
+        )]);
+        let client = loopback_client(cap_policy(CAP, 5));
+        let ok_url = rustfmt_loopback_url(&ok_server, "README.md");
+        assert_rustfmt_boundary(&ok_url, 0);
+        let ok_fetched = client
+            .fetch(&ok_url)
+            .await
+            .expect("a within-cap rustfmt body fetches");
+        assert!(
+            ingest_markdown(&ok_fetched).is_ok(),
+            "a within-cap rustfmt body ingests into sections"
+        );
+
+        // The same path, a body far larger than the cap: the transfer must
+        // abort all-or-nothing, never returning a truncated body.
+        let big_server = FixtureServer::start(vec![(
+            rustfmt_path("README.md"),
+            Behavior::Big { size: 64 * 1024 },
+        )]);
+        let big_url = rustfmt_loopback_url(&big_server, "README.md");
+        assert_rustfmt_boundary(&big_url, 0);
+        let err = client.fetch(&big_url).await.expect_err(
+            "an oversized rustfmt body must abort the transfer, not return a partial body",
+        );
+        match &err {
+            FetchError::Oversized { cap: got, url } => {
+                assert_eq!(*got, CAP, "the enforced cap is the policy cap");
+                assert_eq!(url, &big_url, "the abort names the rustfmt document URL");
+            }
+            other => panic!("expected Oversized on the rustfmt path, got {other:?}"),
+        }
+
+        // Because the fetch aborted, the adapter's ingestion step
+        // (`ingest_markdown`) is never reached on the oversized body, so no
+        // sections can be produced from a truncated document — the "not a
+        // partial ingestion" guarantee, asserted again on a repeat fetch.
+        let still_aborts = client
+            .fetch(&big_url)
+            .await
+            .expect_err("the cap applies on every fetch of the oversized document");
+        assert!(
+            matches!(still_aborts, FetchError::Oversized { .. }),
+            "the oversized rustfmt document aborts on every fetch"
+        );
+    }
+
+    /// S-1 / AC3: a redirect that escapes the rustfmt boundary is *refused* on
+    /// the rustfmt discovery/fetch path. If the approved raw host 308s to a
+    /// foreign host, the gated fetch refuses the target (the same rejection the
+    /// production `RegistryGate` gives for a foreign host) rather than following
+    /// it off-boundary — and, on the loopback stand-in, no body is ingested.
+    #[tokio::test]
+    async fn an_escaping_redirect_from_a_rustfmt_url_is_refused() {
+        let server = FixtureServer::start(vec![(
+            rustfmt_path("README.md"),
+            Behavior::Redirect {
+                location: "https://evil.example.com/x".to_string(),
+            },
+        )]);
+        let client = loopback_client(cap_policy(4 * 1024 * 1024, 5));
+        let doc = rustfmt_loopback_url(&server, "README.md");
+        assert_rustfmt_boundary(&doc, 0);
+
+        let err = client
+            .fetch(&doc)
+            .await
+            .expect_err("an escaping redirect must be refused on the rustfmt path");
+        assert!(
+            matches!(err, FetchError::Bound { .. }),
+            "an escaping redirect is a boundary refusal, not a followed redirect: {err:?}"
+        );
+    }
+
+    /// S-1 / AC3: a redirect chain that stays on the (loopback) host but exceeds
+    /// the policy's `max_redirects` is *terminal* on the rustfmt discovery/fetch
+    /// path — the fetcher stops at the hop limit (`FetchError::TooManyRedirects`)
+    /// rather than walking unbounded, bounding the work the rustfmt fetch could
+    /// do even when every hop is on-boundary.
+    #[tokio::test]
+    async fn a_rustfmt_redirect_chain_beyond_the_limit_is_terminal() {
+        // A 3-node redirect cycle that stays on the loopback host (so the gate
+        // permits each hop) but exceeds `max_redirects`. With a limit of 2, the
+        // third hop is terminal. Relative locations keep each hop under the
+        // rustfmt raw path prefix.
+        let server = FixtureServer::start(vec![
+            (
+                rustfmt_path("README.md"),
+                Behavior::Redirect {
+                    location: "redirect-b".to_string(),
+                },
+            ),
+            (
+                rustfmt_path("redirect-b"),
+                Behavior::Redirect {
+                    location: "redirect-c".to_string(),
+                },
+            ),
+            (
+                rustfmt_path("redirect-c"),
+                Behavior::Redirect {
+                    location: "README.md".to_string(),
+                },
+            ),
+        ]);
+        let client = loopback_client(cap_policy(4 * 1024 * 1024, 2));
+        let doc = rustfmt_loopback_url(&server, "README.md");
+        assert_rustfmt_boundary(&doc, 0);
+
+        let err = client
+            .fetch(&doc)
+            .await
+            .expect_err("a redirect chain beyond the limit must be terminal");
+        match &err {
+            FetchError::TooManyRedirects { hops, .. } => {
+                assert_eq!(*hops, 3, "the third hop exceeds the limit of 2");
+            }
+            other => panic!("expected TooManyRedirects on the rustfmt path, got {other:?}"),
+        }
     }
 }
