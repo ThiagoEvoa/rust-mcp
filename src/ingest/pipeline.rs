@@ -49,6 +49,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use reqwest::Url;
 
+use crate::commands::CommandCatalog;
 use crate::corpus::{Publication, PublishError, load_published_snapshot, publish_snapshot};
 use crate::ingest::api_guidelines;
 use crate::ingest::books::{DiscoveryError, InventoryDiff, discover_inventory};
@@ -297,7 +298,10 @@ pub async fn sync(
             documents: urls.len(),
             sections: ingested_source.sections.len(),
             checklist_entries: ingested_source.checklist.len(),
-            command_entries: 0,
+            // [149] the command entries this source contributes to the unified
+            // catalog: the distinct command keys its own sections stamp
+            // (lightweight, no full catalog build).
+            command_entries: crate::commands::count_command_keys(&ingested_source.sections),
             diff,
         });
     }
@@ -324,7 +328,7 @@ pub async fn sync(
         }
     }
 
-    let manifest = SnapshotManifest {
+    let mut manifest = SnapshotManifest {
         schema_version: crate::model::SchemaVersion::CURRENT,
         body: ManifestBody {
             snapshot_id,
@@ -338,6 +342,22 @@ pub async fn sync(
             attribution: Vec::new(),
         },
     };
+
+    // [149] The unified, resolvable command catalog is derived from the sections
+    // the snapshot actually carries: one entry per distinct command key the
+    // sections stamp, each entry's citations re-pointed at those same sections.
+    // `list_sources`, the catalog resource, and `get_command_guidance` all read
+    // this *same* snapshot catalog, so they can no longer disagree about which
+    // keys exist (the pre-fix split: a fixed `combined()` catalog over a
+    // snapshot that carried no command entries).
+    let command_catalog = CommandCatalog::from_sections(&manifest.body.sections);
+    // AC4: `publish_snapshot` runs `validate_snapshot`, which rejects a snapshot
+    // whose command citations dangle (`UnresolvedCommandReference`) *before* it
+    // touches the corpus — so a broken citation is refused here, leaving the last
+    // valid snapshot untouched, rather than surfacing to a client later as a
+    // JSON-RPC `-32603`. The derived catalog's citations all resolve by
+    // construction; the guard is defense-in-depth against a future drift.
+    manifest.body.commands = command_catalog.into_entries();
 
     // `publish_snapshot` validates the candidate *before* it touches the
     // filesystem and promotes it atomically, so a validation failure leaves the

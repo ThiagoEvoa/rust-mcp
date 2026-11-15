@@ -30,9 +30,9 @@
 //! offline seed that makes the *first* launch usable.
 
 use crate::model::{
-    AttributionRef, Channel, ChecklistEntry, CommandEntry, EffectKind, EffectNote, ManifestBody,
-    Release, SchemaVersion, Section, SectionBuilder, SectionId, SnapshotId, SnapshotManifest,
-    Source, SourceId, Timestamp, Url, ValidationSummary,
+    AttributionRef, Channel, ChecklistEntry, ManifestBody, Release, SchemaVersion, Section,
+    SectionBuilder, SectionId, SnapshotId, SnapshotManifest, Source, SourceId, Timestamp, Url,
+    ValidationSummary,
 };
 use crate::registry::SourceCollection;
 
@@ -148,24 +148,14 @@ pub fn manifest_with_exclusions(excluded: &[&str]) -> SnapshotManifest {
         vec![]
     };
 
-    // --- Commands: each cites the *derived* section id of its own source, so it
-    // resolves only when that source survives. ---
-    let mut commands: Vec<CommandEntry> = Vec::new();
-    if let Some(id) = section_id_of.get("cargo") {
-        commands.push(cargo_command(
-            id,
-            "cargo build",
-            "Compile the local packages",
-        ));
-        commands.push(cargo_command(
-            id,
-            "cargo test",
-            "Run the project's unit and integration tests",
-        ));
-    }
-    if let Some(id) = section_id_of.get("rustup") {
-        commands.push(rustup_command(id));
-    }
+    // --- Commands: [149] the unified catalog is derived from the sections the
+    // snapshot actually carries — one entry per distinct command key those
+    // sections stamp, carrying the canonical rich metadata (syntax, examples,
+    // prerequisites, compatibility qualifications, effect notes) with the
+    // citations re-pointed at the surviving sections. A key whose section was
+    // excluded drops out with it, so the catalog and the section index never
+    // disagree: every advertised key resolves in this snapshot (AC1/AC3). ---
+    let commands = crate::commands::CommandCatalog::from_sections(&sections).into_entries();
 
     // --- Attribution: one record per surviving source (the licence/origin that
     // accompanies captured content, `docs/LICENSING.md` §4–§8). ---
@@ -380,35 +370,6 @@ fn channel_for(collection: SourceCollection) -> Channel {
         SourceCollection::ApiGuidelines | SourceCollection::Rustup | SourceCollection::Rustfmt => {
             Channel::Rolling
         }
-    }
-}
-
-fn cargo_command(target: &SectionId, key: &str, purpose: &str) -> CommandEntry {
-    CommandEntry {
-        key: crate::model::CommandKey::new(key).expect("a well-formed command key"),
-        purpose: purpose.to_string(),
-        upstream_sections: vec![target.clone()],
-        syntax: vec![format!("{key} [OPTIONS]")],
-        examples: vec![],
-        prerequisites: vec![],
-        compatibility: vec!["stable".to_string()],
-        effect_notes: vec![EffectNote {
-            kind: EffectKind::ProjectCodeExecution,
-            detail: "compiles and/or runs the project's own code".to_string(),
-        }],
-    }
-}
-
-fn rustup_command(target: &SectionId) -> CommandEntry {
-    CommandEntry {
-        key: crate::model::CommandKey::new("rustup show").expect("a well-formed command key"),
-        purpose: "Report the installed toolchains and the active one.".to_string(),
-        upstream_sections: vec![target.clone()],
-        syntax: vec!["rustup show [OPTIONS]".to_string()],
-        examples: vec![],
-        prerequisites: vec![],
-        compatibility: vec!["stable".to_string()],
-        effect_notes: vec![],
     }
 }
 

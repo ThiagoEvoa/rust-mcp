@@ -31,20 +31,19 @@
 //! 2. `notifications/initialized` → complete the handshake.
 //! 3. `tools/list` → the agent discovers the five tools, including
 //!    `get_command_guidance`.
-//! 4. `get_command_guidance "cargo build"` → the **one** seed command whose
-//!    full-catalog citation resolves in the representative seed: its catalog
-//!    entry (purpose, syntax, examples, prerequisites, compatibility
-//!    qualifications, effect notes) plus its cited section, canonical URL,
-//!    content hash, and citations. This is the guidance the agent would run via
-//!    *its own* terminal.
-//! 5. `get_command_guidance "cargo test"` → the seed *advertises* `cargo test`
-//!    in `list_sources`, but over the full catalog its citation
-//!    (`cargo/commands%2Fcargo-test`) is **not in the representative seed**, so
-//!    the server returns a typed `UnresolvedSection` error — the guidance is
-//!    **not fabricated**. This is a *skipped/unsupported configuration* the
-//!    trial records (AC2), not a failure to over-claim.
-//! 6. `get_command_guidance "rustup show"` → the same, for `rustup show`
-//!    (cites `rustup/index`, absent from the seed).
+//! 4. `get_command_guidance "cargo build"` → the seed's catalog entry (purpose,
+//!    syntax, examples, prerequisites, compatibility qualifications, effect
+//!    notes) plus its cited section, canonical URL, content hash, and citations.
+//!    This is the guidance the agent would run via *its own* terminal.
+//! 5. `get_command_guidance "cargo test"` → since issue [#149] the seed's
+//!    catalog is **derived from the seed's own sections** (one resolvable
+//!    snapshot catalog), so `cargo test` *resolves* on the seed — it cites the
+//!    seed's `cargo` section (the section that carries its `command_keys`), not a
+//!    section the seed lacks. The guidance is never a fabricated section and
+//!    never a `-32603`.
+//! 6. `get_command_guidance "rustup show"` → resolves on the seed too (cites
+//!    `rustup/index`), the same unified-catalog property for the toolchain
+//!    inspection command.
 //! 7. `get_command_guidance "cargo foobar"` → a command **not in the catalog**:
 //!    a typed `UnknownKey` error naming the full set of supported keys — the
 //!    catalog-boundary probe that also proves the key is a *selector*, never a
@@ -61,12 +60,15 @@
 //! automatically". The agent executes `cargo build`/`cargo test`/`rustup show`
 //! through *its own* terminal tools *outside this trial*; the trial records the
 //! guidance the agent would run and the *exit status* of the retrieval itself
-//! (a JSON-RPC `result` for `cargo build`, a typed `error` for the unresolved and
-//! unknown keys), never the exit status of a command the server ran. The server's
-//! own `instructions` state the boundary verbatim: *"The MCP provides evidence,
-//! not a guarantee that all guidance has been followed."* The trial asserts that
-//! phrasing and the unresolved/unknown findings it observes; it does not over-claim
-//! that every advertised command resolves on the representative seed.
+//! (a JSON-RPC `result` for every seed-advertised command, a typed `error` only
+//! for the not-in-catalog probe), never the exit status of a command the server
+//! ran. Since issue [#149] unified the catalog with the snapshot, **every**
+//! seed-advertised command resolves on the seed — the catalog and the section
+//! index are one resolvable snapshot catalog, so no advertised key dangles into
+//! a `-32603`. The server's own `instructions` state the boundary verbatim:
+//! *"The MCP provides evidence, not a guarantee that all guidance has been
+//! followed."* The trial asserts that phrasing and the resolution/unknown
+//! findings it observes; it does not execute or certify any command.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -103,13 +105,12 @@ const CARGO_BUILD_SECTION_HASH: &str = "c128-ffa550364dc212527d904d59fe85fe84";
 /// agent records).
 const CARGO_BUILD_SECTION_URL: &str = "https://doc.rust-lang.org/cargo/commands/cargo-build.html";
 
-/// The two seed-advertised commands whose full-catalog citations are *not* in the
-/// representative seed — the trial's unresolved "skipped/unsupported"
-/// configurations (AC2).
+/// The seed-advertised commands the trial exercises alongside `cargo build`. Since
+/// issue [#149] unified the catalog with the snapshot, both resolve on the seed
+/// (they cite the seed's own sections); `cargo foobar` below is the catalog-
+/// boundary probe that does not.
 const CARGO_TEST: &str = "cargo test";
-const CARGO_TEST_SECTION: &str = "cargo/commands%2Fcargo-test";
 const RUSTUP_SHOW: &str = "rustup show";
-const RUSTUP_SHOW_SECTION: &str = "rustup/index";
 
 /// A command key **not** in the catalog at all — the catalog-boundary probe that
 /// proves the key is a selector, never a shell line (AC2).
@@ -631,21 +632,24 @@ async fn the_project_implementation_trial_retrieves_command_guidance_and_reports
         "the citations carry a version qualification note; got {notes:?}"
     );
 
-    // ---- (4) get_command_guidance "cargo test": the seed *advertises* this
-    //         command in `list_sources`, but its full-catalog citation is not in
-    //         the representative seed — a typed UnresolvedSection error, not a
-    //         fabricated section. A *skipped/unsupported configuration* (AC2). --
+    // ---- (4) get_command_guidance "cargo test": since issue [#149] the seed's
+    //         catalog is derived from the seed's own sections, so the command the
+    //         seed advertises *resolves* on the seed — it cites the seed's
+    //         `cargo` section (the section that carries its `command_keys`), not
+    //         a section the seed lacks. The guidance is never a fabricated
+    //         section and never a `-32603`.
     let test = client
         .call_tool_raw("get_command_guidance", json!({ "command": CARGO_TEST }))
         .await;
-    assert_error_names_unresolved_section(&test, CARGO_TEST, CARGO_TEST_SECTION);
+    assert_command_resolves(&test, CARGO_TEST);
 
-    // ---- (5) get_command_guidance "rustup show": the same, for the toolchain
-    //         inspection command (its citation is absent from the seed too). ---
+    // ---- (5) get_command_guidance "rustup show": the same unified-catalog
+    //         property for the toolchain inspection command — it resolves on the
+    //         seed (citing `rustup/index`).
     let rustup = client
         .call_tool_raw("get_command_guidance", json!({ "command": RUSTUP_SHOW }))
         .await;
-    assert_error_names_unresolved_section(&rustup, RUSTUP_SHOW, RUSTUP_SHOW_SECTION);
+    assert_command_resolves(&rustup, RUSTUP_SHOW);
 
     // ---- (6) get_command_guidance "cargo foobar": a command not in the catalog
     //         at all — a typed UnknownKey error naming the supported keys. This
@@ -659,9 +663,10 @@ async fn the_project_implementation_trial_retrieves_command_guidance_and_reports
         .await;
     assert_error_names_unknown_key(&unknown, UNKNOWN_COMMAND);
 
-    // The trial's headline finding (AC2): of the three seed-advertised commands,
-    // exactly one resolves; the other two are honestly reported as unresolved.
-    skipped_configs_are_recorded(&build, &test, &rustup, &unknown);
+    // The trial's headline finding (AC2, post-#149): every seed-advertised
+    // command resolves on the unified snapshot catalog; only the not-in-catalog
+    // probe is honestly reported as unknown.
+    seed_commands_all_resolve(&build, &test, &rustup, &unknown);
 
     // Persist the request/response transcript for the docs, when requested.
     client.maybe_write_transcript("RUST_DOCS_MCP_TRIAL_TRANSCRIPT");
@@ -670,53 +675,57 @@ async fn the_project_implementation_trial_retrieves_command_guidance_and_reports
     client.close_and_wait_clean().await;
 }
 
-/// Assert a `get_command_guidance` response for `key` is a typed
-/// `UnresolvedSection` error (JSON-RPC `-32603`, `INTERNAL_ERROR`) naming the
-/// exact missing section — the honest, non-fabricated "skipped configuration" the
-/// trial records for a seed-advertised command whose full-catalog citation the
-/// representative seed does not carry.
-fn assert_error_names_unresolved_section(response: &Value, key: &str, section: &str) {
-    let error = response
-        .get("error")
-        .and_then(Value::as_object)
-        .unwrap_or_else(|| panic!("`{key}` must return a typed error, not a result: {response}"));
-    // JSON-RPC `-32603` is the `INTERNAL_ERROR` the [053] seam maps
-    // `UnresolvedSection` to.
+/// Assert a `get_command_guidance` response for `key` is a **successful**
+/// resolution on the active snapshot: no error, the guidance names the active
+/// snapshot, the entry round-trips its command key and carries documented
+/// metadata (a non-empty purpose and syntax), and at least one cited section
+/// resolves and names its source.
+///
+/// Since issue [#149] unified the catalog with the snapshot, every seed-
+/// advertised command resolves this way — the catalog and the section index are
+/// one resolvable snapshot catalog, so a key the seed advertises can never
+/// dangle into a `-32603` (`UnresolvedSection`); that path is now the catalog
+/// boundary's typed `UnknownKey`, asserted for `cargo foobar`.
+fn assert_command_resolves(response: &Value, key: &str) {
     assert_eq!(
-        error.get("code").and_then(Value::as_i64),
-        Some(-32603),
-        "an unresolved citation maps to JSON-RPC INTERNAL_ERROR (-32603); got {error:?}"
+        response.get("error"),
+        None,
+        "`{key}` must resolve on the snapshot, not error: {response}"
     );
-    let data = error
-        .get("data")
-        .and_then(Value::as_object)
-        .unwrap_or_else(|| {
-            panic!("the unresolved-section error names the offending citation: {error:?}")
-        });
+    let content = &response["result"]["structuredContent"];
     assert_eq!(
-        data.get("key").and_then(Value::as_str),
+        content.get("snapshot_id").and_then(Value::as_str),
+        Some(SNAPSHOT_ID),
+        "the resolved guidance names the active snapshot"
+    );
+    let entry = &content["entry"];
+    assert_eq!(
+        entry.get("key").and_then(Value::as_str),
         Some(key),
-        "the error names the refused command key"
+        "the entry round-trips its command key"
     );
-    assert_eq!(
-        data.get("section").and_then(Value::as_str),
-        Some(section),
-        "the error names the exact missing section (no section is fabricated)"
-    );
-    // The message is actionable and leak-free: it names the section and the fix
-    // (refresh the snapshot), and no internal path or backtrace leaks.
-    let message = error
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
     assert!(
-        message.contains(section),
-        "the message names the missing section: {message}"
+        !entry["purpose"].as_str().unwrap().is_empty(),
+        "the entry carries a documented purpose"
     );
-    for forbidden in ["/src/", "at 0x", "backtrace", "src/mcp"] {
+    assert!(
+        !entry["syntax"].as_array().unwrap().is_empty(),
+        "the entry carries documented syntax"
+    );
+    // At least one cited section resolved (no section is fabricated), and it
+    // names its source — the provenance the agent records.
+    let sections = content
+        .get("sections")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("a resolved guidance cites sections: {response}"));
+    assert!(
+        !sections.is_empty(),
+        "a resolved guidance cites at least one section"
+    );
+    for section in sections {
         assert!(
-            !message.contains(forbidden),
-            "the error leaks no internal path or backtrace ({forbidden}): {message}"
+            section.get("source").and_then(Value::as_str).is_some(),
+            "each cited section names its source"
         );
     }
 }
@@ -775,52 +784,51 @@ fn assert_error_names_unknown_key(response: &Value, command: &str) {
     }
 }
 
-/// AC2 — the trial's headline finding, recorded rather than over-claimed:
+/// AC2 — the trial's headline finding (post-#149), recorded rather than
+/// over-claimed:
 ///
-/// * **one** of the three seed-advertised commands (`cargo build`) *resolves* —
-///   its guidance, citations, compatibility qualifications, and effect notes are
-///   returned in full;
-/// * the other two (`cargo test`, `rustup show`) are **honestly reported as
-///   unresolved** — a typed `UnresolvedSection` error, not a fabricated section
-///   — because the representative seed does not carry their full-catalog
-///   citations;
+/// * **all three** seed-advertised commands (`cargo build`, `cargo test`,
+///   `rustup show`) *resolve* on the seed — since issue [#149] unified the
+///   catalog with the snapshot, the catalog is derived from the seed's own
+///   sections, so every advertised key resolves and none dangles into a
+///   `-32603`;
 /// * the not-in-catalog probe (`cargo foobar`) is **honestly reported as
 ///   unknown** with the supported keys — the catalog boundary.
 ///
-/// This asserts the trial did **not** silently claim that every advertised
-/// command resolves on the seed: the gap is real and documented, not fabricated
-/// away.
-fn skipped_configs_are_recorded(build: &Value, test: &Value, rustup: &Value, unknown: &Value) {
+/// This asserts the trial observed the unified catalog: every advertised command
+/// resolves, and the only failure is the genuine not-in-catalog probe.
+fn seed_commands_all_resolve(build: &Value, test: &Value, rustup: &Value, unknown: &Value) {
     assert!(
         build.get("error").is_none(),
         "`cargo build` resolves on the seed — the trial's success path"
     );
     assert!(
-        test.get("error").is_some(),
-        "`cargo test` is an unresolved configuration the trial records, not a hidden miss"
+        test.get("error").is_none(),
+        "`cargo test` resolves on the unified catalog (post-#149), not a recorded miss"
     );
     assert!(
-        rustup.get("error").is_some(),
-        "`rustup show` is an unresolved configuration the trial records, not a hidden miss"
+        rustup.get("error").is_none(),
+        "`rustup show` resolves on the unified catalog (post-#149), not a recorded miss"
     );
     assert!(
         unknown.get("error").is_some(),
         "the not-in-catalog probe is a recorded unsupported configuration"
     );
-    // Exactly one of the three advertised commands resolves; the other two do
-    // not — the trial's honest, recorded finding.
-    let resolves = [
+    // Every advertised command resolves; only the not-in-catalog probe fails —
+    // the trial's honest, recorded finding.
+    let advertised = [
         (CARGO_BUILD, build),
         (CARGO_TEST, test),
         (RUSTUP_SHOW, rustup),
     ];
-    let resolving_count = resolves
+    let resolving_count = advertised
         .iter()
         .filter(|(_, response)| response.get("error").is_none())
         .count();
     assert_eq!(
-        resolving_count, 1,
-        "exactly one of the three seed-advertised commands resolves on the representative seed"
+        resolving_count,
+        advertised.len(),
+        "every seed-advertised command resolves on the unified snapshot catalog"
     );
 }
 
