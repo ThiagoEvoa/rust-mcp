@@ -433,8 +433,18 @@ fn github_slug(text: &str) -> String {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
+    //! `FetchError` carries a `Url` (a large type), so suppress the lint for the
+    //! rustfmt-path fetch tests below — the same suppression the sibling
+    //! fetch-using adapter tests (`cargo`, `rustdoc`, `clippy`, `pipeline`)
+    //! already use.
+    #![allow(clippy::result_large_err)]
+
     use super::*;
+    use crate::ingest::fetch::{BoundClient, FetchError, FetchPolicy, LoopbackGate};
+    use crate::ingest::http_fixture::{Behavior, FixtureServer};
     use reqwest::StatusCode;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     /// A minimal `Fetched` carrying `body` as UTF-8, served from `url`.
     fn fetched(body: &str, url: &Url) -> Fetched {
@@ -928,6 +938,220 @@ reference for the full list of options.
                 url.as_str().contains(rev),
                 "the URL pins the approved revision: {url}"
             );
+        }
+    }
+
+    // -- S-1 / AC3: the byte cap and the redirect cap on the *rustfmt*
+    //    discovery/fetch path (issue #147) -------------------------------
+    //
+    // The shared fetcher (`fetch.rs`) already proves the byte cap and the
+    // redirect cap in isolation. The reviewer's point (S-1) is that no
+    // *rustfmt-specific* test drives the rustfmt path through either limit, so
+    // the limits could silently stop protecting rustfmt discovery/fetch without
+    // a test failing. The tests below exercise the rustfmt adapter's own
+    // ingestion path — a gated fetch (the same `BoundClient` + policy the
+    // pipeline uses for `SourceCollection::Rustfmt`), then
+    // `rustfmt::ingest_markdown` — over a loopback fixture, asserting the
+    // transfer *aborts* on the byte cap and is *refused/terminal* on the
+    // redirect limits, rather than returning a partial body.
+
+    /// The rustfmt raw document path at the approved revision — the exact shape
+    /// `approved_documents()` builds, used as a loopback fixture route key.
+    fn rustfmt_path(file: &str) -> String {
+        format!("/rust-lang/rustfmt/{rev}/{file}", rev = APPROVED_REVISION)
+    }
+
+    /// A loopback URL carrying the rustfmt raw document path for `file` — the
+    /// shape the production discovery fetches, pointed at `server` instead of the
+    /// real raw host so the test is offline.
+    fn rustfmt_loopback_url(server: &FixtureServer, file: &str) -> Url {
+        Url::parse(&format!(
+            "http://{addr}{path}",
+            addr = server.addr,
+            path = rustfmt_path(file)
+        ))
+        .expect("a well-formed loopback URL")
+    }
+
+    /// A fast loopback policy: a configurable body cap and redirect limit, with
+    /// retries and backoff disabled so the offline fixtures complete quickly.
+    fn cap_policy(cap: usize, max_redirects: usize) -> FetchPolicy {
+        FetchPolicy {
+            max_retries: 0,
+            transient_backoff: Duration::ZERO,
+            retry_after_max: Duration::ZERO,
+            max_redirects,
+            max_body_bytes: Some(cap),
+            ..FetchPolicy::default()
+        }
+    }
+
+    /// The gated fetcher the rustfmt discovery/fetch path uses, driven over
+    /// loopback (any `127.0.0.1`/`localhost` HTTP target is allowed) with the
+    /// policy under test.
+    fn loopback_client(policy: FetchPolicy) -> BoundClient {
+        BoundClient::with_gate(policy, Arc::new(LoopbackGate)).expect("the loopback client builds")
+    }
+
+    /// The genuine rustfmt tie: the driven loopback URL carries the path of the
+    /// approved rustfmt `file` document (`0` = `README.md`, `1` =
+    /// `Configurations.md`), and that path resolves to the `rustfmt`
+    /// collection. This makes the cap/redirect assertion genuinely "on the
+    /// rustfmt discovery/fetch path," not an arbitrary host.
+    fn assert_rustfmt_boundary(driven: &Url, file: usize) {
+        use crate::registry::{SourceCollection, resolve_url};
+        let approved = &approved_documents()[file];
+        assert_eq!(
+            driven.path(),
+            approved.path(),
+            "the driven loopback URL carries the approved rustfmt path"
+        );
+        assert_eq!(
+            resolve_url(approved.as_str()).map(|resolved| resolved.collection),
+            Ok(SourceCollection::Rustfmt),
+            "the approved rustfmt path resolves to the rustfmt collection"
+        );
+    }
+
+    /// S-1 / AC3: the per-transfer byte cap is enforced *on the rustfmt
+    /// discovery/fetch path* — not only by the shared fetcher in isolation. A
+    /// within-cap `README.md` body fetches and ingests through the rustfmt
+    /// adapter's own path; a body far larger than the cap over the *same path*
+    /// must abort the transfer (`FetchError::Oversized`) rather than return a
+    /// truncated body — so no partial rustfmt document can corrupt the corpus.
+    #[tokio::test]
+    async fn an_oversized_rustfmt_document_aborts_the_transfer_not_a_partial_ingestion() {
+        const CAP: usize = 512;
+
+        // Positive control: a small, valid `README.md` body (well under the cap)
+        // fetches through the rustfmt path and ingests into sections — so the
+        // path itself works and the cap is the only thing that flips it.
+        let ok_body = "# rustfmt\n\n## Configuration\n\nrustfmt reads its options from a `rustfmt.toml` file.\n";
+        let ok_server = FixtureServer::start(vec![(
+            rustfmt_path("README.md"),
+            Behavior::Text {
+                body: ok_body.as_bytes().to_vec(),
+                etag: Some("\"readme-1\"".to_string()),
+                last_modified: None,
+                content_type: Some("text/markdown; charset=utf-8".to_string()),
+            },
+        )]);
+        let client = loopback_client(cap_policy(CAP, 5));
+        let ok_url = rustfmt_loopback_url(&ok_server, "README.md");
+        assert_rustfmt_boundary(&ok_url, 0);
+        let ok_fetched = client
+            .fetch(&ok_url)
+            .await
+            .expect("a within-cap rustfmt body fetches");
+        assert!(
+            ingest_markdown(&ok_fetched).is_ok(),
+            "a within-cap rustfmt body ingests into sections"
+        );
+
+        // The same path, a body far larger than the cap: the transfer must
+        // abort all-or-nothing, never returning a truncated body.
+        let big_server = FixtureServer::start(vec![(
+            rustfmt_path("README.md"),
+            Behavior::Big { size: 64 * 1024 },
+        )]);
+        let big_url = rustfmt_loopback_url(&big_server, "README.md");
+        assert_rustfmt_boundary(&big_url, 0);
+        let err = client.fetch(&big_url).await.expect_err(
+            "an oversized rustfmt body must abort the transfer, not return a partial body",
+        );
+        match &err {
+            FetchError::Oversized { cap: got, url } => {
+                assert_eq!(*got, CAP, "the enforced cap is the policy cap");
+                assert_eq!(url, &big_url, "the abort names the rustfmt document URL");
+            }
+            other => panic!("expected Oversized on the rustfmt path, got {other:?}"),
+        }
+
+        // Because the fetch aborted, the adapter's ingestion step
+        // (`ingest_markdown`) is never reached on the oversized body, so no
+        // sections can be produced from a truncated document — the "not a
+        // partial ingestion" guarantee, asserted again on a repeat fetch.
+        let still_aborts = client
+            .fetch(&big_url)
+            .await
+            .expect_err("the cap applies on every fetch of the oversized document");
+        assert!(
+            matches!(still_aborts, FetchError::Oversized { .. }),
+            "the oversized rustfmt document aborts on every fetch"
+        );
+    }
+
+    /// S-1 / AC3: a redirect that escapes the rustfmt boundary is *refused* on
+    /// the rustfmt discovery/fetch path. If the approved raw host 308s to a
+    /// foreign host, the gated fetch refuses the target (the same rejection the
+    /// production `RegistryGate` gives for a foreign host) rather than following
+    /// it off-boundary — and, on the loopback stand-in, no body is ingested.
+    #[tokio::test]
+    async fn an_escaping_redirect_from_a_rustfmt_url_is_refused() {
+        let server = FixtureServer::start(vec![(
+            rustfmt_path("README.md"),
+            Behavior::Redirect {
+                location: "https://evil.example.com/x".to_string(),
+            },
+        )]);
+        let client = loopback_client(cap_policy(4 * 1024 * 1024, 5));
+        let doc = rustfmt_loopback_url(&server, "README.md");
+        assert_rustfmt_boundary(&doc, 0);
+
+        let err = client
+            .fetch(&doc)
+            .await
+            .expect_err("an escaping redirect must be refused on the rustfmt path");
+        assert!(
+            matches!(err, FetchError::Bound { .. }),
+            "an escaping redirect is a boundary refusal, not a followed redirect: {err:?}"
+        );
+    }
+
+    /// S-1 / AC3: a redirect chain that stays on the (loopback) host but exceeds
+    /// the policy's `max_redirects` is *terminal* on the rustfmt discovery/fetch
+    /// path — the fetcher stops at the hop limit (`FetchError::TooManyRedirects`)
+    /// rather than walking unbounded, bounding the work the rustfmt fetch could
+    /// do even when every hop is on-boundary.
+    #[tokio::test]
+    async fn a_rustfmt_redirect_chain_beyond_the_limit_is_terminal() {
+        // A 3-node redirect cycle that stays on the loopback host (so the gate
+        // permits each hop) but exceeds `max_redirects`. With a limit of 2, the
+        // third hop is terminal. Relative locations keep each hop under the
+        // rustfmt raw path prefix.
+        let server = FixtureServer::start(vec![
+            (
+                rustfmt_path("README.md"),
+                Behavior::Redirect {
+                    location: "redirect-b".to_string(),
+                },
+            ),
+            (
+                rustfmt_path("redirect-b"),
+                Behavior::Redirect {
+                    location: "redirect-c".to_string(),
+                },
+            ),
+            (
+                rustfmt_path("redirect-c"),
+                Behavior::Redirect {
+                    location: "README.md".to_string(),
+                },
+            ),
+        ]);
+        let client = loopback_client(cap_policy(4 * 1024 * 1024, 2));
+        let doc = rustfmt_loopback_url(&server, "README.md");
+        assert_rustfmt_boundary(&doc, 0);
+
+        let err = client
+            .fetch(&doc)
+            .await
+            .expect_err("a redirect chain beyond the limit must be terminal");
+        match &err {
+            FetchError::TooManyRedirects { hops, .. } => {
+                assert_eq!(*hops, 3, "the third hop exceeds the limit of 2");
+            }
+            other => panic!("expected TooManyRedirects on the rustfmt path, got {other:?}"),
         }
     }
 }
