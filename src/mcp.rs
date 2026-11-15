@@ -211,9 +211,18 @@ impl DocsServer {
     /// from the wall clock and the threshold is the plan's seven-day default,
     /// matching [`DocsServer::new`].
     pub fn with_snapshot(manifest: SnapshotManifest) -> Self {
+        // [149] The catalog the handler serves is the snapshot's *own* command
+        // catalog — the same entries `list_sources` and the catalog resource
+        // read — rather than the fixed `combined()` set. A catalog derived this
+        // way can only name keys whose sections the snapshot carries, so a
+        // `get_command_guidance` lookup never dangles (AC1); an empty snapshot
+        // advertises no keys rather than keys it cannot resolve (AC3). Cloning
+        // the (small) command list keeps the owned `manifest` intact for the
+        // section index the lookups resolve against.
+        let catalog = CommandCatalog::from_entries(manifest.body.commands.clone());
         Self {
             manifest,
-            catalog: CommandCatalog::combined(),
+            catalog,
             as_of: Instant::from_system_time(std::time::SystemTime::now()),
             threshold: StaleThreshold::default(),
         }

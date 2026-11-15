@@ -365,6 +365,149 @@ impl CommandCatalog {
         CommandCatalog { entries }
     }
 
+    /// Build a catalog from an explicit set of entries — the snapshot's published
+    /// `manifest.body.commands`.
+    ///
+    /// The published catalog is the one the server serves, so `list_sources`, the
+    /// catalog resource, and `get_command_guidance` all read the *same* entries
+    /// (issue #149's "one resolvable snapshot catalog"): a single, immutable
+    /// source that discovery and guidance cannot disagree about. An empty input
+    /// yields an empty catalog (the server then advertises no command keys rather
+    /// than the fixed [`combined`] set, which is exactly the drift this fix
+    /// closes).
+    pub fn from_entries(entries: Vec<CommandEntry>) -> CommandCatalog {
+        CommandCatalog { entries }
+    }
+
+    /// Consume the catalog into its ordered entries, for publishing into a
+    /// snapshot's `manifest.body.commands`.
+    pub fn into_entries(self) -> Vec<CommandEntry> {
+        self.entries
+    }
+
+    /// The unified, resolvable catalog a snapshot serves: one entry per distinct
+    /// command key the snapshot's own sections carry, carrying the rich upstream
+    /// excerpts and effect notes the canonical [`combined`] catalog defines for
+    /// that key (where it does) and re-pointed at the sections the snapshot
+    /// actually carries.
+    ///
+    /// This is the "one resolvable snapshot catalog" the `list_sources`, catalog
+    /// resource, and `get_command_guidance` surfaces all read (issue #149). Because
+    /// every derived entry's [`CommandEntry::upstream_sections`] are the ids of
+    /// sections the snapshot itself carries, the [043] `resolve` /
+    /// [`LookupError::UnresolvedSection`] guard is a no-op on a catalog built this
+    /// way: it can never hand a caller a guidance entry whose citation dangles,
+    /// and a dangling reference is instead rejected *before* activation by
+    /// [`crate::corpus::validate_snapshot`]'s `UnresolvedCommandReference` — never
+    /// returned to a client as a JSON-RPC `-32603`.
+    ///
+    /// Ordering is deterministic (a fixed snapshot yields a byte-identical
+    /// catalog): the keys the canonical [`combined`] catalog names, in its fixed
+    /// order, first, then any snapshot-only keys the canonical catalog does not
+    /// name, in sorted order.
+    pub fn from_sections(sections: &[Section]) -> CommandCatalog {
+        use std::collections::{BTreeMap, BTreeSet};
+        use std::str::FromStr;
+
+        // Group the section ids that carry each command key. A section may carry
+        // several keys (the bundled `cargo` section names both `cargo build` and
+        // `cargo test`), so the id is recorded once per key it carries. A key the
+        // boundary would refuse (a shell operator / padding) is never stamped onto
+        // a section by the ingest, but is skipped anyway: it is not a catalog key.
+        let mut by_key: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for section in sections {
+            for key in &section.command_keys {
+                if CommandKey::new(key.as_str()).is_err() {
+                    continue;
+                }
+                by_key
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(section.id.as_str().to_string());
+            }
+        }
+
+        // Order: the canonical keys (in `combined()` order) that the snapshot
+        // carries, then any snapshot-only keys in sorted order. This keeps a
+        // canonical catalog byte-identical to the fixed order while admitting
+        // keys the canonical catalog does not name.
+        let canonical = CommandCatalog::combined();
+        let canonical_keys = canonical.keys();
+        let mut ordered_keys: Vec<String> = canonical_keys
+            .iter()
+            .filter(|key| by_key.contains_key(*key))
+            .cloned()
+            .collect();
+        let mut snapshot_only: Vec<String> = by_key
+            .keys()
+            .filter(|key| !canonical_keys.contains(key))
+            .cloned()
+            .collect();
+        snapshot_only.sort();
+        ordered_keys.extend(snapshot_only);
+
+        let mut entries = Vec::with_capacity(ordered_keys.len());
+        for key in ordered_keys {
+            // BTreeSet iterates in sorted order, so `section_ids` is sorted and
+            // deduplicated; rebuild the typed section ids from their canonical
+            // string form (these are the snapshot's own section ids, so they
+            // always parse).
+            let section_ids: Vec<SectionId> = by_key
+                .remove(&key)
+                .expect("the key was grouped above and is present")
+                .into_iter()
+                .filter_map(|id| SectionId::from_str(&id).ok())
+                .collect();
+            // Pull the canonical entry's rich metadata where the key has one and
+            // re-point its citations at the sections the snapshot actually
+            // carries; fall back to a minimal entry for a key the canonical
+            // catalog does not define.
+            let entry = match canonical.get(&key) {
+                Ok(canonical_entry) => {
+                    let mut owned = canonical_entry.clone();
+                    owned.upstream_sections = section_ids;
+                    owned
+                }
+                Err(_) => CommandEntry {
+                    key: CommandKey::new(&key).expect("the key passed the boundary above"),
+                    purpose: format!("Documentation for `{key}`."),
+                    upstream_sections: section_ids,
+                    syntax: Vec::new(),
+                    examples: Vec::new(),
+                    prerequisites: Vec::new(),
+                    compatibility: Vec::new(),
+                    effect_notes: Vec::new(),
+                },
+            };
+            entries.push(entry);
+        }
+        CommandCatalog { entries }
+    }
+
+    /// Prove that every entry's cited upstream sections resolve against
+    /// `manifest`'s [`SectionIndex`], returning the first dangling citation as a
+    /// [`LookupError::UnresolvedSection`].
+    ///
+    /// This is the AC1 / AC4 guard made explicit: a catalog whose entries all
+    /// resolve can be served (a lookup never fabricates a section), while a
+    /// catalog carrying a dangling reference is refused *here*, before it is
+    /// published or served — never surfaced to a client as a JSON-RPC `-32603`
+    /// from `get_command_guidance`.
+    pub fn validate_citations(&self, manifest: &SnapshotManifest) -> Result<(), LookupError> {
+        let index = SectionIndex::build(manifest);
+        for entry in &self.entries {
+            for reference in &entry.upstream_sections {
+                if index.get(reference).is_none() {
+                    return Err(LookupError::UnresolvedSection {
+                        key: entry.key.to_string(),
+                        section: reference.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Whether the catalog has no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -441,6 +584,34 @@ impl CommandCatalog {
             snapshot_id: manifest.body.snapshot_id.clone(),
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-source command-key count
+// ---------------------------------------------------------------------------
+
+/// The number of distinct, valid command keys a set of sections stamps — a
+/// source's contribution to the unified catalog.
+///
+/// Lightweight by design: it counts the keys without building the canonical
+/// [`CommandCatalog::combined`] catalog, so the sync report can tally each
+/// source's `command_entries` in a hot per-source loop without the cost of a full
+/// catalog build (which [`CommandCatalog::from_sections`] pays only once, at the
+/// manifest level).
+///
+/// A key the command-key boundary would refuse (a shell operator / padding) is
+/// never stamped onto a section by the ingest, and is skipped anyway.
+pub fn count_command_keys(sections: &[Section]) -> usize {
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for section in sections {
+        for key in &section.command_keys {
+            if CommandKey::new(key.as_str()).is_ok() {
+                seen.insert(key.clone());
+            }
+        }
+    }
+    seen.len()
 }
 
 // ---------------------------------------------------------------------------
@@ -3098,6 +3269,133 @@ mod tests {
             .get("cargo new")
             .expect_err("an empty catalog has no entries");
         assert!(matches!(err, LookupError::UnknownKey { .. }));
+    }
+
+    // ===========================================================
+    // [149] the unified, resolvable snapshot catalog
+    // ===========================================================
+
+    /// A section carrying a command key, the way the ingest stamps the command
+    /// section the catalog will cite.
+    fn keyed_command_section(chapter: &str, title: &str, key: &str) -> Section {
+        SectionBuilder::new(
+            SourceId::new("cargo").expect("`cargo` is a registry source id"),
+            title,
+            chapter,
+            Url::new(format!("https://doc.rust-lang.org/cargo/{chapter}.html"))
+                .expect("a valid canonical URL"),
+            format!("{title}: a short, faithful excerpt from the Cargo Book."),
+        )
+        .command_keys([key])
+        .build()
+        .expect("a well-formed section")
+    }
+
+    /// A snapshot carrying exactly the given sections and no commands.
+    fn sections_manifest(sections: Vec<Section>) -> SnapshotManifest {
+        use crate::model::SnapshotManifest;
+        SnapshotManifest {
+            schema_version: SchemaVersion::V1,
+            body: ManifestBody {
+                snapshot_id: SnapshotId::new("fixture-149").expect("a URI-safe snapshot id"),
+                created_at: Timestamp::new("2026-01-01T00:00:00Z").expect("a valid timestamp"),
+                parser_version: "test".to_string(),
+                sections,
+                sources: vec![],
+                checklist: vec![],
+                commands: vec![],
+                validation: Default::default(),
+                attribution: vec![],
+            },
+        }
+    }
+
+    /// AC1: a catalog derived from a snapshot's sections re-points each entry's
+    /// citations at the sections the snapshot actually carries, so every cited
+    /// section resolves in that same snapshot — the property the pre-fix split
+    /// (catalog = `combined()`, section index = the snapshot) violated for every
+    /// key `combined()` advertised but the snapshot did not carry.
+    #[test]
+    fn unified_catalog_from_sections_repoints_citations_to_the_snapshot() {
+        let sections = vec![
+            keyed_command_section("commands/cargo-build", "cargo build", "cargo build"),
+            keyed_command_section("commands/cargo-test", "cargo test", "cargo test"),
+        ];
+        let catalog = CommandCatalog::from_sections(&sections);
+        assert_eq!(catalog.keys(), vec!["cargo build", "cargo test"]);
+
+        let manifest = sections_manifest(sections.clone());
+        let index = SectionIndex::build(&manifest);
+        // Every re-pointed citation resolves against the snapshot the catalog
+        // came from — the "same snapshot" AC1 property.
+        for key in ["cargo build", "cargo test"] {
+            let entry = catalog.get(key).expect("the derived catalog names the key");
+            for reference in &entry.upstream_sections {
+                assert!(
+                    index.get(reference).is_some(),
+                    "citation {reference} resolves in the snapshot",
+                );
+            }
+        }
+
+        // The canonical `cargo build` entry cites `cargo/commands/cargo-build`;
+        // the derived entry re-points to the section the snapshot carries, so the
+        // two agree.
+        let build = catalog.get("cargo build").expect("present");
+        assert_eq!(
+            build.upstream_sections,
+            vec![cargo_section("commands/cargo-build")]
+        );
+    }
+
+    /// AC1/AC3: an empty or section-less snapshot yields an empty catalog, and an
+    /// entry list is not silently republished as the fixed `combined()` set — the
+    /// drift this fix closes. An empty snapshot therefore advertises no command
+    /// keys rather than the `combined()` keys it cannot resolve.
+    #[test]
+    fn unified_catalog_from_entries_does_not_republish_combined_when_empty() {
+        let manifest = sections_manifest(vec![]);
+        assert!(CommandCatalog::from_entries(manifest.body.commands.clone()).is_empty());
+        assert!(CommandCatalog::from_sections(&manifest.body.sections).is_empty());
+    }
+
+    /// AC4: a catalog derived from a snapshot's own sections always resolves
+    /// against that snapshot's index, so the pre-activation guard passes.
+    #[test]
+    fn unified_catalog_citations_validate_against_its_own_sections() {
+        let section = keyed_command_section("commands/cargo-build", "cargo build", "cargo build");
+        let derived = CommandCatalog::from_sections(std::slice::from_ref(&section));
+        let manifest = sections_manifest(vec![section]);
+        assert!(derived.validate_citations(&manifest).is_ok());
+    }
+
+    /// AC4: a catalog carrying a dangling citation is refused *before* it is
+    /// served — the guard that turns the pre-fix `-32603` (a key `combined()`
+    /// advertised but the snapshot did not carry) into a rejected snapshot,
+    /// never a client error.
+    #[test]
+    fn a_dangling_command_citation_is_refused_before_serving() {
+        let section = keyed_command_section("commands/cargo-build", "cargo build", "cargo build");
+        // A catalog entry that cites a section the snapshot does not carry.
+        let dangling = CommandCatalog::from_entries(vec![CommandEntry {
+            key: CommandKey::new("cargo build").expect("a valid key"),
+            purpose: "build".to_string(),
+            upstream_sections: vec![cargo_section("commands/cargo-missing")],
+            syntax: vec![],
+            examples: vec![],
+            prerequisites: vec![],
+            compatibility: vec![],
+            effect_notes: vec![],
+        }]);
+        let manifest = sections_manifest(vec![section]);
+        match dangling.validate_citations(&manifest) {
+            Ok(()) => panic!("a dangling citation must be refused"),
+            Err(LookupError::UnresolvedSection { key, section }) => {
+                assert_eq!(key, "cargo build");
+                assert_eq!(section, cargo_section("commands/cargo-missing"));
+            }
+            Err(other) => panic!("expected an unresolved-section error, got {other:?}"),
+        }
     }
 
     // ===========================================================

@@ -743,6 +743,36 @@ async fn call_get_command_guidance(client: &mut Client) {
         );
     }
 
+    // --- The other routine command families also resolve on the seed. -------
+    // Since issue [#149] unified the catalog with the snapshot, the seed's
+    // catalog is derived from its own sections, so every seed-advertised key
+    // resolves rather than dangling into a `-32603` (`UnresolvedSection`). This
+    // is the AC3 "routine command families work on a fresh offline launch"
+    // property, driven through the stdio seam.
+    for key in ["cargo test", "rustup show"] {
+        let response = client
+            .call_tool("get_command_guidance", json!({ "command": key }))
+            .await;
+        assert_eq!(
+            response.get("error"),
+            None,
+            "the routine command `{key}` resolves on the seed: {response}"
+        );
+        let structured = &response["result"]["structuredContent"];
+        assert_eq!(
+            structured["entry"]["key"],
+            json!(key),
+            "`{key}` round-trips its command key"
+        );
+        let sections = structured["sections"]
+            .as_array()
+            .expect("a `sections` array");
+        assert!(
+            !sections.is_empty(),
+            "`{key}` cites at least one upstream section in the seed corpus"
+        );
+    }
+
     // --- An unsupported key is a typed error with the supported keys. -------
     let response = client
         .call_tool(
