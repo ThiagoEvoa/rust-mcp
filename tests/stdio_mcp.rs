@@ -510,10 +510,6 @@ async fn call_search_docs(client: &mut Client) {
                 .expect("a truncated page carries a next cursor")
                 .to_string(),
         );
-        assert!(
-            pages <= 20,
-            "the search paginates in a bounded number of pages"
-        );
     }
     assert!(
         !collected.is_empty(),
@@ -530,6 +526,21 @@ async fn call_search_docs(client: &mut Client) {
         distinct.len(),
         collected.len(),
         "concatenated pages carry no duplicate hits: {collected:?}"
+    );
+    // Bounded, non-truncating pagination, corpus-derived: a limit-one walk
+    // returns exactly one new distinct section per page, so the number of pages
+    // can never exceed the number of distinct matches. This replaces the old
+    // seed-calibrated `pages <= 20` — the hand-authored 8-section corpus is gone,
+    // replaced by the 448-section real upstream corpus (#150), so `Rust` now
+    // matches ~361 sections and the walk spans ~361 pages rather than a handful.
+    // A non-advancing (runaway) cursor would push `pages` past the distinct count
+    // and break this; the per-request deadline in `exchange` is the fast-fail net
+    // for a true runaway loop.
+    assert!(
+        pages <= distinct.len(),
+        "a limit-one walk is bounded by its distinct matches: {pages} pages over \
+         {} distinct matches",
+        distinct.len(),
     );
 
     // --- Empty result: zero hits with useful-empty guidance, not an error. ---
