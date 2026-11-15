@@ -531,11 +531,12 @@ async fn call_search_docs(client: &mut Client) {
     // returns exactly one new distinct section per page, so the number of pages
     // can never exceed the number of distinct matches. This replaces the old
     // seed-calibrated `pages <= 20` — the hand-authored 8-section corpus is gone,
-    // replaced by the 448-section real upstream corpus (#150), so `Rust` now
-    // matches ~361 sections and the walk spans ~361 pages rather than a handful.
-    // A non-advancing (runaway) cursor would push `pages` past the distinct count
-    // and break this; the per-request deadline in `exchange` is the fast-fail net
-    // for a true runaway loop.
+    // replaced by the real upstream corpus (#150, the routine command families
+    // plus the full books), so `Rust` now matches the bulk of the corpus and the
+    // walk spans as many pages as there are distinct matches rather than a
+    // handful. A non-advancing (runaway) cursor would push `pages` past the
+    // distinct count and break this; the per-request deadline in `exchange` is the
+    // fast-fail net for a true runaway loop.
     assert!(
         pages <= distinct.len(),
         "a limit-one walk is bounded by its distinct matches: {pages} pages over \

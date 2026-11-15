@@ -61,7 +61,7 @@ use super::rustfmt::ingest_markdown;
 use super::rustup::ingest_chapter as ingest_rustup;
 use super::style_guide::ingest_chapter as ingest_style;
 use crate::model::{
-    ChecklistEntry, CorpusHash, Release, Section, Source, SourceId, Timestamp, Url,
+    ChecklistEntry, CommandKey, CorpusHash, Release, Section, Source, SourceId, Timestamp, Url,
 };
 use reqwest::Url as RqUrl;
 
@@ -127,12 +127,25 @@ mod fixtures {
         include_str!("../../tests/fixtures/upstream/Configurations.md");
     // clippy per-lint catalog (a curated, faithful subset of the full catalog)
     pub const CLIPPY_LINTS: &str = include_str!("../../tests/fixtures/upstream/clippy_lints.html");
-    // the four books
+    // the four books — the routine command families, each the *actual* captured
+    // command page from upstream, ingested through `ingest_command_page` so the
+    // section is the extractor's output and the command key is stamped from the
+    // URL path (issue #149 AC3 / `plan.md` §6: a command resolves from a faithful
+    // upstream page, not a hand-authored summary)
     pub const CARGO_BUILD: &str = include_str!("../../tests/fixtures/upstream/cargo-build.html");
+    pub const CARGO_TEST: &str = include_str!("../../tests/fixtures/upstream/cargo-test.html");
+    pub const CARGO_CHECK: &str = include_str!("../../tests/fixtures/upstream/cargo-check.html");
+    pub const CARGO_FMT: &str = include_str!("../../tests/fixtures/upstream/cargo-fmt.html");
+    pub const CARGO_CLIPPY: &str = include_str!("../../tests/fixtures/upstream/cargo-clippy.html");
+    pub const CARGO_DOC: &str = include_str!("../../tests/fixtures/upstream/cargo-doc.html");
+    pub const CARGO_ADD: &str = include_str!("../../tests/fixtures/upstream/cargo-add.html");
+    pub const CARGO_NEW: &str = include_str!("../../tests/fixtures/upstream/cargo-new.html");
     pub const RUSTC_CLI: &str =
         include_str!("../../tests/fixtures/upstream/rustc-command-line-arguments.html");
     pub const RUSTUP_INSTALL: &str =
         include_str!("../../tests/fixtures/upstream/rustup-installation.html");
+    pub const RUSTUP_CONCEPTS: &str =
+        include_str!("../../tests/fixtures/upstream/rustup-concepts.html");
     pub const RUSTDOC_CLI: &str =
         include_str!("../../tests/fixtures/upstream/rustdoc-command-line-arguments.html");
 }
@@ -145,6 +158,26 @@ const STYLE_BASE: &str = "https://doc.rust-lang.org/style-guide/";
 const CARGO_BASE: &str = "https://doc.rust-lang.org/cargo/";
 const RUSTC_BASE: &str = "https://doc.rust-lang.org/rustc/";
 const RUSTUP_BASE: &str = "https://rust-lang.github.io/rustup/";
+
+/// The Cargo command-manual pages the seed ingests: each is the *actual* captured
+/// `commands/cargo-<subcommand>.html` page, ingested through
+/// `ingest_command_page`, which stamps the page's canonical command key
+/// (`cargo build`, `cargo test`, …) from its URL path. This is the same
+/// mechanism that makes `cargo build` resolvable, extended to the routine
+/// families so each resolves on a fresh offline launch (issue #149 AC3 /
+/// `plan.md` §6) rather than from a hand-authored summary. The page that
+/// *is* the `cargo-<subcommand>.html` manual is the command page; the rest of a
+/// fetched book is ingested through `ingest_cargo`.
+const CARGO_COMMAND_PAGES: &[(&str, &str)] = &[
+    ("cargo-build.html", fixtures::CARGO_BUILD),
+    ("cargo-test.html", fixtures::CARGO_TEST),
+    ("cargo-check.html", fixtures::CARGO_CHECK),
+    ("cargo-fmt.html", fixtures::CARGO_FMT),
+    ("cargo-clippy.html", fixtures::CARGO_CLIPPY),
+    ("cargo-doc.html", fixtures::CARGO_DOC),
+    ("cargo-add.html", fixtures::CARGO_ADD),
+    ("cargo-new.html", fixtures::CARGO_NEW),
+];
 const RUSTDOC_BASE: &str = "https://doc.rust-lang.org/rustdoc/";
 const CLIPPY_BASE: &str = "https://clippy.rust-lang.org/stable/";
 
@@ -283,6 +316,43 @@ where
     })
 }
 
+/// Stamp a faithful command key onto every section in `sections` as a *separate
+/// retrieval annotation*, then recompute each section's content hash so the key
+/// becomes part of the section's identity — mirroring `ingest_command_page`'s
+/// stamping for the cargo command manual. The section **body is left
+/// untouched**: it stays the faithful upstream content, and the key is only the
+/// retrieval index `CommandCatalog::from_sections` keys on — a maintainer
+/// retrieval hint kept separate from the upstream prose, per the "keep source
+/// text separate from server-authored retrieval hints" boundary (`plan.md` §2).
+///
+/// This is the extension the task #149 fix uses for the families whose usage
+/// page is *not* a `commands/cargo-<subcommand>.html` manual — `rustup show`
+/// (the rustup toolchain concepts), `rustc` (its command-line-arguments man
+/// page), and `rustfmt` (the README/Configurations reference) — so each resolves
+/// from a faithful upstream section rather than a hand-authored summary.
+///
+/// A key the [`CommandKey`] boundary would refuse (a shell operator / padding) is
+/// a programming error here: the keys are the fixed literals this module names,
+/// so a malformed one is a [`SeedError`] — never a silent drop, and never a
+/// fabricated section.
+fn stamp_command_key(sections: &mut [Section], key: &str) -> Result<(), SeedError> {
+    let parsed = CommandKey::new(key).map_err(|err| SeedError::Ingest {
+        source: "command-key".to_string(),
+        detail: format!("`{key}` is not a valid command key: {err}"),
+    })?;
+    for section in sections {
+        if !section
+            .command_keys
+            .iter()
+            .any(|existing| existing.as_str() == parsed.as_str())
+        {
+            section.command_keys.push(parsed.as_str().to_string());
+            section.recompute_content_hash();
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Seed corpus generation
 // ---------------------------------------------------------------------------
@@ -329,38 +399,76 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
         ingest_style,
     )?;
 
-    // -- cargo / rustc / rustup / rustdoc: one representative chapter each. --
-    let cargo_sections = ingest_html(
-        "cargo",
-        &format!("{CARGO_BASE}commands/cargo-build.html"),
-        fixtures::CARGO_BUILD,
-        None,
-        // Mirror the live pipeline (`crate::ingest::pipeline`): a command-manual
-        // page is ingested via `ingest_command_page` so its section carries the
-        // `cargo build` command key that `CommandCatalog::from_sections` keys on;
-        // a guide chapter uses `ingest_chapter`.
-        |fetched: &Fetched| {
-            if crate::ingest::cargo::is_command_page(&fetched.final_url) {
-                crate::ingest::cargo::ingest_command_page(fetched)
-            } else {
-                ingest_cargo(fetched)
-            }
-        },
-    )?;
-    let rustc_sections = ingest_html(
+    // -- cargo / rustc / rustup / rustdoc: the routine command families, each
+    //    from its *actual* captured upstream command page. --
+    //
+    // cargo ingests every recorded command-manual page. Each page is the real
+    // `commands/cargo-<subcommand>.html` manual, ingested through
+    // `ingest_command_page`, which stamps the page's canonical command key
+    // (`cargo build`, `cargo test`, `cargo check`, `cargo fmt`, `cargo clippy`,
+    // `cargo doc`, `cargo add`, `cargo new`) from its URL path — the exact
+    // mechanism that makes `cargo build` resolvable, so every one of these
+    // resolves on a fresh offline launch (issue #149 AC3 / `plan.md` §6) with
+    // the faithful upstream body intact. A guide chapter (a fetched book that is
+    // not a command page) would use `ingest_chapter` instead; the recorded
+    // fixtures are all command pages, so the `else` branch only guards the
+    // live-pipeline contract.
+    let mut cargo_sections: Vec<Section> = Vec::new();
+    for (file, body) in CARGO_COMMAND_PAGES {
+        cargo_sections.extend(ingest_html(
+            "cargo",
+            &format!("{CARGO_BASE}commands/{file}"),
+            body,
+            None,
+            // Mirror the live pipeline (`crate::ingest::pipeline`): a
+            // command-manual page is ingested via `ingest_command_page` so its
+            // section carries the command key `CommandCatalog::from_sections`
+            // keys on; a guide chapter uses `ingest_chapter`.
+            |fetched: &Fetched| {
+                if crate::ingest::cargo::is_command_page(&fetched.final_url) {
+                    crate::ingest::cargo::ingest_command_page(fetched)
+                } else {
+                    ingest_cargo(fetched)
+                }
+            },
+        )?);
+    }
+    // `rustc`: the `rustc-command-line-arguments.html` page *is* the `rustc`
+    // usage page (it is the `rustc` man page, rendered by the rustc book), so
+    // its ingested section is the `rustc` command's upstream body. The key is
+    // stamped as a separate retrieval annotation; the faithful body is intact.
+    let mut rustc_sections = ingest_html(
         "rustc",
         &format!("{RUSTC_BASE}command-line-arguments.html"),
         fixtures::RUSTC_CLI,
         None,
         ingest_rustc,
     )?;
-    let rustup_sections = ingest_html(
+    stamp_command_key(&mut rustc_sections, "rustc")?;
+
+    // `rustup`: the `rustup show` guidance is the toolchain model the `rustup`
+    // concepts page documents (how rustup works, terminology, active/installed
+    // toolchains — exactly what `rustup show` reports). `rustup-installation`
+    // covers the install flow; the concepts page covers the toolchain state
+    // `rustup show` surfaces. The key is stamped on the concepts sections as a
+    // separate retrieval annotation; the faithful body is intact.
+    let mut rustup_sections = ingest_html(
         "rustup",
         &format!("{RUSTUP_BASE}installation/index.html"),
         fixtures::RUSTUP_INSTALL,
         None,
         ingest_rustup,
     )?;
+    let mut rustup_concepts = ingest_html(
+        "rustup",
+        &format!("{RUSTUP_BASE}concepts/index.html"),
+        fixtures::RUSTUP_CONCEPTS,
+        None,
+        ingest_rustup,
+    )?;
+    stamp_command_key(&mut rustup_concepts, "rustup show")?;
+    rustup_sections.extend(rustup_concepts);
+
     let rustdoc_sections = ingest_html(
         "rustdoc",
         &format!("{RUSTDOC_BASE}command-line-arguments.html"),
@@ -369,8 +477,12 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
         ingest_rustdoc,
     )?;
 
-    // -- rustfmt: the two approved, commit-pinned Markdown sources. --
-    let rustfmt_sections = rustfmt_sections()?;
+    // -- rustfmt: the two approved, commit-pinned Markdown sources. The `rustfmt`
+    //    key is stamped on both sections (README.md and Configurations.md are the
+    //    `rustfmt` usage + reference `rustfmt_usage` cites) as a separate
+    //    retrieval annotation; the faithful Markdown is intact. --
+    let mut rustfmt_sections = rustfmt_sections()?;
+    stamp_command_key(&mut rustfmt_sections, "rustfmt")?;
 
     // -- clippy: the per-lint catalog, a curated faithful subset. --
     let clippy_sections = clippy_sections()?;
@@ -615,7 +727,14 @@ fn source_specs() -> Vec<(String, String, String, Vec<String>, Release)> {
             "cargo".to_string(),
             "The Cargo Book".to_string(),
             "https://doc.rust-lang.org/cargo/".to_string(),
-            vec![format!("{CARGO_BASE}commands/cargo-build.html")],
+            // Every recorded command-manual page — the routine families ingested
+            // through `ingest_command_page` — is a documented URL for the source,
+            // derived from the same table the corpus ingests so the two never
+            // drift.
+            CARGO_COMMAND_PAGES
+                .iter()
+                .map(|(file, _)| format!("{CARGO_BASE}commands/{file}"))
+                .collect(),
             R::channel_only(crate::model::Channel::Stable),
         ),
         (
@@ -629,7 +748,12 @@ fn source_specs() -> Vec<(String, String, String, Vec<String>, Release)> {
             "rustup".to_string(),
             "The rustup Book".to_string(),
             "https://rust-lang.github.io/rustup/".to_string(),
-            vec![format!("{RUSTUP_BASE}installation/index.html")],
+            vec![
+                format!("{RUSTUP_BASE}installation/index.html"),
+                // `rustup show`'s toolchain model — the concepts page `rustup`
+                // ingests for the `rustup show` command key.
+                format!("{RUSTUP_BASE}concepts/index.html"),
+            ],
             R::channel_only(crate::model::Channel::Rolling),
         ),
         (

@@ -568,7 +568,7 @@ mod tests {
 
         assert_eq!(report.source_count, 8, "seed has all eight sources");
         assert_eq!(
-            report.section_count, 448,
+            report.section_count, 544,
             "seed captures the full upstream corpus"
         );
         assert_eq!(
@@ -576,8 +576,9 @@ mod tests {
             "seed carries the upstream checklist"
         );
         assert_eq!(
-            report.command_entries, 1,
-            "seed carries the cargo build command"
+            report.command_entries, 11,
+            "seed carries the routine command families: the eight cargo subcommands \n\
+             (build/test/check/fmt/clippy/doc/add/new) plus rustup show, rustc, and rustfmt"
         );
         assert_eq!(
             report.per_collection.len(),
@@ -772,7 +773,7 @@ mod tests {
         // The fidelity report records all of them present, with no recorded gap.
         let report = inspect_fidelity(&seed_manifest().body.sections);
 
-        assert_eq!(report.sections_inspected, 448);
+        assert_eq!(report.sections_inspected, 544);
         assert!(
             report.all_types_present(),
             "the faithful seed covers every content type: {}",
