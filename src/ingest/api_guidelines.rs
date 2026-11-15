@@ -70,6 +70,22 @@ pub enum IngestError {
         /// determinism.
         sections: Vec<String>,
     },
+
+    /// The API Guidelines checklist document was **not found** among the
+    /// ingested pages, so no checklist could be parsed — the source is present
+    /// (its pages were fetched) but its `checklist.html` is absent from the
+    /// inventory. A validation failure, not a guess: the run aborts and the last
+    /// valid snapshot is preserved; no empty checklist is published (issue #148).
+    ChecklistAbsent,
+
+    /// The API Guidelines checklist document was found and decodable but parsed
+    /// to **zero entries** — an empty or unparseable checklist layout. A
+    /// validation failure, not a guess: the run aborts and the last valid
+    /// snapshot is preserved; no empty checklist is published (issue #148).
+    EmptyChecklist {
+        /// The checklist document's URL, for the diagnostic.
+        url: String,
+    },
 }
 
 impl std::fmt::Display for IngestError {
@@ -87,6 +103,14 @@ impl std::fmt::Display for IngestError {
                 sections.len(),
                 sections.join(", ")
             ),
+            IngestError::ChecklistAbsent => write!(
+                f,
+                "the api-guidelines checklist document was not found among the ingested pages; a nonempty checklist is required when the source is present"
+            ),
+            IngestError::EmptyChecklist { url } => write!(
+                f,
+                "the api-guidelines checklist document {url} parsed to no entries; the checklist layout could not be parsed"
+            ),
         }
     }
 }
@@ -96,11 +120,13 @@ impl std::error::Error for IngestError {
         match self {
             IngestError::Split(e) => Some(e),
             IngestError::Schema(e) => Some(e),
-            // The mapping failures carry their own context and have no deeper
-            // cause to preserve, so they expose no `source()` chain.
-            IngestError::MissingExplanation { .. } | IngestError::AmbiguousExplanations { .. } => {
-                None
-            }
+            // The mapping failures and the checklist-presence failures carry
+            // their own context and have no deeper cause to preserve, so they
+            // expose no `source()` chain.
+            IngestError::MissingExplanation { .. }
+            | IngestError::AmbiguousExplanations { .. }
+            | IngestError::ChecklistAbsent
+            | IngestError::EmptyChecklist { .. } => None,
         }
     }
 }
@@ -120,6 +146,31 @@ pub fn chapter_path(final_url: &Url) -> String {
     let stripped = path.strip_prefix("/api-guidelines/").unwrap_or(path);
     let stem = stripped.trim_start_matches('/');
     stem.strip_suffix(".html").unwrap_or(stem).to_string()
+}
+
+/// The path stem that identifies the API Guidelines *checklist* document.
+///
+/// The checklist is a single, fixed document — `…/checklist.html` — whose path
+/// is a stable identity independent of the order in which a discovery happens to
+/// book it. [`is_checklist_url`] keys on this stem, which is how issue #148's
+/// fix distinguishes the checklist from the first fetched chapter (often
+/// `about.html`): the checklist is selected by *what it is*, not *when it
+/// arrives*.
+const CHECKLIST_STEM: &str = "checklist";
+
+/// Whether `url` is the API Guidelines checklist document, identified by its path
+/// identity (`…/checklist.html`), not its discovery order.
+///
+/// This is the identity check issue #148 requires: the pipeline calls it for
+/// every fetched document and keeps the one that *is* the checklist, regardless of
+/// the position `checklist.html` occupies in the fetched URL list. It reuses the
+/// same path-stem derivation as [`chapter_path`], so a chapter and the checklist
+/// are recognised by the same rule.
+///
+/// The test `is_checklist_url_recognizes_the_checklist_by_identity` in the same
+/// module exercises the canonical, non-checklist, and loopback cases.
+pub fn is_checklist_url(url: &Url) -> bool {
+    chapter_path(url) == CHECKLIST_STEM
 }
 
 /// The document title of an API Guidelines page: its `h1` when present, else the
@@ -267,6 +318,50 @@ fn parse_checklist(html: &str) -> Vec<ChecklistEntry> {
         });
     }
     entries
+}
+
+/// Parse the API Guidelines checklist **by document identity**, resolve each
+/// entry's `explanation_sections` against `sections`, and **require a nonempty
+/// result** — the pipeline's checklist seam (issue #148).
+///
+/// This is the orchestrating stage the pipeline calls for `api-guidelines`:
+/// the caller identifies the checklist page by [`is_checklist_url`] (not by its
+/// position in the fetched list) and passes it as `checklist_page`. Unlike the
+/// pure [`ingest_checklist`] — which returns an empty `Vec` when a page carries
+/// no guideline links, the pre-#148 behaviour that silently published a zero-entry
+/// checklist — this function turns an absent, empty, or unparseable checklist
+/// into a **validation error** so the run aborts and the last valid snapshot is
+/// preserved instead of publishing an empty checklist:
+///
+/// - **Absent** — `checklist_page` is `None`: the source's pages were fetched
+///   but none of them is `checklist.html`. Returns
+///   [`IngestError::ChecklistAbsent`].
+/// - **Empty / unparseable** — the page parsed to zero entries (a page that is
+///   not the real checklist, or a layout we cannot parse). Returns
+///   [`IngestError::EmptyChecklist`].
+///
+/// When the checklist is present and nonempty, the entries are resolved against
+/// `sections` by [`link_explanations`] — the continuation-aware, ambiguity-checked
+/// mapping of task `[016]` / issue #16 — so each entry's `explanation_sections`
+/// is populated and the mapping is validated atomically before publication.
+///
+/// The tests `ingest_checklist_document_fails_when_the_page_is_absent`,
+/// `ingest_checklist_document_fails_when_the_page_is_empty`, and
+/// `ingest_checklist_document_resolves_and_requires_a_nonempty_checklist` in the
+/// same module exercise the absent, empty, and resolving cases.
+pub fn ingest_checklist_document(
+    sections: &[Section],
+    checklist_page: Option<&Fetched>,
+) -> Result<Vec<ChecklistEntry>, IngestError> {
+    let page = checklist_page.ok_or(IngestError::ChecklistAbsent)?;
+    let mut checklist = ingest_checklist(page);
+    if checklist.is_empty() {
+        return Err(IngestError::EmptyChecklist {
+            url: page.final_url.as_str().to_string(),
+        });
+    }
+    link_explanations(sections, &mut checklist)?;
+    Ok(checklist)
 }
 
 /// The logical identity of a section for checklist-code resolution: two
@@ -529,7 +624,8 @@ mod tests {
 
     use super::{
         DOC_TITLE, IngestError, SOURCE, chapter_path, guideline_code_in, ingest_chapter,
-        ingest_checklist, link_explanations, parse_checklist,
+        ingest_checklist, ingest_checklist_document, is_checklist_url, link_explanations,
+        parse_checklist,
     };
     use crate::ingest::books::discover_inventory;
     use crate::ingest::fetch::{BoundClient, FetchPolicy, Fetched, LoopbackGate};
@@ -1003,6 +1099,119 @@ mod tests {
         // is fabricated.
         let html = r#"<main><h1>Intro</h1><p>No guidelines here.</p></main>"#;
         assert!(parse_checklist(html).is_empty());
+    }
+
+    // -- Issue #148: `is_checklist_url` selects the checklist by document
+    //    identity, and `ingest_checklist_document` requires a nonempty checklist
+    //    and resolves it, failing on absent / empty / unexplained input. --
+
+    /// A `Fetched` checklist page carrying `body`, at the loopback-free
+    /// canonical checklist URL.
+    fn fetched_checklist_body(body: &str) -> Fetched {
+        Fetched {
+            requested: Url::parse("https://rust-lang.github.io/api-guidelines/checklist.html")
+                .unwrap(),
+            final_url: Url::parse("https://rust-lang.github.io/api-guidelines/checklist.html")
+                .unwrap(),
+            status: reqwest::StatusCode::OK,
+            body: body.as_bytes().to_vec(),
+            content_type: Some("text/html".to_string()),
+            etag: None,
+            last_modified: None,
+            content_length: Some(body.len() as u64),
+        }
+    }
+
+    #[test]
+    fn is_checklist_url_recognizes_the_checklist_by_identity() {
+        let checklist =
+            Url::parse("https://rust-lang.github.io/api-guidelines/checklist.html").unwrap();
+        let about = Url::parse("https://rust-lang.github.io/api-guidelines/about.html").unwrap();
+        let naming = Url::parse("https://rust-lang.github.io/api-guidelines/naming.html").unwrap();
+        // A loopback mirror of the same path is still the checklist — the
+        // identity is host-independent, so the fix works under the loopback gate.
+        let loopback = Url::parse("http://127.0.0.1:9/api-guidelines/checklist.html").unwrap();
+        assert!(
+            is_checklist_url(&checklist),
+            "checklist.html is the checklist"
+        );
+        assert!(
+            is_checklist_url(&loopback),
+            "a loopback checklist.html is the checklist"
+        );
+        assert!(!is_checklist_url(&about), "about.html is not the checklist");
+        assert!(
+            !is_checklist_url(&naming),
+            "a topical chapter is not the checklist"
+        );
+    }
+
+    #[test]
+    fn ingest_checklist_document_resolves_and_requires_a_nonempty_checklist() {
+        // The 3-entry checklist HTML, with a resolving section per code.
+        let fetched = fetched_checklist();
+        let sections = vec![
+            code_section("naming", "conv", "C-CONV"),
+            code_section("naming", "common-traits", "C-COMMON-TRAITS"),
+            code_section("naming", "getter", "C-GETTER"),
+        ];
+        let checklist = ingest_checklist_document(&sections, Some(&fetched))
+            .expect("a nonempty checklist with a complete mapping resolves");
+        assert_eq!(checklist.len(), 3, "all three entries are parsed");
+        for entry in &checklist {
+            assert_eq!(
+                entry.explanation_sections.len(),
+                1,
+                "each code must resolve to exactly one section, got {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ingest_checklist_document_fails_when_the_page_is_absent() {
+        // A source whose pages were fetched but none is checklist.html.
+        let sections = vec![code_section("naming", "conv", "C-CONV")];
+        let err =
+            ingest_checklist_document(&sections, None).expect_err("an absent checklist must fail");
+        assert!(
+            matches!(err, IngestError::ChecklistAbsent),
+            "an absent checklist is ChecklistAbsent, not a published empty"
+        );
+    }
+
+    #[test]
+    fn ingest_checklist_document_fails_when_the_page_is_empty() {
+        // A checklist page with no guideline links parses to zero entries.
+        let empty = fetched_checklist_body(
+            r#"<!DOCTYPE html><html><body><main><h1>Checklist</h1><p>No entries here.</p></main></body></html>"#,
+        );
+        let sections = vec![code_section("naming", "conv", "C-CONV")];
+        let err = ingest_checklist_document(&sections, Some(&empty))
+            .expect_err("an empty checklist must fail");
+        assert!(
+            matches!(err, IngestError::EmptyChecklist { .. }),
+            "an empty checklist is EmptyChecklist, not a published empty"
+        );
+    }
+
+    #[test]
+    fn ingest_checklist_document_fails_when_a_code_has_no_explanation() {
+        // A one-entry checklist whose code carries no matching section: the
+        // mapping is incomplete, so the run fails rather than publishing an
+        // entry with an empty target.
+        let one_entry = fetched_checklist_body(
+            r#"<!DOCTYPE html><html><body><main><ul>
+  <li><strong>Conversions and From</strong>
+    <ul><li><a href="naming.html#c-conv">Ad-hoc conversions follow conventions (C-CONV)</a></li></ul>
+  </li>
+</ul></main></body></html>"#,
+        );
+        let err = ingest_checklist_document(&[], Some(&one_entry))
+            .expect_err("a code with no explanation must fail");
+        assert!(
+            matches!(err, IngestError::MissingExplanation { .. }),
+            "an unexplained code is MissingExplanation"
+        );
     }
 
     // -- Task [016] / issue #16: `link_explanations` resolves each checklist

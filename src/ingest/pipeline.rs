@@ -393,24 +393,41 @@ async fn ingest_source(
             }
         }
         SourceCollection::ApiGuidelines => {
-            // The checklist is parsed from the first captured page and its
+            // Issue #148: the checklist is parsed from the document identified by
+            // *URL identity* (`…/checklist.html`, via `is_checklist_url`), not from
+            // the first page the discovery books. Discovery may book `about.html`
+            // before `checklist.html`, and the old "first page" selection parsed
+            // the checklist from `about.html` (which carries none), so a valid
+            // checklist published zero entries. Here we capture every page as a
+            // chapter and remember the one that *is* the checklist, regardless of
+            // order; the checklist is then parsed, required nonempty, and its
             // explanation links resolved against the captured sections.
-            let mut first: Option<Fetched> = None;
+            let mut checklist_page: Option<Fetched> = None;
             for url in urls {
                 let fetched = client.fetch(url).await?;
                 let chapter = api_guidelines::ingest_chapter(&fetched)
                     .map_err(|e| extract_err(collection, e))?;
                 out.sections.extend(chapter);
-                if first.is_none() {
-                    first = Some(fetched);
+                if api_guidelines::is_checklist_url(url) {
+                    // There should be exactly one checklist document; a duplicate
+                    // would be an upstream anomaly, so the last one wins
+                    // deterministically.
+                    checklist_page = Some(fetched);
                 }
             }
-            if let Some(first) = first {
-                let mut checklist = api_guidelines::ingest_checklist(&first);
-                api_guidelines::link_explanations(&out.sections, &mut checklist)
+
+            // The source is present (the `urls.is_empty()` guard above returns
+            // early for an empty inventory), so its checklist must be found and
+            // nonempty. A missing, empty, or unparseable checklist is a
+            // validation failure that aborts the run — and, because publication
+            // is atomic, leaves the last valid snapshot untouched — rather than
+            // publishing a zero-entry checklist (issue #148). The continuation-
+            // aware, ambiguity-checked explanation mapping is retained inside the
+            // call (`link_explanations`).
+            let checklist =
+                api_guidelines::ingest_checklist_document(&out.sections, checklist_page.as_ref())
                     .map_err(|e| extract_err(collection, e))?;
-                out.checklist = checklist;
-            }
+            out.checklist = checklist;
         }
         // The remaining collections (style-guide, rustc, rustup, rustdoc, and
         // the clippy *book*) share the HTML chapter adapter.
@@ -794,6 +811,89 @@ mod tests {
         }
     }
 
+    /// An API Guidelines `about.html` page carrying an external `github.com`
+    /// citation — the front matter whose external link must be serialized, not
+    /// fetched (issue #146). Its nav links to `checklist.html`; the link is a
+    /// citation the direct-URL override does not follow.
+    fn api_guidelines_about_html() -> String {
+        r#"<!DOCTYPE html>
+<html><body>
+  <nav id="sidebar"><ol class="chapter"><li><a href="checklist.html">Checklist</a></li></ol></nav>
+  <main id="main-content">
+    <h1 id="about">About the API Guidelines</h1>
+    <p>To contribute, read the <a href="https://github.com/rust-lang/api-guidelines/blob/master/CONTRIBUTING.md">CONTRIBUTING guide</a> upstream.</p>
+  </main>
+</body></html>"#.to_string()
+    }
+
+    /// An API Guidelines `checklist.html` page with one entry (`C-CONV`, in the
+    /// `Conversions and From` category) — the real checklist's shape: a nested
+    /// `<ul>` of category `<li>`s, each with a `<strong>` group heading and a
+    /// nested list of guideline `<li>`s linking to their code.
+    fn api_guidelines_checklist_html() -> String {
+        r#"<!DOCTYPE html>
+<html><body>
+  <main id="main-content">
+    <h1 id="checklist">Checklist</h1>
+    <ul>
+      <li>
+        <strong>Conversions and From</strong>
+        <ul>
+          <li><a href="conversions.html#c-conv">Prefer <code>From</code> over other methods (C-CONV)</a></li>
+        </ul>
+      </li>
+    </ul>
+  </main>
+</body></html>"#.to_string()
+    }
+
+    /// A `checklist.html` page with **no** guideline entries — an empty/unparseable
+    /// checklist layout, which the pipeline must reject rather than publish.
+    fn api_guidelines_empty_checklist_html() -> String {
+        r#"<!DOCTYPE html>
+<html><body>
+  <main id="main-content">
+    <h1 id="checklist">Checklist</h1>
+    <p>This page has no guideline entries.</p>
+  </main>
+</body></html>"#
+            .to_string()
+    }
+
+    /// An API Guidelines `conversions.html` chapter whose `C-CONV` section explains
+    /// the checklist's `C-CONV` entry — the explanatory section the mapping joins
+    /// the entry to by code.
+    fn api_guidelines_conversion_html() -> String {
+        r#"<!DOCTYPE html>
+<html><body>
+  <main id="main-content">
+    <h1 id="conversions">Conversions</h1>
+    <h2 id="c-conv">Prefer From/TryFrom (C-CONV)</h2>
+    <p>Implement <code>From</code> and <code>TryFrom</code> for conversions between types.</p>
+  </main>
+</body></html>"#
+            .to_string()
+    }
+
+    /// A pinned `api-guidelines` config whose document URLs are `urls`, in the
+    /// given order — so a test can drive discovery order explicitly.
+    fn api_guidelines_config(urls: Vec<reqwest::Url>, parser_version: &str) -> SyncConfig {
+        let mut direct: BTreeMap<String, Vec<reqwest::Url>> = BTreeMap::new();
+        direct.insert("api-guidelines".to_string(), urls);
+        SyncConfig {
+            parser_version: parser_version.to_string(),
+            sources: vec![SourceId::new("api-guidelines").expect("a registry id is URI-safe")],
+            direct: Some(direct),
+            rustfmt_urls: None,
+        }
+    }
+
+    /// The loopback base `http://{addr}/api-guidelines/`, used to build the
+    /// about / checklist / conversion URLs a test pins.
+    fn api_guidelines_base(server: &FixtureServer) -> String {
+        format!("http://{}/api-guidelines", server.addr)
+    }
+
     #[tokio::test]
     async fn ac1_a_successful_sync_reports_sections_an_inventory_change_and_a_new_identity() {
         // Two style-guide chapters, each served from loopback, each with one
@@ -1107,40 +1207,56 @@ mod tests {
     /// this page (the citation was treated as an unauthorized fetch and the whole
     /// sync failed with no manifest). Now the citation is serialized, the run
     /// publishes a snapshot that retains it, and the fixture server received only
-    /// the document page — proving no external target was requested.
+    /// the document pages — proving no external target was requested.
+    ///
+    /// Since issue #148, the `api-guidelines` source also requires a nonempty
+    /// checklist, so this fixture pins the real `about` + `checklist` + `conversions`
+    /// inventory: `about` carries the citation, `checklist` carries the one
+    /// `C-CONV` entry, and `conversions` explains it.
     #[tokio::test]
     async fn the_pipeline_proceeds_past_an_external_citation_and_requests_no_external_target() {
-        let about_html = r##"<!DOCTYPE html>
-<html><body>
-  <nav id="sidebar"><ol class="chapter"><li><a href="checklist.html">Checklist</a></li></ol></nav>
-  <main id="main-content">
-    <h1 id="about">About the API Guidelines</h1>
-    <p>To contribute, read the <a href="https://github.com/rust-lang/api-guidelines/blob/master/CONTRIBUTING.md">CONTRIBUTING guide</a> upstream.</p>
-  </main>
-</body></html>"##;
-        let server = FixtureServer::start(vec![(
-            "/api-guidelines/about.html".to_string(),
-            Behavior::Text {
-                body: about_html.as_bytes().to_vec(),
-                etag: Some("\"about-1\"".to_string()),
-                last_modified: None,
-                content_type: Some("text/html".to_string()),
-            },
-        )]);
+        let server = FixtureServer::start(vec![
+            (
+                "/api-guidelines/about.html".to_string(),
+                Behavior::Text {
+                    body: api_guidelines_about_html().into_bytes(),
+                    etag: Some("\"about-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/api-guidelines/checklist.html".to_string(),
+                Behavior::Text {
+                    body: api_guidelines_checklist_html().into_bytes(),
+                    etag: Some("\"checklist-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/api-guidelines/conversions.html".to_string(),
+                Behavior::Text {
+                    body: api_guidelines_conversion_html().into_bytes(),
+                    etag: Some("\"conversions-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+        ]);
         let client = loopback_client().expect("the loopback client builds");
         let data_dir = temp_data_dir();
-        let about_url =
-            reqwest::Url::parse(&format!("http://{}/api-guidelines/about.html", server.addr))
-                .expect("a valid loopback about-page URL");
-
-        let mut direct: BTreeMap<String, Vec<reqwest::Url>> = BTreeMap::new();
-        direct.insert("api-guidelines".to_string(), vec![about_url]);
-        let config = SyncConfig {
-            parser_version: "test/146".to_string(),
-            sources: vec![SourceId::new("api-guidelines").expect("a registry id is URI-safe")],
-            direct: Some(direct),
-            rustfmt_urls: None,
-        };
+        let base = api_guidelines_base(&server);
+        let about_url = reqwest::Url::parse(&format!("{base}/about.html"))
+            .expect("a valid loopback about-page URL");
+        let checklist_url = reqwest::Url::parse(&format!("{base}/checklist.html"))
+            .expect("a valid loopback checklist-page URL");
+        let conversions_url = reqwest::Url::parse(&format!("{base}/conversions.html"))
+            .expect("a valid loopback conversions-page URL");
+        // The about page is first, mirroring the discovery order that book the
+        // front matter before the checklist — the order #148 fixed.
+        let config =
+            api_guidelines_config(vec![about_url, checklist_url, conversions_url], "test/146");
 
         // AC5: the run proceeds past the page and publishes a new snapshot.
         let report = sync(&config, &data_dir, &client)
@@ -1155,18 +1271,15 @@ mod tests {
             .iter()
             .find(|s| s.id == "api-guidelines")
             .expect("the api-guidelines result is present");
-        assert_eq!(api.documents, 1, "the one about page was fetched");
-        assert!(
-            api.sections >= 1,
-            "the about page yielded at least one section"
-        );
+        assert_eq!(api.documents, 3, "the three document pages were fetched");
+        assert!(api.sections >= 1, "the pages yielded at least one section");
 
-        // AC2: the fixture server received ONLY the document page — the external
-        // `github.com` citation was serialized, never fetched.
+        // AC2: the fixture server received ONLY the three document pages — the
+        // external `github.com` citation was serialized, never fetched.
         assert_eq!(
             server.request_count(),
-            1,
-            "no external target may be requested; only the about page was fetched"
+            3,
+            "no external target may be requested; only the three document pages were fetched"
         );
 
         // The published snapshot actually carries the citation.
@@ -1184,6 +1297,328 @@ mod tests {
                 "https://github.com/rust-lang/api-guidelines/blob/master/CONTRIBUTING.md"
             ),
             "the published snapshot must retain the external citation"
+        );
+
+        // Issue #148: the checklist the combined inventory publishes is nonempty
+        // and its entry's explanation resolves.
+        let c_conv = loaded
+            .body
+            .checklist
+            .iter()
+            .find(|e| e.code == "C-CONV")
+            .expect("the published checklist carries the C-CONV entry");
+        assert_eq!(
+            c_conv.explanation_sections.len(),
+            1,
+            "C-CONV must resolve to exactly one explanatory section"
+        );
+    }
+
+    // -- Issue #148: the api-guidelines checklist is parsed by document identity,
+    //    not discovery order, and a missing/empty/malformed checklist fails the
+    //    run rather than publishing a zero-entry checklist. --
+
+    /// AC1: reordering the `about` / `checklist` / `conversions` inventory does
+    /// not change the published checklist. The checklist is selected by its URL
+    /// identity (`checklist.html`), so booking the front matter first (the order
+    /// that triggered the bug) or last yields the same published entry and
+    /// mapping. The two runs publish identical checklists.
+    #[tokio::test]
+    async fn the_checklist_is_selected_by_identity_regardless_of_discovery_order() {
+        let server = FixtureServer::start(vec![
+            (
+                "/api-guidelines/about.html".to_string(),
+                Behavior::Text {
+                    body: api_guidelines_about_html().into_bytes(),
+                    etag: Some("\"about-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/api-guidelines/checklist.html".to_string(),
+                Behavior::Text {
+                    body: api_guidelines_checklist_html().into_bytes(),
+                    etag: Some("\"checklist-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/api-guidelines/conversions.html".to_string(),
+                Behavior::Text {
+                    body: api_guidelines_conversion_html().into_bytes(),
+                    etag: Some("\"conversions-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+        ]);
+        let client = loopback_client().expect("the loopback client builds");
+        let base = api_guidelines_base(&server);
+        let about_url = reqwest::Url::parse(&format!("{base}/about.html"))
+            .expect("a valid loopback about-page URL");
+        let checklist_url = reqwest::Url::parse(&format!("{base}/checklist.html"))
+            .expect("a valid loopback checklist-page URL");
+        let conversions_url = reqwest::Url::parse(&format!("{base}/conversions.html"))
+            .expect("a valid loopback conversions-page URL");
+
+        // Run A: the buggy order — the front matter is booked before the checklist.
+        let data_a = temp_data_dir();
+        let report_a = sync(
+            &api_guidelines_config(
+                vec![
+                    about_url.clone(),
+                    checklist_url.clone(),
+                    conversions_url.clone(),
+                ],
+                "test/148a",
+            ),
+            &data_a,
+            &client,
+        )
+        .await
+        .expect("the front-matter-first run publishes a nonempty checklist");
+
+        // Run B: the checklist and front matter are booked in the opposite order.
+        let data_b = temp_data_dir();
+        let report_b = sync(
+            &api_guidelines_config(vec![conversions_url, checklist_url, about_url], "test/148b"),
+            &data_b,
+            &client,
+        )
+        .await
+        .expect("the front-matter-last run publishes a nonempty checklist");
+
+        // Both runs publish, and their checklists are identical — the discovery
+        // order did not change what the pipeline published.
+        let loaded_a = crate::corpus::load_published_snapshot(&data_a)
+            .expect("the front-matter-first snapshot is published and loadable");
+        let loaded_b = crate::corpus::load_published_snapshot(&data_b)
+            .expect("the front-matter-last snapshot is published and loadable");
+        assert!(
+            loaded_a.body.checklist == loaded_b.body.checklist,
+            "the published checklist must be independent of discovery order"
+        );
+        assert!(!report_a.snapshot.as_str().is_empty());
+        assert!(!report_b.snapshot.as_str().is_empty());
+
+        // The published entry resolves its explanation, so a later retrieval can
+        // reach the section that explains C-CONV.
+        let c_conv = loaded_a
+            .body
+            .checklist
+            .iter()
+            .find(|e| e.code == "C-CONV")
+            .expect("the published checklist carries the C-CONV entry");
+        assert_eq!(
+            c_conv.explanation_sections.len(),
+            1,
+            "C-CONV must resolve to exactly one explanatory section"
+        );
+    }
+
+    /// AC3: when the source's pages are fetched but none of them is
+    /// `checklist.html`, the run fails with a source-specific extraction error
+    /// and the previously published snapshot is preserved — a missing checklist
+    /// is a validation failure, not a published empty checklist.
+    #[tokio::test]
+    async fn a_missing_checklist_page_aborts_the_sync_and_preserves_the_prior_corpus() {
+        let server = FixtureServer::start(vec![
+            (
+                "/api-guidelines/about.html".to_string(),
+                Behavior::Text {
+                    body: api_guidelines_about_html().into_bytes(),
+                    etag: Some("\"about-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/api-guidelines/checklist.html".to_string(),
+                Behavior::Text {
+                    body: api_guidelines_checklist_html().into_bytes(),
+                    etag: Some("\"checklist-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/api-guidelines/conversions.html".to_string(),
+                Behavior::Text {
+                    body: api_guidelines_conversion_html().into_bytes(),
+                    etag: Some("\"conversions-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+        ]);
+        let client = loopback_client().expect("the loopback client builds");
+        let base = api_guidelines_base(&server);
+        let about_url = reqwest::Url::parse(&format!("{base}/about.html"))
+            .expect("a valid loopback about-page URL");
+        let checklist_url = reqwest::Url::parse(&format!("{base}/checklist.html"))
+            .expect("a valid loopback checklist-page URL");
+        let conversions_url = reqwest::Url::parse(&format!("{base}/conversions.html"))
+            .expect("a valid loopback conversions-page URL");
+        let data_dir = temp_data_dir();
+
+        // Publish a known-good snapshot first (a nonempty, explained checklist).
+        let good = sync(
+            &api_guidelines_config(
+                vec![
+                    about_url.clone(),
+                    checklist_url.clone(),
+                    conversions_url.clone(),
+                ],
+                "test/148-good",
+            ),
+            &data_dir,
+            &client,
+        )
+        .await
+        .expect("the good sync publishes");
+        assert!(!good.snapshot.as_str().is_empty());
+
+        // Now a sync whose inventory omits the checklist page entirely. It must
+        // fail and must NOT overwrite the good snapshot.
+        let err = sync(
+            &api_guidelines_config(vec![about_url, conversions_url], "test/148-missing"),
+            &data_dir,
+            &client,
+        )
+        .await
+        .expect_err("a missing checklist page must fail the sync");
+        assert!(
+            matches!(
+                err,
+                SyncError::Extract { ref source, .. } if source.as_str() == "api-guidelines"
+            ),
+            "expected an api-guidelines extraction failure, got {err:?}"
+        );
+
+        // AC3: the previously published snapshot is preserved untouched.
+        let still = crate::corpus::load_published_snapshot(&data_dir)
+            .expect("the good snapshot is still published");
+        assert_eq!(
+            still.body.snapshot_id, good.snapshot,
+            "a failed sync must not overwrite the last valid snapshot"
+        );
+        assert!(
+            !still.body.checklist.is_empty(),
+            "the preserved snapshot still carries the nonempty checklist"
+        );
+    }
+
+    /// AC3: a `checklist.html` that carries no guideline entries (an empty or
+    /// unparseable layout) fails the run with a source-specific extraction
+    /// error rather than publishing a zero-entry checklist.
+    #[tokio::test]
+    async fn an_empty_checklist_page_aborts_the_sync() {
+        let server = FixtureServer::start(vec![
+            (
+                "/api-guidelines/about.html".to_string(),
+                Behavior::Text {
+                    body: api_guidelines_about_html().into_bytes(),
+                    etag: Some("\"about-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/api-guidelines/checklist.html".to_string(),
+                Behavior::Text {
+                    body: api_guidelines_empty_checklist_html().into_bytes(),
+                    etag: Some("\"checklist-empty\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+        ]);
+        let client = loopback_client().expect("the loopback client builds");
+        let data_dir = temp_data_dir();
+        let base = api_guidelines_base(&server);
+        let about_url = reqwest::Url::parse(&format!("{base}/about.html"))
+            .expect("a valid loopback about-page URL");
+        let checklist_url = reqwest::Url::parse(&format!("{base}/checklist.html"))
+            .expect("a valid loopback checklist-page URL");
+
+        let err = sync(
+            &api_guidelines_config(vec![about_url, checklist_url], "test/148-empty"),
+            &data_dir,
+            &client,
+        )
+        .await
+        .expect_err("an empty checklist page must fail the sync");
+        assert!(
+            matches!(
+                err,
+                SyncError::Extract { ref source, ref reason }
+                    if source.as_str() == "api-guidelines" && reason.contains("checklist")
+            ),
+            "expected an api-guidelines checklist extraction failure, got {err:?}"
+        );
+
+        // No snapshot was published by the failed run.
+        assert!(
+            crate::corpus::load_published_snapshot(&data_dir).is_err(),
+            "a failed sync must publish nothing"
+        );
+    }
+
+    /// AC2 (negative): a nonempty checklist whose entry has no resolving
+    /// explanation section fails validation. Here the `conversions.html` that
+    /// explains `C-CONV` is absent, so the mapping is incomplete and the run
+    /// aborts rather than publishing an entry with an empty target.
+    #[tokio::test]
+    async fn a_checklist_without_a_resolving_explanation_fails_validation() {
+        let server = FixtureServer::start(vec![
+            (
+                "/api-guidelines/about.html".to_string(),
+                Behavior::Text {
+                    body: api_guidelines_about_html().into_bytes(),
+                    etag: Some("\"about-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/api-guidelines/checklist.html".to_string(),
+                Behavior::Text {
+                    body: api_guidelines_checklist_html().into_bytes(),
+                    etag: Some("\"checklist-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+        ]);
+        let client = loopback_client().expect("the loopback client builds");
+        let data_dir = temp_data_dir();
+        let base = api_guidelines_base(&server);
+        let about_url = reqwest::Url::parse(&format!("{base}/about.html"))
+            .expect("a valid loopback about-page URL");
+        let checklist_url = reqwest::Url::parse(&format!("{base}/checklist.html"))
+            .expect("a valid loopback checklist-page URL");
+
+        // `conversions.html` (the explanation) is deliberately absent, so
+        // C-CONV has no matching section.
+        let err = sync(
+            &api_guidelines_config(vec![about_url, checklist_url], "test/148-noexplanation"),
+            &data_dir,
+            &client,
+        )
+        .await
+        .expect_err("a checklist whose entry has no explanation must fail the sync");
+        assert!(
+            matches!(
+                err,
+                SyncError::Extract { ref source, .. } if source.as_str() == "api-guidelines"
+            ),
+            "expected an api-guidelines extraction failure, got {err:?}"
+        );
+        assert!(
+            crate::corpus::load_published_snapshot(&data_dir).is_err(),
+            "a failed sync must publish nothing"
         );
     }
 
