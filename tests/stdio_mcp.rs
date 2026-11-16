@@ -537,6 +537,47 @@ async fn over_cap_cursors_tools_and_resource_uris_are_bounded_over_stdio() {
     client.close_and_wait_clean().await;
 }
 
+/// #154: the two `search_docs` string fields — `query` and `source` — are
+/// bounded the same way. `search_docs` already caps a query at its own
+/// 1000-byte limit (`QueryTooLarge`), but the handler-boundary cap
+/// (`MAX_IDENTIFIER_BYTES`) fires first for a much larger input and returns a
+/// bounded `INVALID_PARAMS` rather than the full echo; an over-long `source`
+/// selector is bounded the same way. This exercises the remaining
+/// string-bearing fields for AC3.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_cap_search_docs_query_and_source_are_bounded_over_stdio() {
+    let mut client = Client::new().await;
+    let big = "a".repeat(40_000);
+
+    // A 40,000-char `query` is cap-rejected at the handler boundary (a bounded
+    // `INVALID_PARAMS`), long before the search layer's own 1000-byte cap.
+    let response = client
+        .call_tool("search_docs", json!({ "query": big.clone() }))
+        .await;
+    assert_bounded_error(
+        &response,
+        -32602,
+        "a 40,000-char query is a bounded INVALID_PARAMS",
+    );
+    assert_bounded_diagnostic(&response, "query", &big, "search_docs/query");
+
+    // An over-long optional `source` selector is bounded the same way.
+    let response = client
+        .call_tool(
+            "search_docs",
+            json!({ "query": "cargo build", "source": big.clone() }),
+        )
+        .await;
+    assert_bounded_error(
+        &response,
+        -32602,
+        "a 40,000-char source is a bounded INVALID_PARAMS",
+    );
+    assert_bounded_diagnostic(&response, "source", &big, "search_docs/source");
+
+    client.close_and_wait_clean().await;
+}
+
 /// #154: the cap is a gate, not a rejection of everything large. Inputs at or
 /// under the cap are not cap-rejected: a valid section id resolves, and an
 /// invalid input exactly at the cap still reaches the not-found mapping (bounded
