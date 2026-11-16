@@ -28,8 +28,9 @@ with the corpus: a larger (live-synced) corpus increases both startup (more
 content to index at boot) and peak RSS. The harness is corpus-agnostic — point
 it at a live-synced corpus and it measures that corpus the same way — so the
 seed numbers are a **lower bound**, not a full-corpus guarantee. The plan's §11
-targets are stated "for the full corpus"; the seed comfortably meets them, and
-the full-corpus figures are recorded whenever a live-synced corpus is produced.
+targets are stated "for the full corpus"; the shipped corpus comfortably meets
+them, and the full-corpus figures are recorded whenever a live-synced corpus is
+produced.
 
 ## How to run the harness
 
@@ -72,30 +73,44 @@ with the server's stdio-exclusivity contract).
 
 ## Measured numbers
 
-Captured on **macOS** (arm64), **release** profile, current development machine.
-These are real measurements from the run; they are machine- and
-corpus-dependent and will differ on other hardware or a larger corpus.
+Captured on **macOS** (arm64), **release** profile, `rustc 1.100.0`, over the
+545-section shipped corpus (`content_fingerprint` `154a1f248b149160`), on the
+current development machine. These are real measurements from the run; they are
+machine- and corpus-dependent and will differ on other hardware or a larger
+corpus. The corpus identity and environment (below) pin which run a number came
+from.
 
-| Metric | Measured (seed) | §11 target | Meets target? |
+| Metric | Measured (shipped corpus) | §11 target | Meets target? |
 | --- | --- | --- | --- |
-| Startup p95 (process spawn → `initialize`) | **17.2 ms** (min 12.4, median 14.6, max 17.2 ms over 10 runs) | ≤ 2000 ms | **Yes** (≈2 orders of margin) |
-| `search_docs` p95 round-trip | **0.33 ms** (30 iterations × 8 queries) | < 100 ms | **Yes** |
-| `get_section` p95 round-trip | **0.15 ms** (30 iterations × 8 sections) | < 100 ms | **Yes** |
-| Peak RSS (approximation) | **≈ 10.5 MiB** (10736 KiB) | not fixed by §11 | — |
+| Startup p95 (process spawn → `initialize`) | **≈ 10 ms** (min 7.6, median 7.9, max 10.2 ms over 10 runs) | ≤ 2000 ms | **Yes** (≈2 orders of margin) |
+| `search_docs` p95 round-trip | **≈ 11.5 ms** (30 iterations × 8 queries) | < 100 ms | **Yes** |
+| `get_section` p95 round-trip | **≈ 11.5 ms** (30 iterations × 8 sections) | < 100 ms | **Yes** |
+| Peak RSS (approximation) | **≈ 17 MiB** (17312 KiB) | not fixed by §11 | — |
 
-The JSON report for this run:
+The JSON report for this run (note the new `corpus` identity object and the
+`toolchain` / `host` fields added by issue #156):
 
 ```json
 {
-  "corpus": "rust-docs-bundled-seed",
-  "host": "macos",
+  "corpus": {
+    "content_fingerprint": "154a1f248b149160",
+    "parser_version": "rust-docs-mcp/seed-2",
+    "section_count": 545,
+    "snapshot_id": "rust-docs-bundled-seed",
+    "sources": [
+      "api-guidelines", "style-guide", "cargo", "rustc",
+      "rustup", "rustfmt", "clippy", "rustdoc"
+    ]
+  },
+  "host": "macos aarch64",
   "profile": "release",
+  "toolchain": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
   "startup": {
     "runs": 10,
-    "min_ms": 12.37,
-    "median_ms": 14.64,
-    "p95_ms": 17.2,
-    "max_ms": 17.2,
+    "min_ms": 7.57,
+    "median_ms": 7.9,
+    "p95_ms": 10.2,
+    "max_ms": 10.2,
     "target_ms": 2000.0,
     "meets_target": true
   },
@@ -103,13 +118,13 @@ The JSON report for this run:
     "iters_per_item": 30,
     "queries": 8,
     "sections": 8,
-    "search_p95_ms": 0.33,
-    "section_p95_ms": 0.15,
+    "search_p95_ms": 11.47,
+    "section_p95_ms": 11.52,
     "target_ms": 100.0,
     "meets_target": true
   },
   "memory": {
-    "peak_rss_kib": 10736,
+    "peak_rss_kib": 17312,
     "note": "approximation: sampled once after the corpus is loaded; the seed is small, so this is close to peak"
   }
 }
@@ -117,23 +132,25 @@ The JSON report for this run:
 
 ## Comparison against the §11 targets
 
-Both provisional targets are met **with large margin** on the seed:
+Both provisional targets are met **with large margin** on the shipped corpus:
 
-- **Startup (≤ 2000 ms).** Measured p95 is **17.2 ms** — roughly two orders of
+- **Startup (≤ 2000 ms).** Measured p95 is **≈ 10 ms** — roughly two orders of
   magnitude under the two-second target. The startup window includes process
-  spawn, the `initialize` handshake, and loading/indexing the bundled seed.
-- **Retrieval p95 (< 100 ms).** Measured p95 is **0.33 ms** for `search_docs`
-  and **0.15 ms** for `get_section` — well under the 100 ms target. These are
-  sub-millisecond because the retrieval is a localhost stdio pipe round-trip over
-  an in-memory index of the small seed.
-- **Memory.** Peak RSS is **≈ 10.5 MiB**. §11 does not fix a memory target, so
+  spawn, the `initialize` handshake, and loading/indexing the shipped corpus.
+- **Retrieval p95 (< 100 ms).** Measured p95 is **≈ 11.5 ms** for both
+  `search_docs` and `get_section` — well under the 100 ms target. These are
+  sub-tens-of-milliseconds because the retrieval is a localhost stdio pipe
+  round-trip over an in-memory index of the shipped corpus, and the harness now
+  drains the child's stdout and asserts a graceful self-exit per measurement.
+- **Memory.** Peak RSS is **≈ 17 MiB**. §11 does not fix a memory target, so
   this is reported for the record, not compared.
 
-Because the seed is small, the margins are large. The meaningful test is the
-**full live-synced corpus**: the same harness, pointed at a live-synced corpus,
-produces the full-corpus figures (expected to be higher, since more content is
-indexed at boot and held in memory). When such a corpus is available, re-run the
-harness and record the full-corpus numbers here, alongside these seed figures.
-Until then, the seed figures demonstrate that the server's startup and retrieval
-paths meet the §11 targets by a wide margin, and the harness is ready to measure
-the full corpus the same way.
+Because the shipped corpus is small, the margins are large. The meaningful test
+is the **full live-synced corpus**: the same harness, pointed at a live-synced
+corpus via `RUST_DOCS_MCP_PERF_DATA_DIR`, produces the full-corpus figures
+(expected to be higher, since more content is indexed at boot and held in
+memory). When such a corpus is available, re-run the harness and record the
+full-corpus numbers here, alongside these shipped-corpus figures. Until then, the
+shipped-corpus figures demonstrate that the server's startup and retrieval paths
+meet the §11 targets by a wide margin, and the harness is ready to measure the
+full corpus the same way.
