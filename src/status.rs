@@ -245,6 +245,7 @@ mod tests {
             last_checked: last_checked.map(|s| Timestamp::new(s).unwrap()),
             fetched_at: Timestamp::new(fetched_at).unwrap(),
             upstream_modified: upstream_modified.map(|s| Timestamp::new(s).unwrap()),
+            etag: None,
             content_hash: CorpusHash::compute(content),
             release: Release::channel_only(Channel::Stable),
             parser: "test/1".into(),
