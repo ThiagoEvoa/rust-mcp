@@ -269,6 +269,49 @@ fn with_guideline_code(mut section: Section) -> Section {
     section
 }
 
+/// Whether `section` is the *primary* explanation of its guideline code — that is,
+/// whether its **own** (leaf-most) heading carries the `(C-…)` marker.
+///
+/// [`with_guideline_code`] tags a section with the code of its *nearest* ancestor
+/// heading that carries one, so a nested sub-heading — for example an
+/// "Examples from the standard library" `h3` under a coded guideline's `h2` —
+/// inherits the ancestor's code on purpose (a scoping code must never be
+/// swallowed). That inherited code is *not* a competing definition of the code:
+/// the sub-heading is explanatory continuation, not the guideline itself. This
+/// predicate is the single rule the checklist resolution feed is filtered by,
+/// so an inherited sub-section is not mistaken for a second, distinct explanation
+/// of the same code. A section whose own heading carries the code is primary;
+/// a section that merely inherited the code from an ancestor is not.
+///
+/// This is the canonical primary-heading resolution rule shared between live
+/// ingestion ([`ingest_checklist_document`]) and the bundled checklist builder
+/// (`crate::ingest::bundle`), so the two can no longer disagree about which
+/// sections are primary definitions versus inherited continuations.
+pub fn is_primary_explanation(section: &Section) -> bool {
+    section
+        .heading_path
+        .last()
+        .is_some_and(|heading| guideline_code_in(heading).is_some())
+}
+
+/// The primary explanations among `sections`, in document order: the subset
+/// whose own heading carries a guideline code, as [`is_primary_explanation`]
+/// decides.
+///
+/// Feeding only these to [`link_explanations`] keeps each code resolving to its
+/// single primary section while the inherited sub-sections remain in the corpus
+/// (they are retained for retrieval — only excluded from the resolution feed),
+/// and a genuine conflict between two distinct *primary* definitions still fails
+/// actionably, because two distinct primary sections carrying the same code do
+/// not fold into one logical explanation.
+pub fn primary_explanations(sections: &[Section]) -> Vec<Section> {
+    sections
+        .iter()
+        .filter(|s| is_primary_explanation(s))
+        .cloned()
+        .collect()
+}
+
 /// Parse the API Guidelines *checklist* page into its [`ChecklistEntry`]s — one
 /// per `(C-…)` guideline, in document order.
 ///
@@ -341,9 +384,15 @@ fn parse_checklist(html: &str) -> Vec<ChecklistEntry> {
 ///   [`IngestError::EmptyChecklist`].
 ///
 /// When the checklist is present and nonempty, the entries are resolved against
-/// `sections` by [`link_explanations`] — the continuation-aware, ambiguity-checked
-/// mapping of task `[016]` / issue #16 — so each entry's `explanation_sections`
-/// is populated and the mapping is validated atomically before publication.
+/// the *primary* explanatory sections — those whose own heading carries the code,
+/// via [`primary_explanations`] — by [`link_explanations`] — the continuation-aware,
+/// ambiguity-checked mapping of task `[016]` / issue #16 — so each entry's
+/// `explanation_sections` is populated and the mapping is validated atomically
+/// before publication. A sub-section that merely inherited an ancestor's code
+/// (e.g. an "Examples from the standard library" sub-heading under a coded
+/// guideline) is excluded from the resolution feed so it is not mistaken for a
+/// second, distinct explanation of the same code (issue #169); it remains in the
+/// corpus for retrieval.
 ///
 /// The tests `ingest_checklist_document_fails_when_the_page_is_absent`,
 /// `ingest_checklist_document_fails_when_the_page_is_empty`, and
@@ -360,7 +409,19 @@ pub fn ingest_checklist_document(
             url: page.final_url.as_str().to_string(),
         });
     }
-    link_explanations(sections, &mut checklist)?;
+    // Resolve each code against the *primary* explanatory sections only — those
+    // whose own heading carries the code (`primary_explanations`) — not the full
+    // `sections` set. A nested sub-section that merely inherited the code from an
+    // ancestor heading is explanatory continuation, not a competing definition, so
+    // feeding it in would flag an inherited "Examples from the standard library"
+    // sub-heading as a second, distinct explanation of the same code (issue
+    // #169). The inherited sub-sections remain in the corpus for retrieval — only
+    // the resolution feed is filtered — and a genuine conflict between two distinct
+    // *primary* definitions still fails actionably via `link_explanations`'s
+    // ambiguity check. This is the same primary-heading rule the bundled checklist
+    // builder applies, now shared between the two paths.
+    let primary = primary_explanations(sections);
+    link_explanations(&primary, &mut checklist)?;
     Ok(checklist)
 }
 
@@ -624,8 +685,8 @@ mod tests {
 
     use super::{
         DOC_TITLE, IngestError, SOURCE, chapter_path, guideline_code_in, ingest_chapter,
-        ingest_checklist, ingest_checklist_document, is_checklist_url, link_explanations,
-        parse_checklist,
+        ingest_checklist, ingest_checklist_document, is_checklist_url, is_primary_explanation,
+        link_explanations, parse_checklist, primary_explanations,
     };
     use crate::ingest::books::discover_inventory;
     use crate::ingest::fetch::{BoundClient, FetchPolicy, Fetched, LoopbackGate};
@@ -1214,6 +1275,140 @@ mod tests {
         );
     }
 
+    // -- Issue #169: a nested sub-section that merely *inherits* a guideline code
+    //    from an ancestor heading (e.g. an "Examples from the standard library"
+    //    `h3` under a coded guideline's `h2`) is explanatory continuation, not a
+    //    second, distinct explanation. The shared primary-heading rule filters the
+    //    resolution feed to the sections whose own heading carries the `(C-…)`
+    //    marker, while inherited continuations stay in the corpus and a genuine
+    //    conflict between two distinct *primary* explanations still fails. --
+
+    /// A single-code checklist page carrying only `C-CASE`, served at the
+    /// canonical checklist URL, so the resolution tests need no server.
+    fn case_checklist() -> Fetched {
+        fetched_checklist_body(
+            r#"<!DOCTYPE html><html><body><main><ul>
+  <li><strong>Naming</strong>
+    <ul><li><a href="naming.html#c-case">Casing conforms to RFC 430 (C-CASE)</a></li></ul>
+  </li>
+</ul></main></body></html>"#,
+        )
+    }
+
+    /// A sub-section that *inherits* a code from an ancestor heading: its
+    /// `heading_path` ends at a heading whose own text carries no `(C-…)` marker
+    /// (e.g. "Examples from the standard library"), but its `guideline_codes`
+    /// carries the ancestor's code, as `with_guideline_code` propagates it. It is
+    /// therefore NOT a primary explanation, though it is retained in the corpus.
+    fn inherited_continuation_section(
+        chapter: &str,
+        anchor: &str,
+        code: &str,
+        parent_heading: &str,
+    ) -> Section {
+        SectionBuilder::new(
+            SourceId::new(SOURCE).expect("a valid source id"),
+            DOC_TITLE,
+            chapter,
+            ModelUrl::new(format!(
+                "https://rust-lang.github.io/api-guidelines/{chapter}.html#{anchor}"
+            ))
+            .expect("a valid canonical url"),
+            "Examples from the standard library",
+        )
+        .heading_path([parent_heading, "Examples from the standard library"])
+        .anchor(anchor)
+        .guideline_codes([code])
+        .build()
+        .expect("section builds")
+    }
+
+    /// The issue #169 case: a primary explanation of a code plus a nested
+    /// sub-section that merely *inherits* the same code both carry it, but only
+    /// the primary is a resolution candidate, so the code resolves to exactly one
+    /// section. Before the fix this failed with an `AmbiguousExplanations`
+    /// (the inherited sub-section looked like a second, distinct explanation).
+    #[test]
+    fn ingest_checklist_document_resolves_through_a_nested_continuation() {
+        let primary = code_section("naming", "casing-conforms-to-rfc-430-c-case", "C-CASE");
+        let continuation = inherited_continuation_section(
+            "naming",
+            "examples-from-the-standard-library",
+            "C-CASE",
+            "Casing conforms to RFC 430 (C-CASE)",
+        );
+        // The inherited sub-section really does carry the code, as the real
+        // ingestion produces it, so the distinction is by heading, not by code.
+        assert_eq!(
+            continuation.guideline_codes,
+            vec!["C-CASE".to_string()],
+            "the continuation carries the inherited code"
+        );
+        let sections = vec![primary.clone(), continuation];
+        let out = ingest_checklist_document(&sections, Some(&case_checklist()))
+            .expect("a nested continuation must not break the mapping");
+        let c = out
+            .iter()
+            .find(|e| e.code == "C-CASE")
+            .expect("C-CASE entry");
+        assert_eq!(
+            c.explanation_sections,
+            vec![primary.id.clone()],
+            "C-CASE must resolve to its single primary section, not the inherited continuation"
+        );
+    }
+
+    /// The primary-heading filter must not disable the ambiguity check: two
+    /// *distinct primary* sections carrying the same code are still an actionable
+    /// `AmbiguousExplanations` failure. (The `print.html` discovery exclusion is
+    /// what stops the real duplicate up front; this guards the validator itself,
+    /// independent of that discovery.)
+    #[test]
+    fn ingest_checklist_document_still_fails_on_two_distinct_primary_explanations() {
+        let primary_naming = code_section("naming", "casing", "C-CASE");
+        let primary_other = code_section("predictability", "casing", "C-CASE");
+        let sections = vec![primary_naming, primary_other];
+        let err = ingest_checklist_document(&sections, Some(&case_checklist()))
+            .expect_err("two distinct primary explanations must fail");
+        assert!(
+            matches!(
+                err,
+                IngestError::AmbiguousExplanations { ref code, .. } if code == "C-CASE"
+            ),
+            "two distinct primary explanations of C-CASE must be AmbiguousExplanations, got {err:?}"
+        );
+    }
+
+    /// The shared primary-heading predicate: a section whose own heading carries
+    /// the `(C-…)` marker is a primary explanation; a section that merely
+    /// inherited the code from an ancestor is not. `primary_explanations` keeps
+    /// the primary and drops the inherited continuation from the resolution feed.
+    #[test]
+    fn primary_explanations_excludes_inherited_continuations() {
+        let primary = code_section("naming", "casing", "C-CASE");
+        let continuation = inherited_continuation_section(
+            "naming",
+            "examples",
+            "C-CASE",
+            "Casing conforms to RFC 430 (C-CASE)",
+        );
+        assert!(
+            is_primary_explanation(&primary),
+            "a section whose own heading carries the marker is primary"
+        );
+        assert!(
+            !is_primary_explanation(&continuation),
+            "a section that merely inherited the code is not primary"
+        );
+        let sections = vec![primary.clone(), continuation.clone()];
+        let primary_only = primary_explanations(&sections);
+        assert_eq!(primary_only.len(), 1, "only the primary section survives");
+        assert_eq!(
+            primary_only[0].id, primary.id,
+            "the survivor is the primary section, not the continuation"
+        );
+    }
+
     // -- Task [016] / issue #16: `link_explanations` resolves each checklist
     //    entry's `code` to its explanatory section(s) and validates the mapping
     //    is neither missing nor ambiguous. Every fixture below is an in-memory
@@ -1222,6 +1417,11 @@ mod tests {
 
     /// A single-code section carrying `code`, identified by
     /// `(SOURCE, chapter, anchor)` — the fields `link_explanations` groups by.
+    /// A primary explanatory section for a checklist code: its **own** heading
+    /// carries the `(C-…)` marker, exactly as the real ingestion produces when
+    /// `with_guideline_code` reads the code from the heading. This is what makes
+    /// it a *primary* explanation (see [`is_primary_explanation`]) rather than an
+    /// inherited sub-section, so it is a valid target of `ingest_checklist_document`.
     fn code_section(chapter: &str, anchor: &str, code: &str) -> Section {
         SectionBuilder::new(
             SourceId::new(SOURCE).expect("a valid source id"),
@@ -1231,8 +1431,12 @@ mod tests {
                 "https://rust-lang.github.io/api-guidelines/{chapter}.html#{anchor}"
             ))
             .expect("a valid canonical url"),
-            format!("explanation for {code}"),
+            format!("explanation for ({code})"),
         )
+        // The section's *own* heading carries the `(C-…)` marker, as the real
+        // ingestion produces it, so it is a primary explanation (its
+        // `heading_path` is populated, unlike the builder's empty default).
+        .heading_path([format!("explanation for ({code})")])
         .anchor(anchor)
         .guideline_codes([code])
         .build()
