@@ -79,11 +79,14 @@ pub const FIRST_SYNC_REQUIRED: &[&str] = &[];
 
 /// The canonical, validated, attributed eight-source seed snapshot.
 ///
-/// This is the bundle [`JSON`] embeds. It is a **representative** corpus — one
-/// section per collection, the `C-CONV` checklist entry, and a few cited command
-/// entries — sufficient to make a fresh install serve *something* offline; the
-/// full corpus arrives from `sync`. It always validates
-/// ([`crate::corpus::validate_snapshot`]).
+/// This is the bundle [`JSON`] embeds. It assembles the **full ingested
+/// corpus** — one faithful section per recorded fixture, the parsed checklist
+/// kept to the codes whose explanations are shipped, and the command catalog
+/// derived from the sections — so a fresh install serves the toolchain
+/// documentation offline. A full, *current* corpus is produced by
+/// [`crate::ingest::sync`](crate::ingest) and published to the data directory
+/// by the `sync` command; the bundle is the offline seed that makes the *first*
+/// launch usable. It always validates ([`crate::corpus::validate_snapshot`]).
 pub fn manifest() -> SnapshotManifest {
     manifest_with_exclusions(FIRST_SYNC_REQUIRED)
 }

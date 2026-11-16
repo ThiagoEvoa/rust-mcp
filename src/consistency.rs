@@ -85,10 +85,11 @@ fn host_of(url: &str) -> Option<&str> {
 // ---------------------------------------------------------------------------
 // Fixtures
 //
-// The bundled corpus is a *representative* seed: its clippy section carries no
-// `lint_ids`, and no section carries an explicit "unknown" qualification, so
-// AC2's identifier-preservation proof needs hand-built sections that the seed
-// does not. These fixtures are the "the seed corpus does not carry X" cases;
+// The bundled corpus now carries `lint_ids` on its clippy sections, but no
+// section carries an explicit "unknown" qualification, so AC2's
+// identifier-preservation proof still needs hand-built sections that supply the
+// "unknown" value the seed does not. These fixtures are the "the seed
+// corpus does not carry X" cases;
 // each is built through `SectionBuilder` exactly the way the ingestion layer
 // derives ids, so a section's derived id round-trips and resolves through the
 // same `SectionIndex` the retrieval seams use.
