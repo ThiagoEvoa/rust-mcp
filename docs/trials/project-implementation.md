@@ -18,6 +18,27 @@
 > [baseline](../COMPATIBILITY.md#2-rust-toolchain-baseline) of
 > [`docs/COMPATIBILITY.md`](../COMPATIBILITY.md).
 
+**Historical recording (post-issue #150).** The transcript and citation tables
+below record this trial as it ran against the **pre-#150** bundled seed — the
+8-section `rust-docs-mcp/seed-1` corpus (one section per collection, flat
+section ids). After issue #150 the shipped bundle was regenerated to the faithful
+**`rust-docs-mcp/seed-2`** corpus (**544 sections**, anchored section ids, the
+full 15-entry parsed checklist, and the routine command families ingested), so
+the section ids, anchors, content hashes, and the "Unresolved / refresh the
+snapshot" findings embedded below are the **pre-#150 values**. They are retained
+as the historical session record, not current outputs: the encoded test
+(`tests/trial_project_implementation.rs`) already asserts the current ids and
+passes. The current (`seed-2`) ids the trial's commands resolve to:
+
+| Recorded below (pre-#150) | Current `seed-2` section id (content hash) |
+| --- | --- |
+| `cargo build` — `cargo/commands%2Fcargo-build` | `cargo/commands%2Fcargo-build#cargo-build1` (`c128-ffa54382ded2edbd785c84e7795228d0`); the build command now resolves to 18 anchored sub-sections |
+| `cargo test` — "not in index" below | now ingested: `cargo/commands%2Fcargo-test#cargo-test1` (`c128-ffa5237f355750888aeee441d3f0ba40`); the "Unresolved / refresh" finding below is a pre-#150 outcome |
+| `rustup show` — "not in index" below | now ingested: `rustup/installation%2Findex#installation` (`c128-ffa5e76102a3d02d21d781d003343d72`); the "Unresolved / refresh" finding below is a pre-#150 outcome |
+
+To regenerate a current transcript, run the trial with
+`RUST_DOCS_MCP_TRIAL_TRANSCRIPT` set (see §6).
+
 The trial does **not** claim that the commands it retrieves guidance for are run
 by the server, nor that any command the agent runs is *automatically correct*.
 It retrieves documentation and records its citations, compatibility

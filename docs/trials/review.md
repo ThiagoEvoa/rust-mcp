@@ -17,6 +17,26 @@
 > [baseline](../COMPATIBILITY.md#2-rust-toolchain-baseline) of
 > [`docs/COMPATIBILITY.md`](../COMPATIBILITY.md).
 
+**Historical recording (post-issue #150).** The transcript and citation tables
+below record this trial as it ran against the **pre-#150** bundled seed — the
+8-section `rust-docs-mcp/seed-1` corpus (one section per collection, flat
+section ids, a single `C-CONV` checklist entry). After issue #150 the shipped
+bundle was regenerated to the faithful **`rust-docs-mcp/seed-2`** corpus
+(**544 sections**, anchored section ids, the full 15-entry parsed checklist), so
+the section ids, anchors, content hashes, and search scores embedded below are
+the **pre-#150 values**. They are retained as the historical session record, not
+current outputs: the encoded test (`tests/trial_review.rs`) already asserts the
+current ids and passes. The current (`seed-2`) ids the three findings resolve to:
+
+| Recorded below (pre-#150) | Current `seed-2` section id (content hash) |
+| --- | --- |
+| F-1 conversion — `api-guidelines/about` (`C-CONV`) | `api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv` (`c128-ffa51d275f6a20c3c6d4a02b1a369f52`) |
+| F-2 Clippy lint — `clippy/configuration` | `clippy/clippy-catalog#unwrap_used` (`c128-ffa531aa94de0f70e2b6956e7bc807b5`) |
+| F-3 style — `style-guide/intro` | `style-guide/expressions#casts-as` (`c128-ffa58b2eca2ddeefbc32644e4bf612b4`) |
+
+To regenerate a current transcript, run the trial with
+`RUST_DOCS_MCP_TRIAL_TRANSCRIPT` set (see §6).
+
 The trial does **not** claim that a code snippet the agent flags is *automatically
 non-compliant* or that any check (Clippy, a build) ran. It retrieves
 documentation and records its citations; the calling agent interprets the

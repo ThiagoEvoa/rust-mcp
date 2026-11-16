@@ -35,11 +35,12 @@
 //! ## Faithfulness guarantee
 //!
 //! The body of each shipped section is the *output of the real extractor* over
-//! the recorded fixture — never a hand-copied summary. The fixture-vs-excerpt
-//! test in `crate::bundled` re-runs the extractor over the *same* recorded
-//! fixtures and asserts each shipped excerpt is present in the extracted
-//! upstream content, so a drift between the shipped excerpt and upstream is a
-//! test failure, not a silent divergence.
+//! the recorded fixture — never a hand-copied summary. The drift test
+//! `the_committed_bundle_matches_the_builder` in `crate::bundled` re-parses the
+//! *same* recorded fixtures through the builder (`manifest`) and asserts the
+//! committed `data/bundled/snapshot.json` is equal to that output, so any drift
+//! between the shipped excerpt and the upstream content it was generated from is
+//! a test failure, not a silent divergence.
 //!
 //! Live upstream re-fetch (rewriting `tests/fixtures/upstream/` and the committed
 //! `data/bundled/snapshot.json`) is opt-in and env-gated; it never runs on the
