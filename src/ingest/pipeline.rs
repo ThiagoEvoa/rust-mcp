@@ -50,7 +50,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use reqwest::Url;
 
 use crate::commands::CommandCatalog;
-use crate::corpus::{Publication, PublishError, load_published_snapshot, publish_snapshot};
+use crate::corpus::{
+    CompletenessReport, Publication, PublishError, check_completeness, load_published_snapshot,
+    publish_snapshot,
+};
 use crate::ingest::api_guidelines;
 use crate::ingest::books::{DiscoveryError, InventoryDiff, discover_inventory};
 use crate::ingest::cargo;
@@ -97,11 +100,23 @@ pub struct SyncConfig {
     /// commit-pinned raw documents. The override is read on every run, so it is
     /// not dead code; production sets it to `None`.
     pub rustfmt_urls: Option<Vec<Url>>,
+    /// Whether this run must publish a *complete* production corpus
+    /// ([`crate::corpus::check_completeness`]) — every required collection
+    /// populated, the checklist/lint catalog/command catalog nonempty, and
+    /// attribution present. When `true`, an incomplete assembled snapshot is
+    /// rejected *before* publication, so a degraded corpus can never replace the
+    /// last valid one (issue #151). `production` sets this to `true`; the
+    /// dev/test configs leave it `false`, so an explicitly partial corpus may
+    /// still be published for local iteration.
+    pub require_complete: bool,
 }
 
 impl SyncConfig {
     /// The production configuration: every one of the eight approved collections,
-    /// a build-derived parser version, and live discovery (no overrides).
+    /// a build-derived parser version, and live discovery (no overrides). A
+    /// production run must publish a *complete* corpus, so it sets
+    /// `require_complete` to `true`: the publication gate rejects an incomplete
+    /// snapshot rather than letting a degraded corpus replace the last valid one.
     pub fn production() -> Self {
         Self {
             parser_version: parser_version(),
@@ -111,6 +126,7 @@ impl SyncConfig {
                 .collect(),
             direct: None,
             rustfmt_urls: None,
+            require_complete: true,
         }
     }
 }
@@ -144,7 +160,7 @@ pub struct SyncSourceResult {
 }
 
 /// The result of a successful sync: the new snapshot identity, the publication,
-/// and a per-source breakdown.
+/// a per-source breakdown, and the completeness verdict.
 #[derive(Debug, Clone)]
 pub struct SyncReport {
     /// The identity of the snapshot this run published.
@@ -155,14 +171,19 @@ pub struct SyncReport {
     /// One outcome per configured source, in the order `config.sources` named
     /// them.
     pub sources: Vec<SyncSourceResult>,
+    /// The completeness verdict for the published snapshot ([`CompletenessReport`])
+    /// — the production gate that rejects a degraded corpus (issue #151). On a
+    /// successful run this is `complete`; a run that would publish an incomplete
+    /// corpus fails instead of reaching here.
+    pub completeness: CompletenessReport,
 }
 
 impl SyncReport {
     /// Render a human-readable, **stderr-only** report of the run: the new
-    /// snapshot identity, the published totals, and each source's inventory
-    /// change. The text is *returned* (not written) so the caller decides where
-    /// to emit it — the CLI writes it to stderr, keeping stdout exclusive to MCP
-    /// messages (plan §8/§9).
+    /// snapshot identity, the published totals, each source's inventory change,
+    /// and the completeness verdict. The text is *returned* (not written) so the
+    /// caller decides where to emit it — the CLI writes it to stderr, keeping
+    /// stdout exclusive to MCP messages (plan §8/§9).
     pub fn to_stderr(&self) -> String {
         let mut out = String::from("rust-docs-mcp sync:\n");
         out.push_str(&format!("  snapshot: {}\n", self.snapshot.as_str()));
@@ -172,6 +193,7 @@ impl SyncReport {
             self.publication.summary.checklist_entries,
             self.publication.summary.command_entries,
         ));
+        out.push_str(&format!("  completeness: {}\n", self.completeness.render()));
         for source in &self.sources {
             out.push_str(&format!(
                 "  [{}] {} document(s), {} section(s)",
@@ -359,6 +381,22 @@ pub async fn sync(
     // construction; the guard is defense-in-depth against a future drift.
     manifest.body.commands = command_catalog.into_entries();
 
+    // Issue #151: the completeness gate runs *after* the integrity gate
+    // (`validate_snapshot`, via `publish_snapshot`) and *before* the atomic
+    // promotion. A production run (`require_complete`) refuses an incomplete
+    // corpus — one that omits a required collection, cross-reference, or its
+    // attribution — so a degraded snapshot can never replace the last valid
+    // 8-source corpus. The gate is checked against the required production
+    // inventory, with `previous` contributing removal reporting: a collection
+    // that was populated before but is now empty is an explicit, justified
+    // policy decision rather than a silent loss.
+    let completeness = check_completeness(&manifest, previous.as_ref());
+    if config.require_complete && !completeness.is_complete() {
+        return Err(SyncError::IncompleteCorpus {
+            report: completeness,
+        });
+    }
+
     // `publish_snapshot` validates the candidate *before* it touches the
     // filesystem and promotes it atomically, so a validation failure leaves the
     // last valid snapshot untouched (AC2).
@@ -368,6 +406,7 @@ pub async fn sync(
         snapshot: manifest.body.snapshot_id,
         publication,
         sources: results,
+        completeness,
     })
 }
 
@@ -696,6 +735,12 @@ pub enum SyncError {
     /// The candidate snapshot failed validation or could not be published; the
     /// previously published snapshot is preserved.
     Publish(PublishError),
+    /// The assembled snapshot is well-formed but not a *complete* production
+    /// corpus — a required collection is empty, a cross-reference is missing,
+    /// or attribution is absent (issue #151). This aborts *before* the atomic
+    /// promotion, so the last valid 8-source snapshot is preserved and a
+    /// degraded corpus can never replace it.
+    IncompleteCorpus { report: CompletenessReport },
 }
 
 impl std::fmt::Display for SyncError {
@@ -712,6 +757,14 @@ impl std::fmt::Display for SyncError {
             }
             Self::Schema(err) => write!(f, "a schema validation failed: {err}"),
             Self::Publish(err) => write!(f, "publishing the snapshot failed: {err}"),
+            Self::IncompleteCorpus { report } => {
+                write!(
+                    f,
+                    "the assembled snapshot is not a complete production corpus ({} completeness gap(s)): {}",
+                    report.problem_count(),
+                    report.render()
+                )
+            }
         }
     }
 }
@@ -725,6 +778,7 @@ impl std::error::Error for SyncError {
             Self::Schema(err) => Some(err),
             Self::Publish(err) => Some(err),
             Self::Extract { .. } | Self::UnconfiguredSource { .. } => None,
+            Self::IncompleteCorpus { .. } => None,
         }
     }
 }
@@ -765,10 +819,13 @@ mod tests {
     #![allow(clippy::result_large_err)]
 
     use super::{SyncConfig, SyncError, diff_against_previous, new_snapshot_id, sync};
+    use crate::corpus;
     use crate::ingest::fetch::{BoundClient, FetchPolicy, LoopbackGate};
     use crate::ingest::http_fixture::{Behavior, FixtureServer};
     use crate::model::SourceId;
+    use crate::registry::SourceCollection;
     use std::collections::{BTreeMap, HashSet};
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -828,6 +885,7 @@ mod tests {
             sources: vec![SourceId::new("style-guide").expect("a registry id is URI-safe")],
             direct: Some(direct),
             rustfmt_urls: None,
+            require_complete: false,
         }
     }
 
@@ -905,6 +963,7 @@ mod tests {
             sources: vec![SourceId::new("api-guidelines").expect("a registry id is URI-safe")],
             direct: Some(direct),
             rustfmt_urls: None,
+            require_complete: false,
         }
     }
 
@@ -957,6 +1016,7 @@ mod tests {
             sources: vec![SourceId::new("style-guide").expect("a registry id is URI-safe")],
             direct: Some(direct),
             rustfmt_urls: None,
+            require_complete: false,
         };
 
         let report = sync(&config, &data_dir, &client)
@@ -1002,6 +1062,85 @@ mod tests {
             loaded.body.sources.len(),
             8,
             "the published manifest records all eight approved sources"
+        );
+    }
+
+    /// AC1 (issue #151): a **production** sync whose live discovery is pinned to a
+    /// single source (`style-guide`) assembles an incomplete corpus — seven of the
+    /// eight collections carry no content — and must be **rejected at the
+    /// publication gate** rather than overwriting the last valid snapshot. The
+    /// previously published snapshot stays byte-for-byte intact.
+    #[tokio::test]
+    async fn ac151_a_production_sync_rejects_an_incomplete_corpus_and_preserves_the_prior() {
+        // A single style-guide chapter, served from loopback — the only content
+        // the production run will capture (the #151 bug: live discovery pinned to
+        // one collection).
+        let server = FixtureServer::start(vec![(
+            "/style-guide/naming.html".to_string(),
+            Behavior::Text {
+                body: one_section_html("naming", "Naming").into_bytes(),
+                etag: Some("\"naming-1\"".to_string()),
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+            },
+        )]);
+        let client = loopback_client().expect("the loopback client builds");
+        let data_dir = temp_data_dir();
+        let naming =
+            reqwest::Url::parse(&format!("http://{}/style-guide/naming.html", server.addr))
+                .expect("a valid loopback chapter URL");
+
+        // 1. Establish a valid previous snapshot through the real pipeline (a dev
+        //    sync, not yet gated), so there is something to preserve.
+        let good_report = sync(&style_guide_config(naming.clone()), &data_dir, &client)
+            .await
+            .expect("the first dev sync publishes a valid snapshot");
+        let prior_bytes = fs::read(corpus::published_snapshot_path(&data_dir))
+            .expect("the prior snapshot is on disk");
+
+        // 2. A production-style run: all eight collections are configured, but
+        //    the `direct` override supplies URLs only for `style-guide`, so the
+        //    other seven resolve to empty inventories — the exact shape the bug
+        //    published. `require_complete` turns on the gate.
+        let mut direct: BTreeMap<String, Vec<reqwest::Url>> = BTreeMap::new();
+        direct.insert("style-guide".to_string(), vec![naming]);
+        let production = SyncConfig {
+            parser_version: "test/151".to_string(),
+            sources: SourceCollection::ALL
+                .iter()
+                .map(|c| SourceId::new(c.id()).expect("a registry id is URI-safe"))
+                .collect(),
+            direct: Some(direct),
+            rustfmt_urls: None,
+            require_complete: true,
+        };
+
+        let err = sync(&production, &data_dir, &client)
+            .await
+            .expect_err("an incomplete production corpus must be rejected");
+        assert!(
+            matches!(err, SyncError::IncompleteCorpus { .. }),
+            "the incomplete production sync must fail with IncompleteCorpus, got {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("completeness gap"),
+            "the rejection must name the incompleteness, got: {message}"
+        );
+
+        // 3. AC1: the previously published snapshot is byte-for-byte intact —
+        //    the rejected incomplete run must not have overwritten it.
+        let still = fs::read(corpus::published_snapshot_path(&data_dir))
+            .expect("the prior snapshot is still on disk");
+        assert_eq!(
+            still, prior_bytes,
+            "the rejected incomplete sync must not overwrite the last valid snapshot"
+        );
+        let loaded =
+            corpus::load_published_snapshot(&data_dir).expect("the prior snapshot still loads");
+        assert_eq!(
+            loaded.body.snapshot_id, good_report.snapshot,
+            "the prior snapshot identity is preserved"
         );
     }
 
@@ -1058,6 +1197,7 @@ mod tests {
             // fixture — so the live-dispatch branch is exercised, not `direct`.
             direct: None,
             rustfmt_urls: Some(vec![readme_url, configs_url]),
+            require_complete: false,
         };
 
         let report = sync(&config, &data_dir, &client)
@@ -1676,6 +1816,7 @@ mod tests {
             sources: vec![SourceId::new("api-guidelines").expect("a registry id is URI-safe")],
             direct: None,
             rustfmt_urls: None,
+            require_complete: false,
         };
         let report = sync(&config, &data_dir, &client)
             .await
@@ -1732,6 +1873,7 @@ mod tests {
             sources: vec![SourceId::new("rustfmt").expect("a registry id is URI-safe")],
             direct: None,
             rustfmt_urls: None,
+            require_complete: false,
         };
         let report = sync(&config, &data_dir, &client)
             .await
