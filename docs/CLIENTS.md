@@ -78,14 +78,16 @@ Any MCP client launches the server by its **absolute executable path** with the
 **absolute** path to the `rust-docs-mcp` binary. Most MCP clients resolve
 `command` against *their own* working directory (or not at all), so a relative
 path is unreliable; an absolute path is the documented contract. Obtain it from
-the [install walkthrough](../README.md#install-clean-install-walkthrough):
+the [install walkthrough](../README.md#install):
 
 - After `cargo build --release`, the binary is
   `target/release/rust-docs-mcp` — resolve it to an absolute path, e.g.
   `$(pwd)/target/release/rust-docs-mcp`.
-- The portable install location the README uses is `~/.local/bin/rust-docs-mcp`,
-  i.e. an absolute path such as `/home/you/.local/bin/rust-docs-mcp`
-  (Linux) or `/Users/you/.local/bin/rust-docs-mcp` (macOS).
+- The README uses `cargo install --git`, which normally installs to
+  `~/.cargo/bin/rust-docs-mcp` (`%USERPROFILE%\.cargo\bin\rust-docs-mcp.exe`
+  on Windows). Run `command -v rust-docs-mcp` on macOS/Linux or
+  `(Get-Command rust-docs-mcp).Source` in Windows PowerShell to obtain the
+  actual absolute path.
 
 **`args` — the `serve` arguments.** The required argument is `serve`, which binds
 the process's standard input/output as the MCP transport and runs until the

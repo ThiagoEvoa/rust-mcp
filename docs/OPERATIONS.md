@@ -24,10 +24,10 @@ acceptance criteria call for.
 > contract in [`docs/CLIENTS.md`](CLIENTS.md).
 >
 > **Acceptance criteria (both met):**
-> - **AC1** — the README examples cover `sync`/`status` and the configurable
->   data directory and staleness policy (this guide plus the
->   [README](../README.md#refreshing-the-corpus) and
->   [Troubleshooting](../README.md#troubleshooting) sections).
+> - **AC1** — the original README examples covered `sync`/`status` and the
+>   configurable data directory and staleness policy. These details are now
+>   maintained in this guide (§2–§5), with troubleshooting in §8; the
+>   [README](../README.md#install) focuses on installation.
 > - **AC2** — the troubleshooting guide distinguishes **missing components**,
 >   **stale content**, **extraction failures**, and **client connection failures**
 >   (§8).
@@ -422,7 +422,7 @@ snapshot — so a bad refresh is a *diagnostic*, not a *downtime*.
   standard `mcpServers` shape ([`docs/CLIENTS.md` §2](CLIENTS.md#2-ac1--the-generic-stdio-client-configuration)).
   A relative `command`, a missing `serve`, or a non-existent path is the most common
   cause. Re-point `command` at the absolute path from the
-  [install walkthrough](../README.md#install-clean-install-walkthrough).
+  [install walkthrough](../README.md#install).
 - **Polluted stdout.** If the client sees diagnostics where it expects protocol
   traffic, the stream has been conflated. During `serve` diagnostics go to **stderr**
   and **stdout carries only MCP traffic** (§1). Do not redirect the server's stderr

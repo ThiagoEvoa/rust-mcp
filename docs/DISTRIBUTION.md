@@ -24,7 +24,7 @@ stable `aarch64-apple-darwin`), edition `2024`, MSRV `1.88`, `CARGO_NET_OFFLINE`
 > installation can answer design/style and tooling queries offline, and an
 > operator can refresh and inspect its corpus"*) and §12 (*"Initial distribution
 > method and supported build targets"*); the install/first-launch walkthrough in
-> the [README](../README.md#install-clean-install-walkthrough) (from
+> the [README](../README.md#install) (from
 > [063](https://github.com/ThiagoEvoa/rust-mcp/issues/63)); the first-client
 > contract in [`docs/CLIENTS.md`](CLIENTS.md) (from
 > [064](https://github.com/ThiagoEvoa/rust-mcp/issues/64)); the operator/refresh
@@ -234,8 +234,9 @@ cross-compiled or multi-platform release set (see §2.3).
 
 ### 2.2 The documented install/serve path
 
-The documented path (the
-[README](../README.md#install-clean-install-walkthrough)) is:
+The original verified source-build path is shown below. The
+[README](../README.md#install) now uses `cargo install --git` to build and
+install the binary in one step, without a separate checkout or copy.
 
 ```sh
 # 1. build the release binary (needs a stable toolchain + a C compiler for rustls)
