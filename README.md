@@ -113,28 +113,33 @@ itself: `name = "rust-docs-mcp"`, `version = "0.1.0"` — distinct from the
 snapshot id.
 
 For a coverage and extraction-fidelity report over the same snapshot, use
-`inspect` (the operator view):
+`inspect` (the operator view). It inspects the **active loaded corpus** — the
+structural coverage and the extraction fidelity over *that corpus's own
+sections* — and reports the snapshot identity and the section count it
+inspected, so a degraded or partial snapshot reports its *own* missing content
+rather than a fixture-derived success:
 
 ```sh
 ./target/release/rust-docs-mcp inspect
 ```
 
 ```text
+corpus inspection: snapshot=rust-docs-bundled-seed sections=544 verdict=complete
 coverage_complete=true
 fidelity_complete=true
 corpus coverage:
-  sources=8 sections=8 checklist=1 commands=3
-  Rust API Guidelines documents=1 sections=1
-  Rust Style Guide documents=1 sections=1
-  The Cargo Book documents=1 sections=1
-  The rustc Book documents=1 sections=1
-  The rustup Book documents=1 sections=1
-  rustfmt reference documents=1 sections=1
-  Clippy         documents=1 sections=1
-  The rustdoc Book documents=1 sections=1
+  sources=8 sections=544 checklist=15 commands=11
+  Rust API Guidelines documents=4 sections=28
+  Rust Style Guide documents=1 sections=30
+  The Cargo Book documents=8 sections=111
+  The rustc Book documents=1 sections=46
+  The rustup Book documents=2 sections=7
+  rustfmt reference documents=2 sections=277
+  Clippy         documents=1 sections=8
+  The rustdoc Book documents=1 sections=37
   gaps: none
 
-extraction fidelity (sections=4):
+extraction fidelity (sections=544):
   present nested heading
   present anchor
   present list
@@ -147,13 +152,27 @@ extraction fidelity (sections=4):
   present no navigation/scripts
 ```
 
-`coverage_complete=true` and `fidelity_complete=true` confirm the bundled seed
-covers all eight collections and that the extractors retain the content types
-agents rely on. The two reports are separate `status`/`inspect` diagnostics
-written to **stderr** (hence the blank line between them); the lines above have
-the per-run tracing prefix (`<timestamp> <level> ... rust-docs-mcp: `) removed
-for readability, and the source titles use a fixed 14-column field, so the
-`documents=` column is not aligned.
+The leading `corpus inspection: … sections=544 verdict=complete` line names the
+**inspected snapshot identity** and the **section count it inspected** — which
+is the loaded corpus's count (the faithful seed's 544 sections), never a fixed
+fixture count. `coverage_complete=true` and `fidelity_complete=true` confirm the
+bundled seed covers all eight collections *and* that the extractors retained the
+content types agents rely on **in the actual corpus**. When a loaded snapshot
+does not reach full coverage or fidelity, the report lists the missing
+collections and absent content types (an *incomplete* verdict) and `inspect`
+**exits non-zero**, so automation can gate on the result; a complete inspection
+exits `0`. The report is a single **stderr** diagnostic (stdout stays exclusive
+to MCP protocol traffic); the lines above have the per-run tracing prefix
+(`<timestamp> <level> … rust-docs-mcp: `) removed for readability, and the source
+titles use a fixed 14-column field, so the `documents=` column is not aligned.
+
+The `present`/`absent` content-type list above is the **corpus** inspection. A
+separate **extractor fixture self-test** — a small hand-written set of sections
+that exercises every content type offline — runs in the unit test suite (not in
+the operator view): it proves the *extractors* retain the content types,
+whereas `inspect` proves the *loaded corpus* actually carries them. The two are
+deliberately distinct, so a corpus that retained none of those structures can
+never inherit the fixture's `fidelity_complete=true`.
 
 ## Run / first offline launch
 
@@ -329,7 +348,7 @@ rust-docs-mcp inspect
 | `serve` | Launch the stdio MCP server on the selected immutable snapshot. Serves offline from the local published snapshot, or the bundled snapshot as the first-launch fallback. |
 | `sync` | Refresh the corpus from the official sources: discover, fetch, extract, validate, and atomically publish a new snapshot. The only command that needs network access. |
 | `status` | Report the selected snapshot's identity, source/section counts, and per-source freshness **without network access**. `--stale-days DAYS` overrides the seven-day default threshold. |
-| `inspect` | Operator view: corpus coverage and extraction-fidelity report over the active snapshot. Exits non-zero only on a snapshot-load failure. |
+| `inspect` | Operator view: corpus coverage and extraction-fidelity report over the **active loaded corpus** (the corpus's own sections, with the inspected snapshot identity and section count). Reports a complete/incomplete verdict and exits non-zero on a snapshot-load failure or an incomplete inspection. |
 
 Global flags (accepted before or after the subcommand):
 

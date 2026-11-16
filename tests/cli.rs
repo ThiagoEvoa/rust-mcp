@@ -151,6 +151,48 @@ fn status_serves_the_embedded_bundle_offline() {
     );
 }
 
+/// Issue #153, driven **through the compiled binary**: `inspect` reports the
+/// *active* loaded corpus, not the built-in fixtures. With no local snapshot it
+/// loads the snapshot **embedded in the binary** (the faithful, full-corpus seed),
+/// so the operator sees the corpus's real section count and a complete verdict —
+/// never the 4-section fixture count that used to masquerade as the corpus.
+/// The report is a **stderr** diagnostic, so stdout stays MCP-exclusive even on
+/// success, and a complete inspection exits `0`.
+#[test]
+fn inspect_reports_the_active_corpus_not_the_fixtures() {
+    let dir = temp_data_dir("inspect-active-corpus");
+    let (code, stdout, stderr) = run(&["inspect", "--data-dir", dir.as_str()]);
+
+    assert_eq!(
+        code, 0,
+        "a complete bundled-seed inspection must exit 0:\n{stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "inspect must keep stdout exclusive to MCP traffic: {stdout:?}"
+    );
+    // The report names the inspected snapshot identity (the explicit identity the
+    // issue #153 requires) and its complete verdict.
+    assert!(
+        stderr.contains("rust-docs-bundled-seed"),
+        "inspect must report the inspected snapshot identity:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("verdict=complete"),
+        "a complete corpus must report a complete verdict:\n{stderr}"
+    );
+    // The section count is the *loaded corpus* count (the faithful seed's 544
+    // sections), not the 4-fixture count the bug reported.
+    assert!(
+        stderr.contains("sections=544"),
+        "inspect must report the loaded corpus section count, not a fixture count:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("extraction fidelity (sections=4)"),
+        "inspect must not report the 4-fixture count as the corpus:\n{stderr}"
+    );
+}
+
 /// Task [004] acceptance #2: diagnostics are routed to stderr even when the
 /// caller raises verbosity, so `--verbose` can never push a diagnostic onto
 /// stdout (the MCP-exclusive channel). The flag is global, so it is accepted

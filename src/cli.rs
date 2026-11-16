@@ -107,13 +107,18 @@ pub enum Command {
         stale_days: Option<u64>,
     },
 
-    /// Inspect corpus coverage and extraction fidelity — the M2 operator view.
-    /// Records source/document/section counts per registered collection, any
-    /// coverage gap, and which content types the extractors retain (nested
-    /// headings, anchors, lists, tables, command syntax, stability callouts,
-    /// relative links, lint "known issues", fenced examples) while navigation
-    /// chrome and scripts are stripped. No panic; it exits non-zero only on a
-    /// snapshot-load failure, otherwise `0`.
+    /// Inspect the active loaded corpus — coverage and extraction fidelity over
+    /// the selected snapshot (the M2 operator view). Records source/document/
+    /// section counts per registered collection, any coverage gap, and which
+    /// content types the corpus *actually* retains (nested headings, anchors,
+    /// lists, tables, command syntax, stability callouts, relative links, lint
+    /// "known issues", fenced examples) while navigation chrome and scripts are
+    /// stripped. The report names the inspected snapshot identity and the section
+    /// count it inspected, so a degraded or partial snapshot reports its own
+    /// missing content rather than a fixture-derived success (issue #153). No
+    /// panic; it exits non-zero on a snapshot-load failure **or** when the
+    /// inspection verdict is incomplete (a corpus that does not reach full
+    /// coverage/fidelity), otherwise `0`.
     Inspect,
 }
 
@@ -295,30 +300,34 @@ impl Cli {
                     }
                 };
 
-                // Coverage of the corpus the operator currently has, and
-                // extraction fidelity over the representative fixtures: an
-                // offline proof that the content types agents rely on survive
-                // extraction while navigation chrome and scripts are stripped
-                // (task [032] / plan.md section 11). Both are diagnostics on
-                // stderr, keeping stdout exclusive to MCP messages.
-                let coverage = crate::coverage::record_coverage(&snapshot.manifest);
-                let fidelity = crate::coverage::inspect_fidelity(
-                    &crate::coverage::representative_fidelity_sections(),
-                );
-                // A one-line operator verdict: the corpus the operator has is
-                // coverage-complete, and every content type the extractors must
-                // retain survives in the representative fixtures.
-                tracing::info!(
-                    "rust-docs-mcp: coverage_complete={}",
-                    coverage.is_complete()
-                );
-                tracing::info!(
-                    "rust-docs-mcp: fidelity_complete={}",
-                    fidelity.all_types_present()
-                );
-                tracing::info!("rust-docs-mcp: {}", coverage.render());
-                tracing::info!("rust-docs-mcp: {}", fidelity.render());
-                Ok(ExitCode::SUCCESS)
+                // Inspect the ACTIVE loaded corpus: its structural coverage plus
+                // the extraction fidelity over the corpus's *own* sections
+                // (`manifest.body.sections`), never the built-in
+                // `representative_fidelity_sections()` fixtures (those are the
+                // extractor self-test, kept in the test suite). The report makes
+                // the inspected snapshot identity and section count explicit, so a
+                // degraded or partial snapshot reports its own missing content
+                // rather than a fixture-derived success (issue #153). Both are
+                // diagnostics on stderr, keeping stdout exclusive to MCP messages.
+                let inspection = crate::coverage::inspect_corpus(&snapshot.manifest);
+                let complete = inspection.is_complete();
+
+                tracing::info!("rust-docs-mcp: {}", inspection.render());
+
+                // The incomplete-inspection contract (issue #153): a snapshot that
+                // does not reach full coverage/fidelity is a *verdict*, not a
+                // silent pass. For automation it surfaces as a non-zero exit
+                // (consistent with the `sync`/`status` failure paths); the
+                // structured report above is always emitted so a human or a parser
+                // can see exactly which collections and content types are missing.
+                if complete {
+                    Ok(ExitCode::SUCCESS)
+                } else {
+                    tracing::warn!(
+                        "rust-docs-mcp: corpus inspection incomplete: the active snapshot does not reach full coverage/fidelity (see the report above)"
+                    );
+                    Ok(ExitCode::FAILURE)
+                }
             }
         }
     }

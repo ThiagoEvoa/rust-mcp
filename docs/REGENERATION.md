@@ -87,25 +87,24 @@ Full detail (the conditional/HTTP 304 refresh, the writer lock, atomic publish, 
 
 ### 2.1 The operator view — `inspect`
 
-`inspect` prints coverage and extraction fidelity over the active snapshot (default: the bundled seed). **Real captured output** from this binary, `RUST_DOCS_MCP_DATA_DIR` pointing at an empty data directory (so the seed loads):
+`inspect` prints a coverage and extraction-fidelity report over the **active loaded corpus** — the structural coverage and the fidelity over *that corpus's own sections* — plus the snapshot identity and section count it inspected (default: the bundled seed). **Real captured output** from this binary, `RUST_DOCS_MCP_DATA_DIR` pointing at an empty data directory (so the seed loads):
 
 ```
+corpus inspection: snapshot=rust-docs-bundled-seed sections=544 verdict=complete
 coverage_complete=true
 fidelity_complete=true
-
 corpus coverage:
-  sources=8 sections=8 checklist=1 commands=3
-  Rust API Guidelines documents=1 sections=1
-  Rust Style Guide documents=1 sections=1
-  The Cargo Book documents=1 sections=1
-  The rustc Book documents=1 sections=1
-  The rustup Book documents=1 sections=1
-  rustfmt reference documents=1 sections=1
-  Clippy         documents=1 sections=1
-  The rustdoc Book documents=1 sections=1
+  sources=8 sections=544 checklist=15 commands=11
+  Rust API Guidelines documents=4 sections=28
+  Rust Style Guide documents=1 sections=30
+  The Cargo Book documents=8 sections=111
+  The rustc Book documents=1 sections=46
+  The rustup Book documents=2 sections=7
+  rustfmt reference documents=2 sections=277
+  Clippy         documents=1 sections=8
+  The rustdoc Book documents=1 sections=37
   gaps: none
-
-extraction fidelity (sections=4):
+extraction fidelity (sections=544):
   present nested heading
   present anchor
   present list
@@ -118,10 +117,15 @@ extraction fidelity (sections=4):
   present no navigation/scripts
 ```
 
-(The per-run tracing prefix on each line — e.g. `2026-11-13T16:14:00.333305Z  INFO 304: rust-docs-mcp:` — is omitted for readability; it is timestamped per run and carries no corpus fact.)
+(The per-run tracing prefix on the first line — e.g. `2026-11-16T08:11:10.749179Z  INFO 315: rust-docs-mcp:` — is omitted for readability; it is timestamped per run and carries no corpus fact.)
 
+- **`corpus inspection: snapshot=… sections=544 verdict=complete`** — the leading line names the **inspected snapshot identity** and the **section count it inspected**. The count is the *loaded corpus's* count (the faithful seed's 544 sections), **never** a fixed fixture count. This is the identity/count made explicit that issue #153 requires.
 - **`coverage_complete=true`** — every *required* `SourceCollection` has ≥1 section and its `checklist`/`commands` cross-references resolve.
-- **`fidelity_complete=true`** — all ten content types the extractors must retain are *present* (no recorded gap): `FidelityReport::all_types_present` (`src/coverage.rs`) is true when the report's `absent` list is empty. The run is over the representative fixtures (`inspect_fidelity` over `representative_fidelity_sections()`, hence `sections=4`); a type no fixture exhibits lands in `absent`, flips `fidelity_complete` to `false`, and is *recorded* as a gap — never a fabricated pass. This is **not** "every section body is untruncated"; that is not what the fidelity check measures.
+- **`fidelity_complete=true`** — all ten content types the extractors must retain are *present in the actual corpus* (no recorded gap): `FidelityReport::all_types_present` (`src/coverage.rs`) is true when the report's `absent` list is empty. Since #153 the operator `inspect` runs over the **corpus's own sections** — `inspect_corpus(&snapshot.manifest)`, i.e. `inspect_fidelity(&manifest.body.sections)`, hence `sections=544` — *not* over the built-in `representative_fidelity_sections()` fixtures. A type the loaded corpus does not exhibit lands in `absent`, flips `fidelity_complete` to `false`, and is *recorded* as a gap — never a fabricated pass. This is **not** "every section body is untruncated"; that is not what the fidelity check measures.
+
+**Corpus inspection vs. extractor fixture validation.** The `present`/`absent` content-type list above is the **corpus** inspection (the loaded snapshot's own sections). A separate **extractor fixture self-test** — a small hand-written set of sections that exercises every content type offline — runs in the unit test suite (`inspect_fidelity(&representative_fidelity_sections())` must report every type present). The fixture proves the *extractors* retain the content types; `inspect` proves the *loaded corpus* actually carries them. The two are deliberately distinct, so a corpus that retained none of those structures can never inherit the fixture's `fidelity_complete=true` (issue #153).
+
+**Incomplete-inspection contract.** An inspection is *complete* only when the structural coverage has no gap **and** every expected content type is present in the actual corpus. When a loaded snapshot does not reach that bar, `inspect` lists the missing collections and absent content types (a `verdict=incomplete` report) and **exits non-zero**, so automation can gate on the result; a complete inspection exits `0` (a snapshot-load failure also exits non-zero).
 
 The same run is reproducible: because the seed is fixed and the serializer is compact, the coverage/fidelity lines are identical on every run.
 
@@ -211,7 +215,7 @@ Any fetch, parse, or **validation** failure aborts **before the atomic promotion
 - The **embedded bytes validate through the same gate:** `the_bundled_json_parses_and_validates` loads `data/bundled/snapshot.json` (the exact bytes the binary embeds) and asserts it parses and `is_valid()`.
 - `the_bundled_snapshot_validates` asserts the builder output is valid with all eight sources.
 - `the_real_manifest_has_no_excluded_sources` asserts the shipped JSON carries no `first-sync-required` flags.
-- `rust-docs-mcp inspect` reports `coverage_complete` / `fidelity_complete` over the active snapshot.
+- `rust-docs-mcp inspect` reports `coverage_complete` / `fidelity_complete` over the **active loaded corpus** (its own sections), names the inspected snapshot identity and section count, and exits non-zero when the inspection verdict is incomplete.
 
 All of these run in the ordinary offline suite.
 

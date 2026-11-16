@@ -24,11 +24,39 @@
 //! the filesystem, so they are safe to run in normal tests, in the `inspect`
 //! subcommand, and against the committed bundled seed.
 //!
+//! ## Corpus inspection vs. extractor fixture validation (issue #153)
+//!
+//! The **operator view** is [`inspect_corpus`]: it inspects the *active* loaded
+//! corpus — the structural coverage of the selected manifest plus the extraction
+//! fidelity over **that corpus's own sections** (`manifest.body.sections`) — and
+//! returns one complete/incomplete verdict together with the snapshot identity and
+//! the section count it inspected. Because the fidelity report is computed over
+//! the real corpus, a degraded or partial snapshot reports its *actual* missing
+//! content types and collections; it can never inherit a "complete" verdict from
+//! the fixtures.
+//!
+//! The built-in [`representative_fidelity_sections`] are the **extractor
+//! fixture**: a small, hand-written set of sections that exercises every
+//! [`FidelityType`] offline. They are validated by the extractor self-test in this
+//! module's test suite (`inspect_fidelity(&representative_fidelity_sections())`
+//! must report every type present) and are **not** the operator view. Routing the
+//! operator `inspect` through those fixtures is exactly the bug #153 fixes: it let
+//! a corpus that retained none of those structures still show
+//! `fidelity_complete=true` with a *fixture* section count instead of the loaded
+//! corpus's count. The operator path must therefore inspect
+//! `manifest.body.sections`, never the fixtures.
+//!
+//! The **expected inventory** a complete corpus must satisfy is the full
+//! [`FidelityType::all`] set: a faithful upstream corpus retains every tracked
+//! content type. An inspection is *complete* only when the structural coverage has
+//! no gap **and** every expected content type is present in the *actual* corpus —
+//! so "one bare paragraph per source" no longer reads as complete coverage.
+//!
 //! [issue 32]: https://github.com/ThiagoEvoa/rust-mcp/issues/32
 
 use std::fmt;
 
-use crate::model::{CommandKey, Section, SnapshotManifest};
+use crate::model::{CommandKey, Section, SnapshotId, SnapshotManifest};
 use crate::registry::SourceCollection;
 
 // --- Coverage --------------------------------------------------------------
@@ -232,6 +260,12 @@ impl FidelityType {
         }
     }
 
+    /// The full content-type inventory a *complete* corpus is expected to retain.
+    ///
+    /// This is the **expected inventory** the [`CorpusInspection::is_complete`]
+    /// verdict checks the *actual* corpus against: a faithful upstream corpus
+    /// exhibits every one of these types, so a type that is `absent` from the
+    /// inspected corpus is a recorded gap, not a pass.
     fn all() -> [FidelityType; 10] {
         [
             FidelityType::NestedHeading,
@@ -288,6 +322,12 @@ impl FidelityReport {
 /// Inspect a set of sections and report which content types survive extraction
 /// and which do not.
 ///
+/// This is the shared core of both the extractor fixture self-test (the built-in
+/// [`representative_fidelity_sections`]) and the operator [`inspect_corpus`] (which
+/// passes the *corpus's own* sections). It reports what the given sections
+/// exhibit; it is the caller's job to pass the right sections — the operator path
+/// passes `manifest.body.sections`, never the fixtures (issue #153).
+///
 /// The "navigation/scripts absent" type is an invariant: it is *present* when no
 /// inspected body leaks chrome, and moves to `absent` (a defect) when one does.
 /// An empty section set is a degenerate no-op: only the navigation invariant is
@@ -334,8 +374,16 @@ fn present_in(sections: &[Section], ty: FidelityType) -> bool {
 /// syntax template, and a guideline with a stability callout), so the fidelity
 /// check proves the content types survive extraction without any network.
 ///
+/// This is the **extractor fixture** for the developer self-test (the extractor
+/// fixture validation, kept in this module's test suite), *not* the operator
+/// view: the operator `inspect` inspects the active corpus's own sections
+/// ([`inspect_corpus`]), never these fixtures (issue #153). It is therefore
+/// `#[cfg(test)]` — a test-only fixture, not part of the production inspection
+/// path.
+///
 /// Every body is clean Markdown with no navigation chrome or scripts, so the
 /// "no navigation/scripts" invariant holds across the set.
+#[cfg(test)]
 pub fn representative_fidelity_sections() -> Vec<Section> {
     use crate::model::{SectionBuilder, SourceId, Url};
 
@@ -432,6 +480,102 @@ Rules:
     .expect("valid fixture section");
 
     vec![rustc, clippy, cargo, guidelines]
+}
+
+// --- Corpus inspection (the operator view) ---------------------------------
+
+/// The operator inspection of the *active* loaded corpus (issue #153).
+///
+/// It bundles the structural [`CoverageReport`] and the extraction
+/// [`FidelityReport`] computed over the **corpus's own sections**
+/// (`manifest.body.sections`), together with the snapshot identity that was
+/// inspected and the section count it inspected. The displayed section count is
+/// therefore the loaded corpus's count, never the built-in fixture's count of
+/// four — the exact error #153 corrected.
+///
+/// Built by [`inspect_corpus`]; rendered for **stderr** diagnostics by
+/// [`CorpusInspection::render`]; its [`CorpusInspection::is_complete`] verdict is
+/// the automation contract the `inspect` subcommand maps to an exit code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CorpusInspection {
+    /// The snapshot identity that was inspected.
+    pub snapshot_id: SnapshotId,
+    /// The number of sections in the inspected corpus. This equals
+    /// [`CoverageReport::section_count`] and the fidelity report's
+    /// `sections_inspected`, so the displayed count is always the loaded corpus
+    /// count, never a fixture count.
+    pub sections_inspected: usize,
+    /// The structural coverage report over the corpus.
+    pub coverage: CoverageReport,
+    /// The extraction-fidelity report over the corpus's own sections (not the
+    /// built-in fixtures).
+    pub fidelity: FidelityReport,
+}
+
+impl CorpusInspection {
+    /// Whether the inspected corpus is complete: no coverage gap **and** every
+    /// expected content type present in the *actual* corpus. A structurally
+    /// complete but content-poor corpus (e.g. one bare paragraph per source) is
+    /// therefore *incomplete*: it lacks the expected content types even though it
+    /// has a section under every collection. This is what stops "one paragraph per
+    /// source" from reading as full coverage (issue #153).
+    pub fn is_complete(&self) -> bool {
+        self.coverage.is_complete() && self.fidelity.all_types_present()
+    }
+
+    /// Render the inspection for **stderr** diagnostics: the explicit snapshot
+    /// identity and section count, the complete/incomplete verdict, the two
+    /// completeness booleans, and the two underlying reports (which list any
+    /// coverage gaps and absent content types honestly). Returned, not written, so
+    /// the caller chooses the sink — the `inspect` subcommand routes it to stderr,
+    /// keeping stdout exclusive to MCP messages (`plan.md` §8/§9).
+    pub fn render(&self) -> String {
+        let verdict = if self.is_complete() {
+            "complete"
+        } else {
+            "incomplete"
+        };
+        let mut out = String::new();
+        out.push_str(&format!(
+            "corpus inspection: snapshot={} sections={} verdict={verdict}\n",
+            self.snapshot_id.as_str(),
+            self.sections_inspected,
+        ));
+        out.push_str(&format!(
+            "coverage_complete={}\n",
+            self.coverage.is_complete()
+        ));
+        out.push_str(&format!(
+            "fidelity_complete={}\n",
+            self.fidelity.all_types_present()
+        ));
+        out.push_str(&self.coverage.render());
+        out.push_str(&self.fidelity.render());
+        out
+    }
+}
+
+/// Inspect the *active* corpus in `manifest`: its structural coverage plus its
+/// extraction fidelity, the latter computed over the corpus's **own sections**
+/// (`manifest.body.sections`) and never over the built-in
+/// [`representative_fidelity_sections`].
+///
+/// This is the operator view wired to the `inspect` subcommand. It is pure and
+/// offline: it reads only the in-memory manifest, so it is safe in tests, in the
+/// `inspect` subcommand, and against the committed bundled seed. The returned
+/// [`CorpusInspection`] carries the snapshot identity and the loaded section count
+/// so an operator (or automation) can see *which* snapshot and *how much* of it
+/// was inspected.
+pub fn inspect_corpus(manifest: &SnapshotManifest) -> CorpusInspection {
+    let coverage = record_coverage(manifest);
+    let sections = &manifest.body.sections;
+    let fidelity = inspect_fidelity(sections);
+    CorpusInspection {
+        snapshot_id: manifest.body.snapshot_id.clone(),
+        sections_inspected: sections.len(),
+        coverage,
+        fidelity,
+    }
 }
 
 /// Whether a body contains a Markdown list item (`- `, `* `, `+ `, or `1. `).
@@ -538,7 +682,10 @@ fn body_has_chrome(body: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{SectionBuilder, SourceId, Url};
+    use crate::model::{
+        Channel, CorpusHash, ManifestBody, Release, SchemaVersion, Section, SectionBuilder,
+        SnapshotId, Source, SourceId, Timestamp, Url, ValidationSummary,
+    };
 
     /// Build a single bare section with an arbitrary body, for the fidelity
     /// tests that need a body shape the representative fixtures do not cover.
@@ -788,5 +935,241 @@ mod tests {
         // Only the navigation invariant holds vacuously; every real type absent.
         assert_eq!(report.present, vec![FidelityType::NoNavigationOrScripts]);
         assert!(!report.all_types_present());
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #153: the operator inspection must inspect the ACTIVE loaded corpus,
+    // not the built-in extractor fixtures. These pin the corpus-inspection
+    // contract (AC1–AC4) and the honest missing-content reporting.
+    // -----------------------------------------------------------------------
+
+    /// A structurally complete but content-poor corpus: every section is reduced
+    /// to a single bare paragraph, so no content type survives, while every
+    /// collection still has a source and a section (so structural coverage stays
+    /// complete). This isolates the fidelity check: the corpus is structurally
+    /// complete yet cannot show a fidelity-complete verdict from fixtures.
+    fn structurally_complete_but_content_poor() -> SnapshotManifest {
+        let mut manifest = seed_manifest();
+        for section in &mut manifest.body.sections {
+            section.body = "Just a paragraph, no structure.\n".to_string();
+            section.heading_path.clear();
+            section.anchor = None;
+            section.command_keys.clear();
+            section.qualifications.clear();
+            section.lint_ids.clear();
+        }
+        manifest
+    }
+
+    /// A minimal valid manifest carrying exactly the given sections (one `rustc`
+    /// source), enough for [`inspect_corpus`], which reads the sections for
+    /// fidelity and the sources/sections/commands for coverage.
+    fn manifest_with(sections: Vec<Section>) -> SnapshotManifest {
+        let source = Source {
+            id: SourceId::new("rustc").expect("valid source id fixture"),
+            title: "The rustc Book".into(),
+            entry_url: Url::new("https://doc.rust-lang.org/rustc/").expect("valid url fixture"),
+            document_urls: vec![],
+            last_checked: None,
+            fetched_at: Timestamp::new("2026-11-01T00:00:00Z").expect("valid timestamp fixture"),
+            upstream_modified: None,
+            etag: None,
+            content_hash: CorpusHash::compute(b"test"),
+            release: Release::channel_only(Channel::Stable),
+            parser: "test/1".into(),
+        };
+        SnapshotManifest {
+            schema_version: SchemaVersion::CURRENT,
+            body: ManifestBody {
+                snapshot_id: SnapshotId::new("test-inspect-snapshot")
+                    .expect("valid snapshot id fixture"),
+                created_at: Timestamp::new("2026-11-01T00:00:00Z")
+                    .expect("valid timestamp fixture"),
+                parser_version: "test/1".into(),
+                sources: vec![source],
+                sections,
+                checklist: vec![],
+                commands: vec![],
+                validation: ValidationSummary::default(),
+                attribution: vec![],
+            },
+        }
+    }
+
+    // AC1: the displayed section count equals the loaded corpus count — the
+    // inspection reports the corpus's own count, never the 4-fixture count.
+    #[test]
+    fn the_displayed_section_count_equals_the_loaded_corpus_count() {
+        let manifest = seed_manifest();
+        let report = inspect_corpus(&manifest);
+
+        assert_eq!(report.sections_inspected, manifest.body.sections.len());
+        assert_eq!(
+            report.fidelity.sections_inspected,
+            manifest.body.sections.len()
+        );
+        assert_eq!(report.coverage.section_count, manifest.body.sections.len());
+        // The rendered report shows the loaded count, not the fixture count.
+        let count = manifest.body.sections.len();
+        assert!(
+            report.render().contains(&format!("sections={count}")),
+            "render must show the loaded count: {}",
+            report.render(),
+        );
+    }
+
+    // AC2: removing a table/example from a snapshot changes the corresponding
+    // diagnostic — the report tracks the actual corpus, not a fixed fixture.
+    #[test]
+    fn removing_a_table_or_example_changes_the_diagnostic() {
+        // A section carrying a GFM table and a fenced example reports both present.
+        let with_structures = manifest_with(vec![bare_section(
+            "A table and an example.\n\n| Col | Val |\n| --- | --- |\n| 1 | two |\n\n```rust\nlet x = 1;\n```\n",
+        )]);
+        let before = inspect_corpus(&with_structures);
+        assert!(
+            before.fidelity.present.contains(&FidelityType::Table),
+            "a GFM table must be detected: {}",
+            before.render(),
+        );
+        assert!(
+            before
+                .fidelity
+                .present
+                .contains(&FidelityType::FencedExample),
+            "a fenced example must be detected: {}",
+            before.render(),
+        );
+
+        // Remove the table and the example: the corresponding types flip to
+        // absent, proving the diagnostic tracks the actual corpus content.
+        let bare = manifest_with(vec![bare_section(
+            "Just a paragraph, no table, no example.\n",
+        )]);
+        let after = inspect_corpus(&bare);
+        assert!(
+            after.fidelity.absent.contains(&FidelityType::Table),
+            "removing the table must flip Table to absent: {}",
+            after.render(),
+        );
+        assert!(
+            after.fidelity.absent.contains(&FidelityType::FencedExample),
+            "removing the example must flip FencedExample to absent: {}",
+            after.render(),
+        );
+    }
+
+    // AC3: a deliberately deficient local snapshot cannot show fixture-derived
+    // success — a structurally complete but content-poor corpus is reported
+    // incomplete over its *actual* sections, while the extractor fixture self-test
+    // (on the representative fixtures) still reports complete.
+    #[test]
+    fn a_deficient_snapshot_cannot_show_fixture_derived_success() {
+        let deficient = structurally_complete_but_content_poor();
+        let report = inspect_corpus(&deficient);
+
+        // The verdict is incomplete, and the section count is the loaded corpus
+        // count, not the fixture count of four.
+        assert!(
+            !report.is_complete(),
+            "a content-poor corpus must not be complete: {}",
+            report.render(),
+        );
+        assert_eq!(
+            report.fidelity.sections_inspected,
+            deficient.body.sections.len()
+        );
+        assert_ne!(
+            report.fidelity.sections_inspected, 4,
+            "not the fixture count"
+        );
+        assert!(!report.fidelity.all_types_present());
+        // A bare paragraph trips no chrome, so the navigation invariant still
+        // holds, but the real content types are honestly absent.
+        assert!(
+            report
+                .fidelity
+                .present
+                .contains(&FidelityType::NoNavigationOrScripts)
+        );
+        for ty in [
+            FidelityType::NestedHeading,
+            FidelityType::Anchor,
+            FidelityType::List,
+            FidelityType::Table,
+            FidelityType::CommandSyntax,
+            FidelityType::StabilityCallout,
+            FidelityType::RelativeLink,
+            FidelityType::LintKnownIssues,
+            FidelityType::FencedExample,
+        ] {
+            assert!(
+                report.fidelity.absent.contains(&ty),
+                "a bare-paragraph corpus must report {ty:?} absent: {}",
+                report.render(),
+            );
+        }
+
+        // The very same fixtures, inspected on their own (the developer self-test),
+        // still report complete — proving the operator path is what fails, not the
+        // fixture self-test.
+        let fixture = inspect_fidelity(&representative_fidelity_sections());
+        assert!(
+            fixture.all_types_present(),
+            "the extractor fixture self-test is still complete: {}",
+            fixture.render(),
+        );
+    }
+
+    // AC4: a complete recorded corpus reports its *actual* retained content types
+    // (and its actual section count), through the operator inspection.
+    #[test]
+    fn a_complete_recorded_corpus_reports_its_actual_types() {
+        let report = inspect_corpus(&seed_manifest());
+
+        assert_eq!(
+            report.sections_inspected, 544,
+            "the inspection reports the loaded corpus count"
+        );
+        assert_eq!(report.coverage.section_count, 544);
+        assert!(
+            report.is_complete(),
+            "the faithful seed is complete: {}",
+            report.render(),
+        );
+        for ty in FidelityType::all() {
+            assert!(
+                report.fidelity.present.contains(&ty),
+                "the seed actually exhibits {ty:?}: {}",
+                report.render(),
+            );
+        }
+    }
+
+    // The inspection's rendered block makes the snapshot identity and section
+    // count explicit, and the verdict honest: a complete corpus reads complete,
+    // a deficient one reads incomplete.
+    #[test]
+    fn the_inspection_render_makes_identity_count_and_verdict_explicit() {
+        let complete = inspect_corpus(&seed_manifest());
+        let rendered = complete.render();
+        assert!(
+            rendered.contains("snapshot=rust-docs-bundled-seed"),
+            "the render names the inspected snapshot: {rendered}"
+        );
+        assert!(
+            rendered.contains("verdict=complete"),
+            "complete: {rendered}"
+        );
+        assert!(rendered.contains("coverage_complete=true"));
+        assert!(rendered.contains("fidelity_complete=true"));
+
+        let deficient = inspect_corpus(&structurally_complete_but_content_poor());
+        let deficient_render = deficient.render();
+        assert!(
+            deficient_render.contains("verdict=incomplete"),
+            "a deficient corpus renders an incomplete verdict: {deficient_render}"
+        );
+        assert!(deficient_render.contains("fidelity_complete=false"));
     }
 }
