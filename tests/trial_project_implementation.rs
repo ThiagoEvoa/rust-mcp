@@ -33,8 +33,12 @@
 //!    `get_command_guidance`.
 //! 4. `get_command_guidance "cargo build"` → the seed's catalog entry (purpose,
 //!    syntax, examples, prerequisites, compatibility qualifications, effect
-//!    notes) plus its cited section, canonical URL, content hash, and citations.
-//!    This is the guidance the agent would run via *its own* terminal.
+//!    notes) plus its cited sections, each with canonical URL, content hash, and
+//!    citations. In the faithful #150 corpus the Cargo Book chapter is split
+//!    into anchored sub-sections, so the first page is **truncated** and the
+//!    trial follows `next_cursor` to the end, reassembling every cited
+//!    sub-section. This is the guidance the agent would run via *its own*
+//!    terminal.
 //! 5. `get_command_guidance "cargo test"` → since issue [#149] the seed's
 //!    catalog is **derived from the seed's own sections** (one resolvable
 //!    snapshot catalog), so `cargo test` *resolves* on the seed — it cites the
@@ -94,16 +98,24 @@ const SNAPSHOT_ID: &str = "rust-docs-bundled-seed";
 /// representative seed (the trial's success path).
 const CARGO_BUILD: &str = "cargo build";
 
-/// The section `cargo build`'s full-catalog entry cites, and that the seed
-/// carries (so the guidance resolves).
-const CARGO_BUILD_SECTION: &str = "cargo/commands%2Fcargo-build";
+/// The section `cargo build`'s full-catalog entry cites *first* (page one) and
+/// that the seed carries, so the guidance resolves. In the faithful #150 corpus
+/// the single Cargo Book chapter is split into its anchored sub-sections, so the
+/// entry now cites many sections; this is the deterministic first one.
+const CARGO_BUILD_SECTION: &str = "cargo/commands%2Fcargo-build#cargo-build1";
 
-/// The captured content identity of the `cargo build` section the trial cites.
-const CARGO_BUILD_SECTION_HASH: &str = "c128-ffa550364dc212527d904d59fe85fe84";
+/// The captured content identity of that first `cargo build` sub-section the
+/// trial cites.
+const CARGO_BUILD_SECTION_HASH: &str = "c128-ffa54382ded2edbd785c84e7795228d0";
 
-/// The canonical upstream URL of the `cargo build` section (the citation the
-/// agent records).
-const CARGO_BUILD_SECTION_URL: &str = "https://doc.rust-lang.org/cargo/commands/cargo-build.html";
+/// The canonical upstream URL of the first `cargo build` sub-section (the
+/// citation the agent records).
+const CARGO_BUILD_SECTION_URL: &str =
+    "https://doc.rust-lang.org/cargo/commands/cargo-build.html#cargo-build1";
+
+/// How many `cargo build` sub-sections the faithful corpus cites — the full
+/// page count the trial reassembles by following `next_cursor` to the end.
+const CARGO_BUILD_SECTION_COUNT: usize = 18;
 
 /// The seed-advertised commands the trial exercises alongside `cargo build`. Since
 /// issue [#149] unified the catalog with the snapshot, both resolve on the seed
@@ -492,9 +504,18 @@ async fn the_project_implementation_trial_retrieves_command_guidance_and_reports
         "the default limit (five) is echoed"
     );
     assert_eq!(
-        build["result"]["structuredContent"]["truncated"], false,
-        "the one cited section fits on one page"
+        build["result"]["structuredContent"]["truncated"], true,
+        "the faithful corpus splits the Cargo Book chapter into more sub-sections\n\
+         than the default page limit, so the first page is truncated with a\n\
+         continuation cursor"
     );
+    // The continuation cursor the agent would follow to page the rest — a JSON
+    // string the next `get_command_guidance` call resumes from. A final page
+    // carries none.
+    let next_cursor = build["result"]["structuredContent"]
+        .get("next_cursor")
+        .and_then(Value::as_str)
+        .expect("a truncated first page carries an explicit next_cursor");
 
     // The command entry: its documented metadata + the separately-labeled effect
     // notes + the compatibility qualifications the agent would read before
@@ -564,19 +585,21 @@ async fn the_project_implementation_trial_retrieves_command_guidance_and_reports
         );
     }
 
-    // The cited section: its provenance the agent records, plus the command-key
-    // and qualification citations.
+    // The first page of the cited sections: its provenance the agent records, plus
+    // the command-key citation. In the faithful #150 corpus the single Cargo Book
+    // chapter is split into anchored sub-sections, so the entry cites many
+    // sections and the first page carries the default limit of five.
     let sections = &build["result"]["structuredContent"]["sections"];
     assert_eq!(
         sections.as_array().unwrap().len(),
-        1,
-        "`cargo build` cites exactly one section on the seed"
+        5,
+        "`cargo build` cites more sub-sections than one page; the first page holds the default limit"
     );
     let section = &sections[0];
     assert_eq!(
         section.get("id").and_then(Value::as_str),
         Some(CARGO_BUILD_SECTION),
-        "the cited section is the Cargo Book `cargo build` chapter"
+        "the first cited section is the Cargo Book `cargo build` chapter's first sub-section"
     );
     assert_eq!(
         section.get("source").and_then(Value::as_str),
@@ -605,8 +628,11 @@ async fn the_project_implementation_trial_retrieves_command_guidance_and_reports
         Some("unknown"),
         "the seed section's freshness is `unknown` (AC2: an unverified as_of)"
     );
-    // The section's citations carry the canonical document, the `cargo build`
-    // command key, and a qualification.
+    // The first section's citations carry the canonical document and the
+    // `cargo build` command-key note. (The version/stability qualification the
+    // agent must read lives in the entry's `compatibility` field, asserted above
+    // via the `--help` guidance, not in a per-section citation — the faithful
+    // sub-sections carry no section-level qualification note.)
     let section_citations = section
         .get("citations")
         .and_then(Value::as_array)
@@ -627,9 +653,72 @@ async fn the_project_implementation_trial_retrieves_command_guidance_and_reports
         notes.contains(&"command key: cargo build"),
         "the citations carry the `cargo build` command-key note; got {notes:?}"
     );
-    assert!(
-        notes.iter().any(|n| n.starts_with("qualification:")),
-        "the citations carry a version qualification note; got {notes:?}"
+
+    // ---- (3b) Pagination: the faithful corpus splits the chapter into more
+    //         sub-sections than one page, so the agent follows `next_cursor`
+    //         to the end. Resuming every page reassembles the whole command's
+    //         cited sections in citation order, with none dropped and the final
+    //         page untruncated — the explicit-paging contract the tool promises.
+    //         ----------------------------------------------------------------
+    let mut all_ids: Vec<String> = sections
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    let mut cursor = Some(next_cursor.to_string());
+    let mut pages = 1u32;
+    while let Some(cursor_value) = cursor.take() {
+        let page = client
+            .call_tool_raw(
+                "get_command_guidance",
+                json!({ "command": CARGO_BUILD, "cursor": cursor_value }),
+            )
+            .await;
+        assert_eq!(
+            page.get("error"),
+            None,
+            "resuming the continuation cursor must succeed: {page}"
+        );
+        pages += 1;
+        let page_sc = &page["result"]["structuredContent"];
+        for s in page_sc["sections"].as_array().unwrap() {
+            all_ids.push(
+                s.get("id")
+                    .and_then(Value::as_str)
+                    .expect("each resumed section names its id")
+                    .to_string(),
+            );
+        }
+        // Each resumed section names its source (provenance the agent records).
+        for s in page_sc["sections"].as_array().unwrap() {
+            assert!(
+                s.get("source").and_then(Value::as_str).is_some(),
+                "each resumed section names its source"
+            );
+        }
+        cursor = page_sc
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+    // The loop ends only when a page carries no `next_cursor` — which, by the
+    // tool's contract, is the untruncated final page. Reassembling every page
+    // must reproduce the whole command's cited sub-sections in citation order, with
+    // none dropped and none duplicated.
+    assert_eq!(
+        all_ids.len(),
+        CARGO_BUILD_SECTION_COUNT,
+        "following `next_cursor` reassembles every cited sub-section; got {} across {pages} pages",
+        all_ids.len()
+    );
+    let mut distinct = all_ids.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(
+        all_ids.len(),
+        distinct.len(),
+        "no cited sub-section is duplicated across pages"
     );
 
     // ---- (4) get_command_guidance "cargo test": since issue [#149] the seed's

@@ -33,14 +33,15 @@
 //!    "naming" mention, not the conversion guideline); the trial records that and
 //!    asserts the reliable path below.
 //! 5. `search_docs "C-CONV"` → the *exact-guideline-code* search, the reliable
-//!    path: it surfaces `api-guidelines/about`, the section that carries the
-//!    `C-CONV` guideline code.
-//! 6. `get_api_checklist { category: "Conversions and From" }` → the checklist
-//!    entry for the conversion guideline: `C-CONV` "Prefer `From`/`Into` for
-//!    conversions", explaining `api-guidelines/about`.
-//! 7. `get_api_checklist { }` (all categories) → the seed's single entry, proving
-//!    the checklist walk is whole.
-//! 8. `get_section "api-guidelines/about"` → the original section the agent
+//!    path: it surfaces the `api-guidelines` naming section, the section that
+//!    carries the `C-CONV` guideline code.
+//! 6. `get_api_checklist { category: "Naming" }` → the checklist entry for the
+//!    conversion guideline: `C-CONV` "Ad-hoc conversions should use as_ / to_ /
+//!    into_", explaining the naming section.
+//! 7. `get_api_checklist { }` (all categories) → the full 544-section checklist
+//!    walk, paginated; the `C-CONV` entry is reached exactly once on the first
+//!    page, proving the walk is whole.
+//! 8. `get_section` the naming section → the original section the agent
 //!    *cites*: its body, `canonical_url`, `content_hash`, `source`, and
 //!    citations (including the `guideline code: C-CONV` note).
 //! 9. Clean client disconnect → the server self-exits.
@@ -87,18 +88,23 @@ const CODE_QUERY: &str = "C-CONV";
 /// The agent's natural-language attempt at the conversion-naming question.
 const NATURAL_QUERY: &str = "From TryFrom conversion naming";
 
-/// The checklist category the conversion-naming guideline sits in.
-const CONVERSION_CATEGORY: &str = "Conversions and From";
+/// The checklist category the conversion-naming guideline sits in. In the
+/// faithful #150 corpus the C-CONV rule is filed under the "Naming" chapter's
+/// checklist (the old hand-authored seed used a "Conversions and From" category).
+const CONVERSION_CATEGORY: &str = "Naming";
 
-/// The section the trial cites: the `api-guidelines` intro that carries the
-/// `C-CONV` guideline code.
-const SECTION_ID: &str = "api-guidelines/about";
+/// The section the trial cites: the faithful `api-guidelines` naming section that
+/// carries the `C-CONV` guideline code (the ad-hoc conversion as_/to_/into_
+/// convention). The exact-code search and the Naming checklist entry both point
+/// at this section.
+const SECTION_ID: &str =
+    "api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv";
 
 /// The section's captured content identity (provenance the citation carries).
-const SECTION_CONTENT_HASH: &str = "c128-ffa531f24bfdd996c9ef3d1a076dd56a";
+const SECTION_CONTENT_HASH: &str = "c128-ffa51d275f6a20c3c6d4a02b1a369f52";
 
 /// The section's canonical upstream URL (the citation the agent records).
-const SECTION_CANONICAL_URL: &str = "https://rust-lang.github.io/api-guidelines/about.html";
+const SECTION_CANONICAL_URL: &str = "https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv";
 
 /// The five tools the trial expects the agent to discover.
 const TOOLS: [&str; 5] = [
@@ -452,8 +458,10 @@ async fn the_library_api_design_trial_retrieves_and_cites_the_conversion_guideli
     );
 
     // ---- (3) search_docs: the agent's natural-language conversion-naming
-    //         attempt. On the seed it is a low-recall miss (recorded in AC2);
-    //         the assertion is that retrieval *works* (a cited hit returns). ---
+    //         attempt. On the faithful corpus it returns several `api-guidelines`
+    //         hits; the assertion is that retrieval *works* (a cited hit returns
+    //         with provenance). It does not, however, surface the C-CONV naming
+    //         section itself — that gap is recorded in AC2 below. ---
     let natural = client
         .call_tool("search_docs", json!({ "query": NATURAL_QUERY }))
         .await;
@@ -521,8 +529,8 @@ async fn the_library_api_design_trial_retrieves_and_cites_the_conversion_guideli
     );
     assert_citations_carry_code(cited, "C-CONV", "the code-search hit");
 
-    // ---- (5) get_api_checklist "Conversions and From": the checklist entry
-    //         for the conversion guideline, explaining `api-guidelines/about`.
+    // ---- (5) get_api_checklist "Naming": the checklist entry for the
+    //         conversion guideline, explaining the C-CONV naming section.
     let checklist = client
         .call_tool(
             "get_api_checklist",
@@ -562,8 +570,9 @@ async fn the_library_api_design_trial_retrieves_and_cites_the_conversion_guideli
         "the `C-CONV` entry explains the `{SECTION_ID}` section; got {explains:?}"
     );
 
-    // ---- (6) get_api_checklist {} (all): the seed's checklist walk is whole —
-    //         it is exactly this one `C-CONV` entry on the representative seed.
+    // ---- (6) get_api_checklist {} (all): the full checklist walk is paginated
+    //         over the 544-section corpus, but the `C-CONV` entry is reached
+    //         exactly once on the first page.
     let all = client.call_tool("get_api_checklist", json!({})).await;
     assert_eq!(
         all.get("error"),
@@ -582,8 +591,8 @@ async fn the_library_api_design_trial_retrieves_and_cites_the_conversion_guideli
         "the all-categories walk reaches the `C-CONV` entry exactly once"
     );
 
-    // ---- (7) get_section "api-guidelines/about": the original section the
-    //         agent cites — its body, provenance, and citations. --------------
+    // ---- (7) get_section the C-CONV naming section: the section the agent
+    //         cites — its body, provenance, and citations. -------------------
     let section = client
         .call_tool("get_section", json!({ "section_id": SECTION_ID }))
         .await;
@@ -691,35 +700,37 @@ fn assert_citations_carry_url(value: &Value, url: &str, ctx: &str) {
     );
 }
 
-/// AC2 — record the retrieval defects the trial observes, rather than over-claim:
+/// AC2 — record the retrieval gaps the trial observes, rather than over-claim:
 ///
 /// * the agent's *natural-language* conversion-naming query does **not** surface
-///   the `api-guidelines` conversion guideline's section — on the representative
-///   seed it matches the style guide's "naming" mention instead (a low-recall
-///   miss). The reliable path is the exact-code search / the checklist, asserted
-///   above.
-/// * the cited section *names* `C-CONV` but does not *expand* the
-///   `From`/`Into`/`TryFrom` rule (the seed ships only the `api-guidelines`
-///   intro, one representative section per source); the full rule lives upstream.
+///   the C-CONV naming section — it matches other `api-guidelines` sections
+///   instead, so the reliable path is the exact-code search / the checklist,
+///   asserted above. The natural query still returns hits (retrieval works), but
+///   not the specific naming section.
+/// * the cited section *names* `C-CONV` (the rule's heading) but does not carry
+///   a `From`/`Into`/`TryFrom` naming-rule expansion under those exact phrasings
+///   — the section is the ad-hoc `as_`/`to_`/`into_` convention, not the trait
+///   rule; the full trait guidance lives in the interoperability chapter.
 ///
 /// This asserts the trial did **not** silently claim complete recall or a
-/// complete rule — the gap is real and documented, not fabricated away.
+/// complete rule under a single phrasing — the gaps are real and documented, not
+/// fabricated away.
 fn retrieval_defects_are_recorded(natural_hits: &[Value], cited_body: &Value) {
-    // The natural-language query must not have surfaced the conversion
-    // guideline's section: the seed has no section whose text contains the
-    // conversion-naming rule, so the reliable path is the checklist/exact-code,
-    // not free-text search.
+    // The natural-language query must not have surfaced the C-CONV naming
+    // section: it returns other `api-guidelines` sections instead, so the
+    // reliable path is the checklist / exact-code search, not free-text search.
     let natural_surfaced_guideline = natural_hits
         .iter()
         .any(|hit| hit.get("section_id").and_then(Value::as_str) == Some(SECTION_ID));
     assert!(
         !natural_surfaced_guideline,
         "the natural-language query unexpectedly surfaced `{SECTION_ID}` — the \
-         retrieval defect the trial records would have closed; re-check the seed corpus"
+         retrieval gap the trial records would have closed; re-check the corpus"
     );
-    // The cited section names `C-CONV` but does not expand the rule: it carries
-    // the code as an example, not a `From`/`Into`/`TryFrom` naming rule or
-    // example. This is the "names but does not expand" gap the trial records.
+    // The cited section names `C-CONV` but does not expand the trait rule under
+    // the `From`/`Into`/`TryFrom` phrasings: it is the ad-hoc naming convention
+    // section, not the trait rule. This is the "names but does not expand"
+    // gap the trial records.
     let body = cited_body
         .as_str()
         .expect("the cited section has a body string");
@@ -727,14 +738,15 @@ fn retrieval_defects_are_recorded(natural_hits: &[Value], cited_body: &Value) {
         body.contains("C-CONV"),
         "the cited section names the `C-CONV` code"
     );
-    // The rule text (a `From`/`Into`/`TryFrom` naming convention) is absent from
-    // the seed section — the detailed guidance is upstream, not in the seed.
+    // The trait-rule text (a `From`/`Into`/`TryFrom` naming convention) is absent
+    // from this section — that detailed guidance lives in the interoperability
+    // chapter, not in the ad-hoc naming convention section.
     let expands_rule = ["tryfrom", "prefer `from`", "implement `from`", "use `into`"]
         .iter()
         .any(|needle| body.to_lowercase().contains(needle));
     assert!(
         !expands_rule,
-        "the cited seed section unexpectedly expanded the conversion rule — the \
+        "the cited section unexpectedly expanded the conversion trait rule — the \
          documented gap (names but does not expand) would have closed"
     );
 }
