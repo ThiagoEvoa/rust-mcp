@@ -91,6 +91,22 @@ pub fn manifest() -> SnapshotManifest {
     manifest_with_exclusions(FIRST_SYNC_REQUIRED)
 }
 
+/// The number of sections the bundled corpus carries — the corpus "size" a
+/// measurement ties its numbers to. A cheap corpus-identity check for callers
+/// (the perf harness, the acceptance layer) that need the count without naming
+/// the private manifest type.
+pub fn section_count() -> usize {
+    manifest().body.sections.len()
+}
+
+/// Whether the bundled corpus carries a section with the given id — the guard
+/// that a fixed id set (the perf harness's `SECTION_IDS`) names *real* shipped
+/// sections, not stale placeholders. Total: an unknown id is `false`, never a
+/// panic.
+pub fn has_section(id: &str) -> bool {
+    manifest().body.sections.iter().any(|section| section.id.as_str() == id)
+}
+
 /// The seed corpus with `excluded` sources omitted, each recorded as a
 /// first-sync-required marker (a documented exception per `docs/LICENSING.md`
 /// §5). With `excluded` empty it is the full [`manifest`]; with a source id it

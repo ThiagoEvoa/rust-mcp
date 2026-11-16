@@ -26,7 +26,7 @@
 //!
 //! ```sh
 //! cargo build --release --locked
-//! RUST_DOCS_MCP_PERF=1 cargo test --release --test perf -- --ignored -- --nocapture
+//! RUST_DOCS_MCP_PERF=1 cargo test --release --test perf -- --ignored --nocapture
 //! ```
 //!
 //! The `--release` matters: `env!("CARGO_BIN_EXE_rust-docs-mcp")` resolves to the
@@ -85,18 +85,31 @@ const SEARCH_QUERIES: [&str; 8] = [
     "rustdoc documentation",
 ];
 
-/// The fixed `get_section` id set — the eight seed sections, by their canonical
-/// ids.
+/// The fixed `get_section` id set — one real section per source, by the
+/// canonical id the *shipped* corpus actually stores (issue #156: the harness
+/// measured stale, non-existent ids). Each is asserted real by
+/// `perf_corpus_section_ids_are_real`, so the set cannot silently drift.
 const SECTION_IDS: [&str; 8] = [
-    "api-guidelines/about",
-    "style-guide/intro",
-    "cargo/commands%2Fcargo-build",
-    "rustc/introduction",
-    "rustup/common-install-problems",
-    "rustfmt/options",
-    "clippy/configuration",
-    "rustdoc/command-line-arguments",
+    "api-guidelines/about#rust-api-guidelines",
+    "style-guide/expressions#array-accesses-indexing-and-slicing",
+    "cargo/commands%2Fcargo-add#cargo-add1",
+    "rustc/command-line-arguments#--cap-lints-set-the-most-restrictive-lint-level",
+    "rustup/concepts%2Findex#concepts",
+    "rustfmt/Configurations.md",
+    "clippy/clippy-catalog#clone_on_copy",
+    "rustdoc/command-line-arguments#--cfg-passing-configuration-flags",
 ];
+
+/// The corpus the perf harness measures — the bundled seed `serve` always loads.
+/// Overridable via `RUST_DOCS_MCP_PERF_DATA_DIR` so an operator can point the
+/// harness at a specific published corpus; empty (the default) loads the bundled
+/// fallback, the shipped corpus.
+fn perf_data_dir() -> std::path::PathBuf {
+    match std::env::var_os("RUST_DOCS_MCP_PERF_DATA_DIR") {
+        Some(path) => path.into(),
+        None => fresh_data_dir(),
+    }
+}
 
 /// A minimal raw-JSON-RPC 2.0 client over a spawned `serve` process. It reuses
 /// the pattern the M4 proof owns in [`stdio_mcp.rs`](stdio_mcp.rs): one request
@@ -131,7 +144,7 @@ impl Client {
     /// does. Returns the client together with the `initialize` response and the
     /// instant the response was fully read, so the caller can measure startup.
     async fn new() -> (Self, Value, tokio::time::Instant) {
-        let data_dir = fresh_data_dir();
+        let data_dir = perf_data_dir();
         let mut child = Command::new(env!("CARGO_BIN_EXE_rust-docs-mcp"))
             .arg("serve")
             .arg("--data-dir")
@@ -252,12 +265,42 @@ impl Client {
     }
 
     /// Close the client's stdin and wait for a clean self-exit, the way the
-    /// other spawned-stdio tests do, so each measured process terminates. The
-    /// wait is bounded: the server exits on stdin EOF, but if it does not we do
-    /// not block the harness forever — `kill_on_drop` reaps the child on drop.
+    /// other spawned-stdio tests do (see [`stdio_mcp.rs`](stdio_mcp.rs)): drop
+    /// the stdin writer (the EOF that ends the session), **drain the child's
+    /// remaining stdout to EOF** so its write end never fills and blocks the
+    /// child's exit, then assert a clean, successful self-exit within the drain
+    /// budget. `kill_on_drop` reaps a child that does not exit, but the
+    /// assertion makes a clean exit the expected outcome — a harness that times
+    /// out must not silently count as a completed measurement (criterion 5).
     async fn close(mut self) {
-        let _ = self.stdin.shutdown().await;
-        let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
+        // Dropping the piped stdin writer closes its write end — the EOF that
+        // ends the session.
+        drop(self.stdin);
+
+        // Drain the child's remaining stdout to EOF so a full pipe cannot block
+        // the child on a write.
+        loop {
+            let mut line = String::new();
+            match tokio::time::timeout(BUDGET, self.reader.read_line(&mut line)).await {
+                Ok(Ok(0)) => break, // EOF: the server closed stdout and is exiting.
+                Ok(Ok(_)) => continue,
+                Ok(Err(error)) => panic!("reading the child's stdout failed: {error}"),
+                Err(_) => panic!("timed out draining the child's stdout after the final response"),
+            }
+        }
+
+        // stdout closed, so the server is exiting; assert a clean, successful
+        // self-exit — the concrete "no orphaned process" claim.
+        match tokio::time::timeout(BUDGET, self.child.wait()).await {
+            Ok(Ok(status)) => {
+                assert!(
+                    status.success(),
+                    "after a clean client disconnect the server must exit successfully, got {status:?}"
+                );
+            }
+            Ok(Err(error)) => panic!("waiting on the child failed: {error}"),
+            Err(_) => panic!("the child did not exit within {BUDGET:?} — a likely orphan"),
+        }
     }
 }
 
@@ -356,17 +399,33 @@ fn assert_section_ok(response: &Value, section: &str) {
 /// measures startup, retrieval p95, and peak RSS, prints a report to stderr, and
 /// — when `RUST_DOCS_MCP_PERF_REPORT` names a path — writes a JSON copy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "opt-in performance harness — run with `RUST_DOCS_MCP_PERF=1 cargo test --release --test perf -- --ignored -- --nocapture`; see docs/PERFORMANCE.md"]
+#[ignore = "opt-in performance harness — run with `RUST_DOCS_MCP_PERF=1 cargo test --release --test perf -- --ignored --nocapture`; see docs/PERFORMANCE.md"]
 async fn measure_startup_retrieval_and_memory() {
     // The env-var guard makes an explicit `--ignored` run a fast no-op unless the
     // operator opts in; the `#[ignore]` keeps the normal suite off the harness.
     if std::env::var_os("RUST_DOCS_MCP_PERF").is_none() {
         eprintln!(
             "[perf] RUST_DOCS_MCP_PERF is unset — skipping the measurement (fast no-op). \
-             Run with `RUST_DOCS_MCP_PERF=1 cargo test --release --test perf -- --ignored -- --nocapture`."
+             Run with `RUST_DOCS_MCP_PERF=1 cargo test --release --test perf -- --ignored --nocapture`."
         );
         return;
     }
+
+    // ---- Corpus identity: assert the numbers are tied to the shipped corpus. ----
+    // The measurement is over the bundled seed `serve` loads; the in-process
+    // identity (snapshot id, parser version, section count, content fingerprint)
+    // is what the reported numbers are attributed to, so a corpus change is a
+    // visible, deliberate re-pin rather than a silent drift.
+    let identity = rust_docs_mcp::acceptance::shipped_corpus_identity();
+    assert_eq!(
+        identity.snapshot_id, SNAPSHOT_ID,
+        "the perf harness must measure the shipped corpus"
+    );
+    assert_eq!(
+        rust_docs_mcp::bundled::section_count(),
+        identity.section_count,
+        "the in-process section count must agree with the reported corpus identity"
+    );
 
     // ---- Startup: spawn -> first `initialize` response over fresh processes. ----
     // A small warmup discards the OS loader-cache skew on the first sample.
@@ -449,11 +508,22 @@ async fn measure_startup_retrieval_and_memory() {
     } else {
         "release"
     };
+    // The toolchain the measurement ran under (best-effort; a sentinel when
+    // `rustc` is not on the PATH), so a number is attributed to a machine,
+    // not just a corpus.
+    let toolchain = rustc_version();
     let report = json!({
         "ok": true,
         "profile": profile,
-        "corpus": SNAPSHOT_ID,
-        "host": std::env::consts::OS,
+        "host": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+        "toolchain": toolchain,
+        "corpus": {
+            "snapshot_id": identity.snapshot_id,
+            "parser_version": identity.parser_version,
+            "section_count": identity.section_count,
+            "content_fingerprint": identity.content_fingerprint,
+            "sources": identity.sources,
+        },
         "startup": {
             "runs": STARTUP_RUNS,
             "min_ms": round(startup.min_ms),
@@ -479,6 +549,46 @@ async fn measure_startup_retrieval_and_memory() {
         },
     });
     emit_report(&report);
+}
+
+/// The fast, always-on guard that the harness's fixed `SECTION_IDS` name *real*
+/// shipped sections, not the stale placeholders the harness measured before issue
+/// #156. Runs in the ordinary suite (not `#[ignore]`d), so a corrupted or
+/// regenerated corpus that drops one of the fixed ids fails here even when the
+/// heavy measurement is skipped. A missing id is a hard failure, never a silent
+/// one.
+#[test]
+fn perf_corpus_section_ids_are_real() {
+    assert_eq!(
+        rust_docs_mcp::bundled::section_count(),
+        rust_docs_mcp::acceptance::shipped_corpus_identity().section_count,
+        "the corpus the fixed ids resolve against must be the shipped corpus"
+    );
+    for section in SECTION_IDS {
+        assert!(
+            rust_docs_mcp::bundled::has_section(section),
+            "fixed section id {section:?} is not in the shipped corpus — re-pin it to a \
+             real section id (the harness measured stale ids before issue #156)"
+        );
+    }
+}
+
+/// The best-effort `rustc --version` string the measurement ran under, or a
+/// sentinel when `rustc` is not on the PATH. A number is still recorded (with the
+/// sentinel) rather than failing, so the harness never blocks on a missing tool.
+fn rustc_version() -> String {
+    std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "rustc (unavailable on PATH)".to_string())
 }
 
 /// Print the report to stderr and, when `RUST_DOCS_MCP_PERF_REPORT` names a path,

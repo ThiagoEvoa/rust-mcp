@@ -40,6 +40,7 @@
 //! via the `cli` module) needs to resolve and use a data directory without
 //! reaching into the module tree.
 
+pub mod acceptance;
 pub mod bundled;
 mod cli;
 mod commands;
