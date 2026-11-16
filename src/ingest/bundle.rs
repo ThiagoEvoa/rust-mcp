@@ -51,7 +51,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::api_guidelines::{
-    ingest_chapter as ingest_api_chapter, ingest_checklist, link_explanations,
+    ingest_chapter as ingest_api_chapter, ingest_checklist, link_explanations, primary_explanations,
 };
 use super::cargo::ingest_chapter as ingest_cargo;
 use super::clippy::ingest_lint_catalog;
@@ -601,15 +601,13 @@ fn build_checklist(api_guidelines: &[Section]) -> Result<Vec<ChecklistEntry>, Se
     // only the primary sections keeps each code resolving to exactly one section;
     // otherwise the real [`link_explanations`] ambiguity check would flag the
     // inherited sub-sections as a second, distinct explanation of the same code.
-    let primary: Vec<Section> = api_guidelines
-        .iter()
-        .filter(|s| {
-            s.heading_path
-                .last()
-                .is_some_and(|h| super::api_guidelines::guideline_code_in(h).is_some())
-        })
-        .cloned()
-        .collect();
+    //
+    // This is the same primary-heading resolution rule shared with the live sync
+    // path (`ingest_checklist_document`), applied here through the shared
+    // [`primary_explanations`] helper, so the bundled checklist and the live sync
+    // can no longer disagree about which sections are primary definitions versus
+    // inherited continuations.
+    let primary: Vec<Section> = primary_explanations(api_guidelines);
 
     // The codes the primary sections actually explain.
     let shipped_codes: BTreeSet<String> = primary

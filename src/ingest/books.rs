@@ -88,13 +88,14 @@ fn classify(reference: &str, resolved: &ResolvedDocument) -> Option<Exclusion> {
         return Some(Exclusion::SameDocumentFragment);
     }
 
-    // Print editions: the rustc book's `/rustc/print/<chapter>.html` and the
-    // Cargo book's `print_chapter` page — a duplicate edition of the rendered
-    // chapter, not a distinct document. Matched on the print subdirectory
-    // segment and the print-edition *leaf shapes* only, so an unrelated path
-    // that merely contains "print" (e.g. `rust-print-protocol.html`, or a
-    // chapter legitimately about printing) is still booked, not silently
-    // dropped (the "nothing silently dropped" risk `plan.md` §2/§4 guard).
+    // Print editions: the rustc book's `/rustc/print/<chapter>.html`, the
+    // Cargo book's `print_chapter` page, and the ordinary mdBook single-page
+    // aggregate `print.html` — a duplicate edition of the rendered book,
+    // not a distinct document. Matched on the print subdirectory segment and
+    // the print-edition *leaf shapes* only, so an unrelated path that merely
+    // contains "print" (e.g. `rust-print-protocol.html`, or a chapter
+    // legitimately about printing) is still booked, not silently dropped (the
+    // "nothing silently dropped" risk `plan.md` §2/§4 guard).
     if is_print_edition(&path_lc) {
         return Some(Exclusion::PrintEdition);
     }
@@ -147,7 +148,16 @@ fn is_print_edition(path_lc: &str) -> bool {
         Some(leaf) if !leaf.is_empty() => leaf,
         _ => return false,
     };
-    leaf == "print_chapter.html" || leaf.ends_with("-print.html") || leaf.ends_with("_print.html")
+    // The mdBook single-page aggregate is the bare `print.html` leaf: it renders
+    // the whole book as one page, duplicating every canonical chapter's anchors
+    // under a `print` chapter path. It is a duplicate edition, not a distinct
+    // document, so it is excluded — an unrelated chapter that merely *contains*
+    // "print" in a longer name (e.g. `rust-print-protocol.html`) is untouched
+    // because the match is on the whole leaf, not a substring.
+    leaf == "print.html"
+        || leaf == "print_chapter.html"
+        || leaf.ends_with("-print.html")
+        || leaf.ends_with("_print.html")
 }
 
 /// The fragmentless canonical identity of `url`: scheme + host + path + query,
@@ -836,6 +846,50 @@ mod tests {
                 .any(|e| matches!(e.reason, Exclusion::PrintEdition)),
             "a print-edition exclusion must be recorded, got {:?}",
             inv.excluded
+        );
+    }
+
+    #[test]
+    fn print_html_aggregate_leaf_is_excluded_not_booked() {
+        // The ordinary mdBook single-page aggregate is the bare `print.html`
+        // leaf: it renders the whole book as one page, duplicating every
+        // canonical chapter's anchors under a `print` chapter path. This is the
+        // discovery-level root cause of the issue #169 `C-CASE` ambiguity — a
+        // `print#casing…` duplicate of `naming#casing…`. It must be excluded as a
+        // `PrintEdition`, while an unrelated page that merely *names* "print" in
+        // a longer filename is still booked (the "nothing silently dropped" guard).
+        let base = Url::parse("https://rust-lang.github.io/api-guidelines/intro.html").unwrap();
+        let html = r#"<html><body>
+            <a href="print.html">print-aggregate</a>
+            <a href="rust-print-protocol.html">protocol</a>
+            <a href="naming.html">naming</a>
+            </body></html>"#;
+        let inv = build_inventory(html, &base, "api-guidelines");
+        let booked: HashSet<&str> = inv.urls.iter().map(|u| u.as_str()).collect();
+        // The bare `print.html` aggregate must NOT be booked.
+        assert!(
+            booked.iter().all(|u| !u.ends_with("print.html")),
+            "the bare `print.html` aggregate must be excluded, got {booked:?}"
+        );
+        // … and it must be *recorded* as a `PrintEdition` exclusion, not dropped
+        // silently (so a future divergence is visible in the diff, not invisible).
+        assert!(
+            inv.excluded
+                .iter()
+                .any(|e| e.requested.ends_with("print.html")
+                    && matches!(e.reason, Exclusion::PrintEdition)),
+            "the `print.html` aggregate must be recorded as a PrintEdition exclusion, got {:?}",
+            inv.excluded
+        );
+        // A page that merely *names* "print" in a longer filename is still booked
+        // (the whole-leaf match, not a substring, protects it).
+        assert!(
+            booked.contains("https://rust-lang.github.io/api-guidelines/rust-print-protocol.html"),
+            "an unrelated print-named page must be booked, got {booked:?}"
+        );
+        assert!(
+            booked.contains("https://rust-lang.github.io/api-guidelines/naming.html"),
+            "a canonical chapter must be booked, got {booked:?}"
         );
     }
 
