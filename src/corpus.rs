@@ -454,6 +454,213 @@ fn duplicate_ids(counts: HashMap<&str, usize>) -> Vec<(&str, usize)> {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #151: the completeness gate
+// ---------------------------------------------------------------------------
+//
+// A snapshot may be *well-formed* (it passes [`validate_snapshot`]) yet still
+// omit a required collection or cross-reference — the one-source bug this issue
+// names: a manifest with eight source rows but only one collection of content.
+// That degraded corpus must not replace a valid 8-source corpus. This gate,
+// distinct from the integrity gate above, decides whether a well-formed snapshot
+// is a *complete, publishable production corpus*. The production publication
+// gate runs both; a dev/test sync may publish an incomplete snapshot (it is
+// explicitly partial), but the production gate and the runtime selection reject
+// one.
+
+/// A single reason a well-formed snapshot is not a *complete* production
+/// corpus — the "incomplete" condition issue #151 names. A snapshot can pass
+/// [`validate_snapshot`] (well-formed) and still omit a required collection, a
+/// cross-reference, or its attribution; that omission must be rejected before
+/// publication and before runtime selection, so a degraded corpus can never
+/// replace a valid 8-source corpus.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CompletenessGap {
+    /// A registered source carries zero sections, so its collection is empty
+    /// and its content is unretrievable.
+    EmptySource { source: String },
+    /// The api-guidelines review checklist is empty.
+    MissingChecklist,
+    /// No section carries lint identifiers, so the clippy lint catalog is
+    /// absent and `get_command_guidance` cannot serve it.
+    MissingLintCatalog,
+    /// The command catalog is empty, so cargo/rustc/rustup/rustfmt commands are
+    /// unretrievable.
+    MissingCommandCatalog,
+    /// A source with content is missing its attribution record, so its license
+    /// and citation cannot be served.
+    SourceMissingAttribution { source: String },
+    /// A collection that was populated in the previously published snapshot is
+    /// now empty — a completeness reduction that must be an explicit, justified
+    /// policy rather than a silent loss.
+    RemovedCollection { source: String, was: usize },
+}
+
+impl std::fmt::Display for CompletenessGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptySource { source } => {
+                write!(f, "source `{source}` is empty (no sections)")
+            }
+            Self::MissingChecklist => write!(f, "the api-guidelines checklist is empty"),
+            Self::MissingLintCatalog => {
+                write!(
+                    f,
+                    "no section carries lint identifiers (clippy catalog empty)"
+                )
+            }
+            Self::MissingCommandCatalog => write!(f, "the command catalog is empty"),
+            Self::SourceMissingAttribution { source } => {
+                write!(f, "source `{source}` has content but no attribution record")
+            }
+            Self::RemovedCollection { source, was } => {
+                write!(
+                    f,
+                    "source `{source}` was populated ({was} sections) but is now empty"
+                )
+            }
+        }
+    }
+}
+
+/// The completeness verdict for a snapshot: the full list of gaps. An empty
+/// `gaps` is a complete, publishable production corpus.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct CompletenessReport {
+    /// The gaps found, in a stable order.
+    pub gaps: Vec<CompletenessGap>,
+}
+
+impl CompletenessReport {
+    /// Whether the snapshot is a complete production corpus.
+    pub fn is_complete(&self) -> bool {
+        self.gaps.is_empty()
+    }
+
+    /// The number of gaps.
+    pub fn problem_count(&self) -> usize {
+        self.gaps.len()
+    }
+
+    /// A human-readable rendering for the operator's report.
+    pub fn render(&self) -> String {
+        if self.is_complete() {
+            "complete".to_string()
+        } else {
+            self.gaps
+                .iter()
+                .map(CompletenessGap::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+    }
+}
+
+/// Computes the completeness gaps for a *well-formed* manifest relative to the
+/// required production inventory: every registered source must carry at least
+/// one section, the checklist/lint catalog/command catalog must be nonempty, and
+/// every source with content must carry an attribution record. When `previous`
+/// is present, a collection that was populated before is now reported as a
+/// [`CompletenessGap::RemovedCollection`].
+///
+/// This is deliberately separate from [`validate_snapshot`]: a snapshot may be
+/// well-formed yet incomplete — exactly the #151 bug, a well-formed one-source
+/// corpus that carries eight source rows but only one collection of content. The
+/// production publication gate runs *both* checks; a dev/test sync may publish an
+/// incomplete snapshot (it is explicitly partial), but the production gate and
+/// the runtime selection reject one.
+pub fn check_completeness(
+    manifest: &SnapshotManifest,
+    previous: Option<&SnapshotManifest>,
+) -> CompletenessReport {
+    use crate::registry::SourceCollection;
+    let mut gaps = Vec::new();
+
+    // Per-source content: every registered source must carry at least one
+    // section. This is the heart of the #151 bug — eight source rows, one
+    // collection of content.
+    for source in SourceCollection::ALL {
+        let id = source.id();
+        let count = manifest
+            .body
+            .sections
+            .iter()
+            .filter(|s| s.source_id.as_str() == id)
+            .count();
+        if count == 0 {
+            gaps.push(CompletenessGap::EmptySource {
+                source: id.to_string(),
+            });
+        }
+    }
+
+    // Required cross-references: a nonempty checklist, a nonempty lint catalog,
+    // and a nonempty command catalog.
+    if manifest.body.checklist.is_empty() {
+        gaps.push(CompletenessGap::MissingChecklist);
+    }
+    if !manifest
+        .body
+        .sections
+        .iter()
+        .any(|s| !s.lint_ids.is_empty())
+    {
+        gaps.push(CompletenessGap::MissingLintCatalog);
+    }
+    if manifest.body.commands.is_empty() {
+        gaps.push(CompletenessGap::MissingCommandCatalog);
+    }
+
+    // Attribution: every source with content must carry an attribution record, so
+    // its license and citation can be served.
+    let attributed: HashSet<&str> = manifest
+        .body
+        .attribution
+        .iter()
+        .map(|a| a.source.as_str())
+        .collect();
+    for source in SourceCollection::ALL {
+        let id = source.id();
+        let has_content = manifest
+            .body
+            .sections
+            .iter()
+            .any(|s| s.source_id.as_str() == id);
+        if has_content && !attributed.contains(id) {
+            gaps.push(CompletenessGap::SourceMissingAttribution {
+                source: id.to_string(),
+            });
+        }
+    }
+
+    // Removed collections: a source that was populated before is now empty.
+    if let Some(prev) = previous {
+        for source in SourceCollection::ALL {
+            let id = source.id();
+            let was = prev
+                .body
+                .sections
+                .iter()
+                .filter(|s| s.source_id.as_str() == id)
+                .count();
+            let now = manifest
+                .body
+                .sections
+                .iter()
+                .filter(|s| s.source_id.as_str() == id)
+                .count();
+            if was > 0 && now == 0 {
+                gaps.push(CompletenessGap::RemovedCollection {
+                    source: id.to_string(),
+                    was,
+                });
+            }
+        }
+    }
+
+    CompletenessReport { gaps }
+}
+
+// ---------------------------------------------------------------------------
 // Atomic publication — task [026]
 // ---------------------------------------------------------------------------
 //
@@ -565,6 +772,11 @@ pub enum PublishError {
     /// live, unstale lock ([`crate::writer_lock`]); this publish did not run, so
     /// the previously published snapshot is untouched. The caller may retry.
     Lock(crate::writer_lock::LockError),
+    /// The candidate is well-formed and passes complete-corpus validation, yet
+    /// it is not a *complete production corpus* — it omits a required
+    /// collection, cross-reference, or attribution (issue #151). It is refused
+    /// before the atomic promotion, so the last valid snapshot is preserved.
+    Incomplete(CompletenessReport),
 }
 
 impl PublishError {
@@ -607,6 +819,17 @@ impl fmt::Display for PublishError {
             ),
             Self::Io { context, source } => write!(f, "{context}: {source}"),
             Self::Lock(err) => write!(f, "could not acquire the sync writer lock: {err}"),
+            Self::Incomplete(report) => {
+                write!(
+                    f,
+                    "candidate snapshot is not a complete production corpus: {} gap(s)",
+                    report.problem_count()
+                )?;
+                for gap in &report.gaps {
+                    writeln!(f, "  - {gap}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -876,8 +1099,9 @@ pub fn load_published_snapshot(data_dir: &Path) -> Result<SnapshotManifest, Publ
 mod tests {
     use super::*;
     use crate::model::{
-        Channel, ChecklistEntry, CommandEntry, Continuation, CorpusHash, EffectKind, EffectNote,
-        Release, SectionBuilder, SnapshotId, Source, SourceId, Timestamp, Url,
+        AttributionRef, Channel, ChecklistEntry, CommandEntry, CommandKey, Continuation,
+        CorpusHash, EffectKind, EffectNote, Release, SectionBuilder, SnapshotId, Source, SourceId,
+        Timestamp, Url,
     };
 
     /// One `Source` per required collection, with a single recorded document URL.
@@ -1861,6 +2085,273 @@ mod tests {
         assert!(
             !lock.exists(),
             "the writer lock must be released after a publish"
+        );
+    }
+
+    // -- Issue #151: the completeness gate. --
+
+    /// A *complete* production corpus: every one of the eight sources carries at
+    /// least one section, plus a nonempty checklist, a nonempty command catalog,
+    /// a nonempty lint catalog, and an attribution record per source. It passes
+    /// both [`validate_snapshot`] and [`check_completeness`].
+    fn complete_production_snapshot() -> SnapshotManifest {
+        let mut sections = Vec::new();
+        for collection in SourceCollection::ALL {
+            let id = collection.id();
+            let mut builder = SectionBuilder::new(
+                SourceId::new(id).unwrap(),
+                collection.title(),
+                format!("{id}/chapter"),
+                Url::new(collection.entry_url()).unwrap(),
+                format!("# {}\n\nThe {id} collection's content.", collection.title()),
+            );
+            // The clippy collection carries the lint catalog.
+            if collection == SourceCollection::Clippy {
+                builder = builder.lint_ids(["clippy::unwrap_used"]);
+            }
+            sections.push(
+                builder
+                    .anchor("top")
+                    .build()
+                    .expect("a well-formed section builds"),
+            );
+        }
+        let first_id = sections[0].id.clone();
+        SnapshotManifest {
+            schema_version: crate::model::SchemaVersion::CURRENT,
+            body: ManifestBody {
+                snapshot_id: SnapshotId::new("rust-docs-complete").expect("a valid snapshot id"),
+                created_at: Timestamp::new("2026-10-30T00:00:00Z").unwrap(),
+                parser_version: "test/1".into(),
+                sources: SourceCollection::ALL
+                    .iter()
+                    .copied()
+                    .map(source_for)
+                    .collect(),
+                sections,
+                checklist: vec![ChecklistEntry {
+                    code: "C-CONV".into(),
+                    title: "Prefer `From`/`Into`".into(),
+                    category: "Conversions and From".into(),
+                    location: "Conversions and From#C-CONV".into(),
+                    explanation_sections: vec![first_id.clone()],
+                }],
+                commands: vec![CommandEntry {
+                    key: CommandKey::new("cargo build").unwrap(),
+                    purpose: "Compile the project".into(),
+                    upstream_sections: vec![first_id],
+                    syntax: vec!["cargo build [OPTIONS]".into()],
+                    examples: vec![],
+                    prerequisites: vec![],
+                    compatibility: vec![],
+                    effect_notes: vec![],
+                }],
+                validation: ValidationSummary::default(),
+                attribution: SourceCollection::ALL
+                    .iter()
+                    .copied()
+                    .map(|c| AttributionRef {
+                        source: SourceId::new(c.id()).unwrap(),
+                        licenses: vec!["MIT OR Apache-2.0".into()],
+                        repository: "https://github.com/rust-lang/rust".into(),
+                        required_notice: String::new(),
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    /// A well-formed but *incomplete* snapshot — the exact #151 bug shape: eight
+    /// source rows but only one collection of content, and no checklist, command
+    /// catalog, lint catalog, or attribution. It passes [`validate_snapshot`]
+    /// (so a schema-validated load accepts it) yet fails
+    /// [`check_completeness`].
+    fn one_source_snapshot() -> SnapshotManifest {
+        let section = SectionBuilder::new(
+            SourceId::new("style-guide").unwrap(),
+            "The style guide",
+            "naming",
+            Url::new("https://doc.rust-lang.org/style/naming.html").unwrap(),
+            "# Naming\n\nNames should be clear and descriptive.",
+        )
+        .anchor("top")
+        .build()
+        .expect("a well-formed section builds");
+        SnapshotManifest {
+            schema_version: crate::model::SchemaVersion::CURRENT,
+            body: ManifestBody {
+                snapshot_id: SnapshotId::new("rust-docs-partial").expect("a valid snapshot id"),
+                created_at: Timestamp::new("2026-10-30T00:00:00Z").unwrap(),
+                parser_version: "test/1".into(),
+                sources: SourceCollection::ALL
+                    .iter()
+                    .copied()
+                    .map(source_for)
+                    .collect(),
+                sections: vec![section],
+                checklist: vec![],
+                commands: vec![],
+                validation: ValidationSummary::default(),
+                attribution: vec![],
+            },
+        }
+    }
+
+    /// AC5: a complete, well-formed production corpus reports no completeness
+    /// gaps, so a valid complete fixture still publishes atomically.
+    #[test]
+    fn a_complete_production_corpus_passes_completeness() {
+        let snap = complete_production_snapshot();
+        // It is well-formed (the integrity gate passes) ...
+        assert!(
+            validate_snapshot(&snap).is_valid(),
+            "a complete corpus must be well-formed: {:#?}",
+            validate_snapshot(&snap).problems
+        );
+        // ... and complete (the completeness gate passes).
+        let report = check_completeness(&snap, None);
+        assert!(
+            report.is_complete(),
+            "a complete corpus must report no gaps: {:#?}",
+            report.gaps
+        );
+        assert_eq!(report.problem_count(), 0);
+    }
+
+    /// AC1/AC2: the #151 bug shape — eight source rows but only one collection
+    /// of content — is well-formed yet incomplete, and the gate reports the seven
+    /// empty collections plus the missing cross-references and attribution.
+    #[test]
+    fn a_one_source_corpus_is_reported_incomplete() {
+        let snap = one_source_snapshot();
+        // The bug: it is well-formed, so a naive gate would accept it.
+        assert!(
+            validate_snapshot(&snap).is_valid(),
+            "the #151 corpus is well-formed (the bug passes the integrity gate)"
+        );
+        let report = check_completeness(&snap, None);
+        assert!(
+            !report.is_complete(),
+            "the #151 corpus must be reported incomplete"
+        );
+        // Every source except style-guide is empty.
+        let empty: Vec<&str> = report
+            .gaps
+            .iter()
+            .filter_map(|g| match g {
+                CompletenessGap::EmptySource { source } => Some(source.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            empty.len(),
+            7,
+            "seven of eight collections are empty: {empty:?}"
+        );
+        assert!(
+            !empty.contains(&"style-guide"),
+            "the one populated collection must not be flagged empty"
+        );
+        assert!(
+            empty.contains(&"cargo") && empty.contains(&"rustc") && empty.contains(&"clippy"),
+            "the un-ingested collections must be named"
+        );
+        // The missing cross-references and attribution are also reported.
+        assert!(
+            report.gaps.contains(&CompletenessGap::MissingChecklist),
+            "an empty checklist must be flagged"
+        );
+        assert!(
+            report
+                .gaps
+                .contains(&CompletenessGap::MissingCommandCatalog),
+            "an empty command catalog must be flagged"
+        );
+        assert!(
+            report.gaps.contains(&CompletenessGap::MissingLintCatalog),
+            "an empty lint catalog must be flagged"
+        );
+        assert!(
+            report
+                .gaps
+                .iter()
+                .any(|g| matches!(g, CompletenessGap::SourceMissingAttribution { source } if source == "style-guide")),
+            "a source with content but no attribution must be flagged"
+        );
+    }
+
+    /// AC2: empty navigation / a missing collection cannot hide behind a
+    /// placeholder source row. A snapshot with the eight source rows but zero
+    /// sections anywhere reports every source as empty.
+    #[test]
+    fn empty_navigation_cannot_hide_behind_placeholder_rows() {
+        let mut snap = one_source_snapshot();
+        snap.body.sections.clear();
+        let report = check_completeness(&snap, None);
+        assert_eq!(
+            report
+                .gaps
+                .iter()
+                .filter(|g| matches!(g, CompletenessGap::EmptySource { .. }))
+                .count(),
+            8,
+            "a corpus with zero sections must flag all eight sources as empty"
+        );
+    }
+
+    /// AC3: a source with content but no attribution record is reported, so a
+    /// snapshot cannot serve content whose license and citation are unknown.
+    #[test]
+    fn a_source_with_content_but_no_attribution_is_reported() {
+        let mut snap = complete_production_snapshot();
+        snap.body.attribution.clear();
+        let report = check_completeness(&snap, None);
+        assert_eq!(
+            report
+                .gaps
+                .iter()
+                .filter(|g| matches!(g, CompletenessGap::SourceMissingAttribution { .. }))
+                .count(),
+            8,
+            "clearing attribution must flag every source that has content"
+        );
+    }
+
+    /// AC1/expected-outcome: a collection that was populated in the previously
+    /// published snapshot but is now empty is reported as a removed collection —
+    /// the "completeness change" the gate turns into an explicit decision rather
+    /// than a silent loss.
+    #[test]
+    fn a_removed_collection_is_reported_against_previous() {
+        let previous = complete_production_snapshot();
+        let mut degraded = complete_production_snapshot();
+        // Drop every clippy section: the clippy collection was populated but is
+        // now empty in the candidate.
+        degraded
+            .body
+            .sections
+            .retain(|s| s.source_id.as_str() != "clippy");
+        let report = check_completeness(&degraded, Some(&previous));
+        assert!(
+            report
+                .gaps
+                .iter()
+                .any(|g| matches!(g, CompletenessGap::RemovedCollection { source, was } if source == "clippy" && *was > 0)),
+            "a collection removed against the previous must be reported"
+        );
+    }
+
+    /// A complete corpus reports no removals even when compared against a
+    /// complete previous: a no-op refresh is not a completeness change.
+    #[test]
+    fn a_complete_corpus_reports_no_removals_against_a_complete_previous() {
+        let previous = complete_production_snapshot();
+        let current = complete_production_snapshot();
+        let report = check_completeness(&current, Some(&previous));
+        assert!(
+            report.is_complete(),
+            "a complete corpus must report no gaps against a complete previous: {:#?}",
+            report.gaps
         );
     }
 }

@@ -58,7 +58,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::corpus::{self, MAX_SNAPSHOT_BYTES, PublishError};
+use crate::corpus::{self, MAX_SNAPSHOT_BYTES, PublishError, check_completeness};
 use crate::model::{SchemaError, SnapshotManifest};
 
 /// Where the active [`RuntimeSnapshot`] came from.
@@ -228,36 +228,45 @@ impl std::error::Error for LoadError {
 /// paths — it makes **no** network call and performs **no** write, so it never
 /// deletes or mutates the local corpus.
 pub fn load_snapshot(data_dir: &Path, bundle: Option<&Path>) -> Result<RuntimeSnapshot, LoadError> {
-    // Step 1: the latest valid *local* published snapshot, when present, is the
-    // preferred source. A read or validation failure records a short reason and
-    // falls through to the bundled fallback.
+    // Step 1: the latest *complete* local published snapshot is the preferred
+    // source. A read, validation, or *completeness* failure records a short
+    // reason and falls through to the bundled fallback (issue #151: a degraded
+    // local corpus must never displace a valid bundle).
     let local = match load_local(data_dir) {
-        Ok(manifest) => {
-            return Ok(RuntimeSnapshot {
-                manifest,
-                source: SnapshotSource::Local {
-                    path: corpus::published_snapshot_path(data_dir),
-                },
-                // The local snapshot was served, so there is no fallback to explain.
-                fallback_reason: None,
-            });
-        }
-        Err(err) => Some(err.reason()),
-    };
-
-    // Step 2: the bundled fallback, consulted only when a bundle path was given.
-    let bundle = match bundle {
-        Some(path) => match load_bundle(path) {
+        Ok(manifest) => match gate_completeness(Ok(manifest), "local snapshot") {
             Ok(manifest) => {
                 return Ok(RuntimeSnapshot {
                     manifest,
-                    source: SnapshotSource::Bundle {
-                        path: path.to_path_buf(),
+                    source: SnapshotSource::Local {
+                        path: corpus::published_snapshot_path(data_dir),
                     },
-                    // The bundle is a fallback, so record why the local was not used.
-                    fallback_reason: local,
+                    // The local snapshot was served, so there is no fallback to explain.
+                    fallback_reason: None,
                 });
             }
+            Err(err) => Some(err.reason()),
+        },
+        Err(err) => Some(err.reason()),
+    };
+
+    // Step 2: the bundled fallback, gated on completeness, consulted only when a
+    // bundle path was given.
+    let bundle = match bundle {
+        Some(path) => match load_bundle(path) {
+            Ok(manifest) => match gate_completeness(Ok(manifest), "bundled snapshot") {
+                Ok(manifest) => {
+                    return Ok(RuntimeSnapshot {
+                        manifest,
+                        source: SnapshotSource::Bundle {
+                            path: path.to_path_buf(),
+                        },
+                        // The bundle is a fallback, so record why the local was
+                        // not used.
+                        fallback_reason: local,
+                    });
+                }
+                Err(err) => Some(err.reason()),
+            },
             Err(err) => Some(err.reason()),
         },
         None => None,
@@ -307,6 +316,30 @@ fn load_bundle(path: &Path) -> Result<SnapshotManifest, LoadError> {
     load_validated_json("bundled snapshot", bytes)
 }
 
+/// Apply the completeness gate to an already-loaded, schema-valid, and
+/// complete-corpus-validated snapshot.
+///
+/// A snapshot may pass the complete-corpus validation ([`crate::corpus::validate_snapshot`])
+/// yet still be an *incomplete production corpus* — one that omits a required
+/// collection, cross-reference, or attribution (the #151 bug: a well-formed
+/// snapshot with eight source rows but only one collection of content). Such a
+/// snapshot is *read, never deleted or mutated*: it is simply not selected, and
+/// the reason is returned so the selection can fall through to the next source
+/// (a valid bundle) or report it. This is the runtime-side half of the #151
+/// fix: a degraded local corpus can never displace a valid bundle.
+fn gate_completeness(
+    loaded: Result<SnapshotManifest, LoadError>,
+    source: &str,
+) -> Result<SnapshotManifest, LoadError> {
+    let manifest = loaded?;
+    let report = check_completeness(&manifest, None);
+    if report.is_complete() {
+        Ok(manifest)
+    } else {
+        Err(LoadError::source(source, PublishError::Incomplete(report)))
+    }
+}
+
 /// Read and validate a bundled snapshot **embedded in the binary**.
 ///
 /// This is the first-sync fallback of `plan.md` §5 / `docs/LICENSING.md` §5:
@@ -332,29 +365,40 @@ pub fn load_snapshot_embedded(
     data_dir: &Path,
     bundle: &[u8],
 ) -> Result<RuntimeSnapshot, LoadError> {
-    // Step 1: a valid local published snapshot, when present, is preferred.
+    // Step 1: a *complete* local published snapshot, when present, is
+    // preferred. A read, validation, or completeness failure records a short
+    // reason and falls through (issue #151: a degraded local must not displace
+    // the valid embedded bundle).
     let local = match load_local(data_dir) {
-        Ok(manifest) => {
-            return Ok(RuntimeSnapshot {
-                manifest,
-                source: SnapshotSource::Local {
-                    path: corpus::published_snapshot_path(data_dir),
-                },
-                // The local snapshot was served, so there is no fallback to explain.
-                fallback_reason: None,
-            });
-        }
+        Ok(manifest) => match gate_completeness(Ok(manifest), "local snapshot") {
+            Ok(manifest) => {
+                return Ok(RuntimeSnapshot {
+                    manifest,
+                    source: SnapshotSource::Local {
+                        path: corpus::published_snapshot_path(data_dir),
+                    },
+                    // The local snapshot was served, so there is no fallback to explain.
+                    fallback_reason: None,
+                });
+            }
+            Err(err) => Some(err.reason()),
+        },
         Err(err) => Some(err.reason()),
     };
 
     // Step 2: the embedded, shipped fallback, validated with the same gate.
-    // The local source was not used (a read/validation failure above), so record
-    // *why* for the fallback diagnostic: a presence check distinguishes "no local
-    // snapshot present" (a fresh install — refresh with `sync` later) from "a
-    // local snapshot is present but could not be loaded or validated" (corrupt,
-    // truncated, non-UTF-8, oversized, or inconsistent — fix and `sync`).
+    // The local source was not used (a read/validation/completeness failure
+    // above), so record *why* for the fallback diagnostic: a presence check
+    // distinguishes "no local snapshot present" (a fresh install — refresh with
+    // `sync` later) from "a local snapshot is present but could not be loaded,
+    // validated, or completed" (corrupt, truncated, non-UTF-8, oversized,
+    // inconsistent, or incomplete — fix and `sync`).
     let local_present = corpus::published_snapshot_path(data_dir).exists();
-    match load_validated_json("bundled (embedded) snapshot", bundle.to_vec()) {
+    let embedded = match load_validated_json("bundled (embedded) snapshot", bundle.to_vec()) {
+        Ok(manifest) => gate_completeness(Ok(manifest), "bundled (embedded) snapshot"),
+        Err(err) => Err(err),
+    };
+    match embedded {
         // `local` is *borrowed* here, not moved, so the error arm below still
         // owns it for `NoValidCorpus`.
         Ok(manifest) => {
@@ -423,8 +467,9 @@ mod tests {
     use super::*;
     use crate::corpus::{self, publish_snapshot};
     use crate::model::{
-        Channel, CorpusHash, ManifestBody, Release, SchemaVersion, SectionBuilder, SnapshotId,
-        SnapshotManifest, Source, SourceId, Timestamp, Url, ValidationSummary,
+        AttributionRef, Channel, ChecklistEntry, CommandEntry, CommandKey, CorpusHash,
+        ManifestBody, Release, SchemaVersion, SectionBuilder, SnapshotId, SnapshotManifest, Source,
+        SourceId, Timestamp, Url, ValidationSummary,
     };
     use crate::registry::SourceCollection;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -454,25 +499,111 @@ mod tests {
         }
     }
 
-    /// A complete, valid snapshot carrying the given `snapshot_id`: all eight
-    /// sources and one well-formed section. It passes
-    /// [`crate::corpus::validate_snapshot`] so it is selectable by
-    /// [`load_snapshot`].
+    /// A *complete*, valid snapshot carrying the given `snapshot_id`: every one
+    /// of the eight sources carries at least one section, plus a nonempty
+    /// checklist, a nonempty command catalog, a nonempty lint catalog, and an
+    /// attribution record per source. It passes both
+    /// [`crate::corpus::validate_snapshot`] (well-formed) and
+    /// [`crate::corpus::check_completeness`] (a complete production corpus), so
+    /// it is selectable by [`load_snapshot`].
     fn valid_snapshot(snapshot_id: &str) -> SnapshotManifest {
-        // One well-formed section, built through `SectionBuilder` so its id and
-        // content hash are the consistent, recomputed values the validator
-        // requires.
+        // One well-formed section per registered source, built through
+        // `SectionBuilder` so each id and content hash is the consistent,
+        // recomputed value the validator requires. A complete corpus needs every
+        // source to carry content (the #151 fix rejects a corpus that omits a
+        // collection), so each of the eight sources gets a section.
+        let mut sections = Vec::new();
+        for collection in SourceCollection::ALL {
+            let id = collection.id();
+            let mut builder = SectionBuilder::new(
+                SourceId::new(id).unwrap(),
+                collection.title(),
+                format!("{id}/chapter"),
+                Url::new(collection.entry_url()).unwrap(),
+                format!("# {}\n\nThe {id} collection's content.", collection.title()),
+            );
+            // The clippy collection carries the lint catalog, so a complete
+            // corpus has at least one section with lint identifiers.
+            if collection == SourceCollection::Clippy {
+                builder = builder.lint_ids(["clippy::unwrap_used"]);
+            }
+            sections.push(
+                builder
+                    .anchor("top")
+                    .build()
+                    .expect("a well-formed section builds"),
+            );
+        }
+        // Every source has a section, so the first is safe to use as the target
+        // of the cross-references below.
+        let first_id = sections[0].id.clone();
+
+        SnapshotManifest {
+            schema_version: SchemaVersion::CURRENT,
+            body: ManifestBody {
+                snapshot_id: SnapshotId::new(snapshot_id).expect("a valid snapshot id"),
+                created_at: Timestamp::new("2026-10-30T00:00:00Z").unwrap(),
+                parser_version: "test/1".into(),
+                sources: SourceCollection::ALL
+                    .iter()
+                    .copied()
+                    .map(source_for)
+                    .collect(),
+                sections,
+                // A nonempty checklist whose entry resolves to a real section.
+                checklist: vec![ChecklistEntry {
+                    code: "C-CONV".into(),
+                    title: "Prefer `From`/`Into`".into(),
+                    category: "Conversions and From".into(),
+                    location: "Conversions and From#C-CONV".into(),
+                    explanation_sections: vec![first_id.clone()],
+                }],
+                // A nonempty command catalog whose entry resolves to a real
+                // section.
+                commands: vec![CommandEntry {
+                    key: CommandKey::new("cargo build").unwrap(),
+                    purpose: "Compile the project".into(),
+                    upstream_sections: vec![first_id],
+                    syntax: vec!["cargo build [OPTIONS]".into()],
+                    examples: vec![],
+                    prerequisites: vec![],
+                    compatibility: vec![],
+                    effect_notes: vec![],
+                }],
+                validation: ValidationSummary::default(),
+                // An attribution record per source, so every source with content
+                // carries its license and citation.
+                attribution: SourceCollection::ALL
+                    .iter()
+                    .copied()
+                    .map(|c| AttributionRef {
+                        source: SourceId::new(c.id()).unwrap(),
+                        licenses: vec!["MIT OR Apache-2.0".into()],
+                        repository: "https://github.com/rust-lang/rust".into(),
+                        required_notice: String::new(),
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    /// A well-formed but *incomplete* snapshot — the exact #151 bug shape: all
+    /// eight source rows but only one collection of content, and no checklist,
+    /// no command catalog, no lint catalog, no attribution. It passes
+    /// [`crate::corpus::validate_snapshot`] (a schema-validated load accepts it)
+    /// yet fails [`crate::corpus::check_completeness`], so the selection must
+    /// not prefer it over a valid bundle.
+    fn incomplete_snapshot(snapshot_id: &str) -> SnapshotManifest {
         let section = SectionBuilder::new(
-            SourceId::new("cargo").unwrap(),
-            "The cargo book",
-            "commands/index",
-            Url::new("https://doc.rust-lang.org/cargo/commands/index.html#build").unwrap(),
-            "# Build\n\nRun `cargo build` to compile without linking.",
+            SourceId::new("style-guide").unwrap(),
+            "The style guide",
+            "naming",
+            Url::new("https://doc.rust-lang.org/style/naming.html").unwrap(),
+            "# Naming\n\nNames should be clear and descriptive.",
         )
-        .anchor("build")
+        .anchor("top")
         .build()
         .expect("a well-formed section builds");
-
         SnapshotManifest {
             schema_version: SchemaVersion::CURRENT,
             body: ManifestBody {
@@ -1045,6 +1176,107 @@ mod tests {
             fs::read(&local_path).expect("the local file is still present"),
             b"corrupt local",
             "the loader must not delete or rewrite the local snapshot"
+        );
+    }
+
+    // -- Issue #151: the selection completeness gate. --
+
+    /// **AC4**: an incomplete local snapshot (well-formed but missing required
+    /// collections) must **not** be selected over a valid, complete bundle. The
+    /// #151 bug let a one-collection local silently replace the valid 8-source
+    /// corpus; the gate now falls through to the bundle instead.
+    #[test]
+    fn an_incomplete_local_falls_back_to_a_valid_bundle() {
+        let tmp = temp_dir();
+        let data_dir = tmp.0.join("data");
+        let bundle = tmp.0.join("bundle.json");
+
+        // An incomplete local: well-formed (so `publish_snapshot` accepts it),
+        // but only one collection of content.
+        publish_snapshot(&data_dir, &incomplete_snapshot("rust-docs-partial"))
+            .expect("an incomplete-but-well-formed local can be published");
+        // A valid, complete bundle.
+        write_bundle(&bundle, &valid_snapshot("rust-docs-bundle"));
+
+        let rt = load_snapshot(&data_dir, Some(&bundle))
+            .expect("the complete bundle must be selected over an incomplete local");
+
+        // The incomplete local must NOT be selected; the valid bundle is.
+        assert_eq!(
+            rt.source,
+            SnapshotSource::Bundle { path: bundle },
+            "an incomplete local must not be preferred over a valid bundle"
+        );
+        assert_eq!(rt.manifest.body.snapshot_id.as_str(), "rust-docs-bundle");
+    }
+
+    /// An incomplete local with no valid bundle yields an actionable
+    /// `NoValidCorpus` error rather than serving a degraded corpus — a fresh
+    /// install must never start an apparently-healthy but incomplete server.
+    #[test]
+    fn an_incomplete_local_with_no_bundle_is_no_valid_corpus() {
+        let tmp = temp_dir();
+        let data_dir = tmp.0.join("data");
+        publish_snapshot(&data_dir, &incomplete_snapshot("rust-docs-partial"))
+            .expect("the incomplete local can be published");
+
+        let err = load_snapshot(&data_dir, None)
+            .expect_err("an incomplete local with no bundle must fail");
+        assert!(
+            matches!(err, LoadError::NoValidCorpus { .. }),
+            "an incomplete local with no bundle must yield NoValidCorpus, got {err:?}"
+        );
+        // The error explains the incompleteness, directing the operator to sync.
+        let message = err.to_string();
+        assert!(
+            message.contains("incomplete") || message.contains("gap"),
+            "the NoValidCorpus error must name the incompleteness: {message}"
+        );
+    }
+
+    /// The selection reads the incomplete local but never deletes or rewrites
+    /// it: the last published file stays byte-for-byte intact.
+    #[test]
+    fn an_incomplete_local_is_never_deleted_by_the_selection() {
+        let tmp = temp_dir();
+        let data_dir = tmp.0.join("data");
+        let bundle = tmp.0.join("bundle.json");
+        let local_path = corpus::published_snapshot_path(&data_dir);
+
+        publish_snapshot(&data_dir, &incomplete_snapshot("rust-docs-partial"))
+            .expect("the incomplete local can be published");
+        let original = fs::read(&local_path).expect("the local file is present");
+        write_bundle(&bundle, &valid_snapshot("rust-docs-bundle"));
+
+        // The selection falls back to the bundle but must not touch the local.
+        load_snapshot(&data_dir, Some(&bundle)).expect("the bundle must be selected");
+        assert_eq!(
+            fs::read(&local_path).expect("the local file is still present"),
+            original,
+            "the selection must not delete or rewrite the incomplete local"
+        );
+    }
+
+    /// **AC4** (embedded path): an incomplete local falls back to the shipped
+    /// embedded bundle, which is a complete production corpus.
+    #[test]
+    fn an_incomplete_local_falls_back_to_the_embedded_bundle() {
+        let tmp = temp_dir();
+        let data_dir = tmp.0.join("data");
+        publish_snapshot(&data_dir, &incomplete_snapshot("rust-docs-partial"))
+            .expect("the incomplete local can be published");
+
+        let rt = load_snapshot_embedded(&data_dir, crate::bundled::JSON.as_bytes())
+            .expect("the complete embedded bundle must be selected over an incomplete local");
+
+        assert!(
+            matches!(rt.source, SnapshotSource::Embedded),
+            "an incomplete local must not be preferred over the embedded bundle"
+        );
+        assert_eq!(
+            rt.manifest.body.snapshot_id.as_str(),
+            crate::bundled::SNAPSHOT_ID,
+            "the served snapshot must be the embedded seed"
         );
     }
 }
