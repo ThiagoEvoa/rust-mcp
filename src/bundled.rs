@@ -104,7 +104,11 @@ pub fn section_count() -> usize {
 /// sections, not stale placeholders. Total: an unknown id is `false`, never a
 /// panic.
 pub fn has_section(id: &str) -> bool {
-    manifest().body.sections.iter().any(|section| section.id.as_str() == id)
+    manifest()
+        .body
+        .sections
+        .iter()
+        .any(|section| section.id.as_str() == id)
 }
 
 /// The seed corpus with `excluded` sources omitted, each recorded as a

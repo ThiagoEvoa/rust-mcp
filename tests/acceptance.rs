@@ -44,7 +44,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-use rust_docs_mcp::acceptance::{measure, shipped_corpus_identity, Environment};
+use rust_docs_mcp::acceptance::{Environment, measure, shipped_corpus_identity};
 
 /// The active bundled snapshot's id — the seed corpus `serve` always loads and
 /// the acceptance measurement is tied to.
@@ -92,8 +92,7 @@ fn acceptance_recall_measured_over_shipped_corpus() {
         "the acceptance measurement must run over the shipped corpus"
     );
     assert_eq!(
-        report.corpus.section_count,
-        SHIPPED_SECTION_COUNT,
+        report.corpus.section_count, SHIPPED_SECTION_COUNT,
         "the measured corpus must be the full shipped corpus"
     );
 
@@ -101,9 +100,15 @@ fn acceptance_recall_measured_over_shipped_corpus() {
     // that carries its genuine token first.
     let (canonical_pass, canonical_total) = report.canonical_first();
     assert_eq!(
-        canonical_pass, canonical_total,
+        canonical_pass,
+        canonical_total,
         "every exact-match case must rank its canonical section first; misses:\n{}",
-        report.canonical_misses().iter().map(|c| format!("  - {} ({})", c.id, c.query)).collect::<Vec<_>>().join("\n")
+        report
+            .canonical_misses()
+            .iter()
+            .map(|c| format!("  - {} ({})", c.id, c.query))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     // Top-5 recall is measured honestly. The shipped corpus does NOT yet clear
@@ -211,7 +216,8 @@ impl Client {
     /// Send a JSON-RPC notification (no id, no response expected).
     async fn notify(&mut self, method: &str) {
         let message = json!({ "jsonrpc": "2.0", "method": method });
-        let frame = serde_json::to_string(&message).expect("encoding a hand-built JSON value must not fail");
+        let frame = serde_json::to_string(&message)
+            .expect("encoding a hand-built JSON value must not fail");
         self.stdin
             .write_all(format!("{frame}\n").as_bytes())
             .await
@@ -263,7 +269,8 @@ impl Client {
             if trimmed.is_empty() {
                 continue;
             }
-            let value: Value = serde_json::from_str(trimmed).expect("every stdout line must be JSON");
+            let value: Value =
+                serde_json::from_str(trimmed).expect("every stdout line must be JSON");
             assert_eq!(
                 value.get("jsonrpc").and_then(Value::as_str),
                 Some("2.0"),
@@ -277,7 +284,11 @@ impl Client {
 
     /// Call a tool by name with the given arguments object.
     async fn call_tool(&mut self, name: &str, arguments: Value) -> Value {
-        self.request("tools/call", &json!({ "name": name, "arguments": arguments })).await
+        self.request(
+            "tools/call",
+            &json!({ "name": name, "arguments": arguments }),
+        )
+        .await
     }
 
     /// Close stdin and wait for a clean self-exit, mirroring the proven
@@ -367,7 +378,8 @@ async fn acceptance_server_path_reconciles_with_index() {
     let list = client.call_tool("list_sources", json!({})).await;
     assert_eq!(list.get("error"), None, "list_sources must succeed: {list}");
     assert_eq!(
-        list.pointer("/result/structuredContent/snapshot_id").and_then(Value::as_str),
+        list.pointer("/result/structuredContent/snapshot_id")
+            .and_then(Value::as_str),
         Some(SNAPSHOT_ID),
         "the server must name the shipped corpus on a catalog read"
     );

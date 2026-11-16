@@ -50,7 +50,7 @@
 //! the server path through the assembled binary so the two are reconciled, and a
 //! missing or failed measurement never counts as a pass.
 
-use crate::eval::{EvalCase, EvalKind, CORPUS};
+use crate::eval::{CORPUS, EvalCase, EvalKind};
 use crate::model::{Section, SnapshotManifest};
 use crate::search::SectionIndex;
 
@@ -87,7 +87,11 @@ impl CorpusIdentity {
     /// content fingerprint over the corpus.
     pub fn from_manifest(manifest: &SnapshotManifest) -> CorpusIdentity {
         let body = &manifest.body;
-        let mut ids: Vec<String> = body.sections.iter().map(|s| s.id.as_str().to_string()).collect();
+        let mut ids: Vec<String> = body
+            .sections
+            .iter()
+            .map(|s| s.id.as_str().to_string())
+            .collect();
         ids.sort();
         let fingerprint = fnv1a_fingerprint(
             body.snapshot_id.as_str(),
@@ -242,7 +246,10 @@ pub struct AcceptanceReport {
 pub fn measure(manifest: &SnapshotManifest, environment: &Environment) -> AcceptanceReport {
     let index = SectionIndex::build(manifest);
     let corpus = CorpusIdentity::from_manifest(manifest);
-    let cases = CORPUS.iter().map(|case| measure_case(&index, case)).collect();
+    let cases = CORPUS
+        .iter()
+        .map(|case| measure_case(&index, case))
+        .collect();
     AcceptanceReport {
         corpus,
         environment: environment.clone(),
@@ -260,14 +267,13 @@ fn measure_case(index: &SectionIndex, case: &EvalCase) -> CaseOutcome {
     // The top-1 hit's section id (a string for the report) and the section it
     // resolves to (so its structured fields can be checked).
     let top1_id = hits.first().map(|hit| hit.section_id.as_str().to_string());
-    let top1_section = hits
-        .first()
-        .and_then(|hit| index.get(&hit.section_id));
-    let top5_in_expected_source = hits
-        .iter()
-        .take(5)
-        .any(|hit| index.get(&hit.section_id).map(|s| s.source_id.as_str() == case.source.id())
-            .unwrap_or(false));
+    let top1_section = hits.first().and_then(|hit| index.get(&hit.section_id));
+    let top5_in_expected_source = hits.iter().take(5).any(|hit| {
+        index
+            .get(&hit.section_id)
+            .map(|s| s.source_id.as_str() == case.source.id())
+            .unwrap_or(false)
+    });
     let exact_match = case.kind.is_canonical();
     let canonical_first = if exact_match {
         Some(carries_canonical_token(case, top1_section))
@@ -315,7 +321,11 @@ impl AcceptanceReport {
     /// The count of cases with a top-5 hit in the expected source, over the
     /// total cases measured — the top-5 recall numerator/denominator.
     pub fn top5_recall(&self) -> (usize, usize) {
-        let pass = self.cases.iter().filter(|c| c.top5_in_expected_source).count();
+        let pass = self
+            .cases
+            .iter()
+            .filter(|c| c.top5_in_expected_source)
+            .count();
         (pass, self.cases.len())
     }
 
@@ -323,8 +333,7 @@ impl AcceptanceReport {
     /// over the total exact-match cases — the "canonical first-place"
     /// numerator/denominator.
     pub fn canonical_first(&self) -> (usize, usize) {
-        let exact: Vec<&CaseOutcome> =
-            self.cases.iter().filter(|c| c.exact_match).collect();
+        let exact: Vec<&CaseOutcome> = self.cases.iter().filter(|c| c.exact_match).collect();
         let pass = exact
             .iter()
             .filter(|c| c.canonical_first == Some(true))
@@ -372,7 +381,10 @@ impl AcceptanceReport {
         out.push_str("retrieval acceptance — shipped corpus\n");
         out.push_str(&format!("  snapshot_id : {}\n", self.corpus.snapshot_id));
         out.push_str(&format!("  parser      : {}\n", self.corpus.parser_version));
-        out.push_str(&format!("  fingerprint : {}\n", self.corpus.content_fingerprint));
+        out.push_str(&format!(
+            "  fingerprint : {}\n",
+            self.corpus.content_fingerprint
+        ));
         out.push_str(&format!(
             "  sections    : {} ({})\n",
             self.corpus.section_count,
@@ -409,10 +421,7 @@ fn append_misses(out: &mut String, label: &str, misses: &[&CaseOutcome]) {
         for miss in misses {
             out.push_str(&format!(
                 "    - {} [{}] {} (expected {})\n",
-                miss.id,
-                miss.kind,
-                miss.query,
-                miss.expected_source
+                miss.id, miss.kind, miss.query, miss.expected_source
             ));
         }
     }
@@ -427,4 +436,3 @@ fn pct((pass, total): (usize, usize)) -> f64 {
         (pass as f64 * 100.0 / total as f64).round() * 10.0 / 10.0
     }
 }
-
