@@ -690,6 +690,7 @@ fn build_sources(sections: &[Section]) -> Vec<Source> {
             last_checked: None,
             fetched_at: Timestamp::new(CAPTURED_AT).expect("the capture timestamp is valid"),
             upstream_modified: None,
+            etag: None,
             content_hash,
             release,
             parser: SEED_PARSER_VERSION.to_string(),

@@ -107,6 +107,7 @@ fn source_stub(id: &str) -> Source {
         last_checked: None,
         fetched_at: Timestamp::new("2026-10-30T00:00:00Z").expect("a valid timestamp"),
         upstream_modified: None,
+        etag: None,
         content_hash: crate::model::CorpusHash::compute(b"consistency-fixture"),
         // An explicitly *unknown* release channel: the model preserves the
         // unknown rather than guessing a stable version.

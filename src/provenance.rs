@@ -159,6 +159,22 @@ impl Instant {
         };
         Self { secs }
     }
+
+    /// Render this instant as the canonical RFC 3339 UTC timestamp
+    /// (`YYYY-MM-DDThh:mm:ssZ`) that [`Instant::parse`] accepts, so a timestamp
+    /// produced here round-trips through `parse` — the same parser the status
+    /// and MCP views use to read `last_checked`/`fetched_at`/`upstream_modified`.
+    ///
+    /// This is the inverse of [`civil_days_from_epoch`], via Howard Hinnant's
+    /// `civil_from_days`; the `div_euclid`/`rem_euclid` split keeps a pre-epoch
+    /// (or overflowing) instant well-defined rather than panicking or wrapping.
+    pub fn to_rfc3339(self) -> String {
+        let days = self.secs.div_euclid(86_400);
+        let rem = self.secs.rem_euclid(86_400);
+        let (year, month, day) = civil_from_days(days as i128);
+        let (hour, minute, second) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+    }
 }
 
 /// Tighten a [007] [`Timestamp`] into a comparable instant.
@@ -619,6 +635,140 @@ fn civil_days_from_epoch(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + doe as i64 - 719_468
 }
 
+/// The inverse of [`civil_days_from_epoch`]: a `days-since-epoch` count to a
+/// proleptic Gregorian `(year, month, day)`.
+///
+/// Howard Hinnant's `civil_from_days` — dependency-free and an *exact* inverse
+/// (`civil_from_days(civil_days_from_epoch(y, m, d)) == (y, m, d)` for every
+/// Gregorian date, so a canonical timestamp rendered by [`Instant::to_rfc3339`]
+/// round-trips back through [`Instant::parse`]). It is computed in `i128` so the
+/// era arithmetic never overflows for the large counts a real timestamp can
+/// carry, and the result is clamped back to `i64` (the documented timestamps are
+/// all non-negative and well within range).
+fn civil_from_days(z0: i128) -> (i64, i64, i64) {
+    let z = z0 + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1).clamp(1, 31);
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }).clamp(1, 12);
+    let year = (if m <= 2 { y + 1 } else { y }).clamp(i64::MIN as i128, i64::MAX as i128);
+    (year as i64, m as i64, d as i64)
+}
+
+// ---------------------------------------------------------------------------
+// Upstream date parsing (issue #152: carry a Last-Modified hint through)
+// ---------------------------------------------------------------------------
+
+/// Parse an upstream date/time value into a UTC [`Instant`], accepting the two
+/// forms an upstream actually emits: a RFC 3339 timestamp (via
+/// [`Instant::parse`], e.g. `"2026-06-01T00:00:00Z"`) or an HTTP-date / RFC 1123
+/// (the standard `Last-Modified` form, e.g. `"Thu, 01 Jun 2026 00:00:00 GMT"`).
+///
+/// Returns `None` when neither form parses, so an unrecognised or missing
+/// upstream-modification time is preserved as `None` rather than guessed. This
+/// is the parser the sync pipeline feeds a captured `Last-Modified` header
+/// through, then renders back to the canonical RFC 3339 form via
+/// [`Instant::to_rfc3339`].
+pub fn parse_date_time(value: &str) -> Option<Instant> {
+    if let Ok(instant) = Instant::parse(value) {
+        return Some(instant);
+    }
+    parse_http_date(value)
+}
+
+/// Parse an HTTP-date (RFC 1123, `"Ddd, DD Mon YYYY HH:MM:SS TZ"`) into a UTC
+/// [`Instant`]. The weekday is ignored; the timezone is `GMT`/`UTC` (no offset),
+/// a `±hhmm` / `±hh:mm` offset, or absent (assumed UTC). Any malformed component
+/// yields `None` rather than a guess.
+fn parse_http_date(value: &str) -> Option<Instant> {
+    let tokens: Vec<&str> = value.split_whitespace().collect();
+    // RFC 1123 is `Ddd, DD Mon YYYY HH:MM:SS TZ` — six fields: the weekday (with
+    // a trailing comma), the day, the month, the year, the colon-joined time, and
+    // the timezone. Require the five core fields and tolerate a missing trailing
+    // timezone (assume UTC).
+    if tokens.len() < 5 {
+        return None;
+    }
+    let day = tokens[1].parse::<i64>().ok()?;
+    let month = month_index(tokens[2])?;
+    let year = tokens[3].parse::<i64>().ok()?;
+    // The time is one colon-joined field `HH:MM:SS` in RFC 1123; split it into
+    // its components.
+    let time_parts: Vec<&str> = tokens[4].split(':').collect();
+    let (hour, minute, second) = match time_parts.as_slice() {
+        [h, m, s] => parse_time_tokens(h, m, s)?,
+        _ => return None,
+    };
+    let utc_offset_secs = match tokens.get(5) {
+        Some(tz) => parse_http_tz_offset(tz)?,
+        None => 0,
+    };
+    let secs =
+        civil_days_from_epoch(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second
+            - utc_offset_secs;
+    Some(Instant { secs })
+}
+
+/// Map a three-letter English month name to its 1-based index (`"Jan"` → 1).
+fn month_index(token: &str) -> Option<i64> {
+    Some(match token {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    })
+}
+
+/// Parse the `HH`, `MM`, `SS` fields of an HTTP date, rejecting out-of-range
+/// components (a leap second, `SS == 60`, is tolerated and clamped to `59`).
+fn parse_time_tokens(hour: &str, minute: &str, second: &str) -> Option<(i64, i64, i64)> {
+    let h = hour.parse::<i64>().ok()?;
+    let m = minute.parse::<i64>().ok()?;
+    let s = second.parse::<i64>().ok()?;
+    if !(0..=23).contains(&h) || !(0..=59).contains(&m) || !(0..=60).contains(&s) {
+        return None;
+    }
+    Some((h, m, s.min(59)))
+}
+
+/// Parse an HTTP-date timezone token to its UTC offset in seconds. `GMT`/`UTC`
+/// (and the absence of a token, handled by the caller) are `0`; a `±hh:mm` or
+/// `±hhmm` offset is `±(hh*3600 + mm*60)`.
+fn parse_http_tz_offset(token: &str) -> Option<i64> {
+    match token.to_ascii_uppercase().as_str() {
+        "GMT" | "UTC" => return Some(0),
+        _ => {}
+    }
+    let (sign, rest) = match token.chars().next() {
+        Some('+') => (1i64, &token[1..]),
+        Some('-') => (-1i64, &token[1..]),
+        _ => (1i64, token),
+    };
+    let rest = rest.replace(':', "");
+    if rest.len() < 2 {
+        return None;
+    }
+    let hh: i64 = rest.get(0..2)?.parse::<i64>().ok()?;
+    let mm: i64 = rest
+        .get(2..4)
+        .and_then(|m| m.parse::<i64>().ok())
+        .unwrap_or(0);
+    Some(sign * (hh * 3_600 + mm * 60))
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -657,6 +807,7 @@ mod tests {
             last_checked: last_checked.map(|s| Timestamp::new(s).unwrap()),
             fetched_at: Timestamp::new(fetched_at).unwrap(),
             upstream_modified: upstream_modified.map(|s| Timestamp::new(s).unwrap()),
+            etag: None,
             content_hash: CorpusHash::compute(content),
             release: Release {
                 channel,
@@ -1216,5 +1367,38 @@ mod tests {
             .expect("UTC equivalent is valid")
             .as_secs();
         assert_eq!(with_offset, as_utc);
+    }
+
+    // Issue #152: the dual-path `parse_date_time` accepts both an RFC 3339
+    // instant and an HTTP-date (RFC 1123 `Last-Modified`) and normalizes both to
+    // the same UTC instant; an unrecognized form is `None` (never guessed).
+    #[test]
+    fn parse_date_time_handles_rfc3339_and_http_dates() {
+        // An RFC 3339 instant parses directly.
+        let rfc = parse_date_time("2024-05-13T14:30:00Z").expect("RFC 3339 parses");
+        assert_eq!(rfc.to_rfc3339(), "2024-05-13T14:30:00Z");
+
+        // The same instant spelled as an HTTP-date (the standard `Last-Modified`
+        // form) parses to the same instant, normalized to UTC RFC 3339.
+        let http = parse_date_time("Mon, 13 May 2024 14:30:00 GMT").expect("HTTP-date parses");
+        assert_eq!(http.to_rfc3339(), "2024-05-13T14:30:00Z");
+
+        // A non-`GMT`/`UTC` offset is honored, not discarded.
+        let offset =
+            parse_date_time("Mon, 13 May 2024 16:30:00 +0200").expect("offset HTTP-date parses");
+        assert_eq!(offset.to_rfc3339(), "2024-05-13T14:30:00Z");
+
+        // A missing trailing timezone is assumed UTC (the weekday form still
+        // parses without it).
+        let no_tz =
+            parse_date_time("Mon, 13 May 2024 14:30:00").expect("timezone-less date parses");
+        assert_eq!(no_tz.to_rfc3339(), "2024-05-13T14:30:00Z");
+
+        // An unrecognized form is `None` (preserved, not guessed).
+        assert!(parse_date_time("not a date").is_none(), "garbage is None");
+        assert!(
+            parse_date_time("Mon, 99 May 2024 24:30:00 GMT").is_none(),
+            "an out-of-range component is None"
+        );
     }
 }

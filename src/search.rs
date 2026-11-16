@@ -1147,6 +1147,7 @@ mod tests {
                     last_checked: None,
                     fetched_at: Timestamp::new("2026-10-30T00:00:00Z").expect("a valid timestamp"),
                     upstream_modified: None,
+                    etag: None,
                     content_hash: crate::model::CorpusHash::compute(b"fixture"),
                     release: Release::default(),
                     parser: "test/1".into(),

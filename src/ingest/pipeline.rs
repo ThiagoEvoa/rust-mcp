@@ -236,6 +236,96 @@ struct IngestedSource {
     sections: Vec<Section>,
     /// The checklist entries extracted from this source (api-guidelines only).
     checklist: Vec<crate::model::ChecklistEntry>,
+    /// The captured upstream documents — the raw bytes fetched for each URL plus
+    /// the response metadata that identified them (the `ETag` / `Last-Modified`
+    /// the upstream supplied, when any). A content identity is computed over
+    /// these bytes, and the metadata is the freshness evidence carried onto the
+    /// source record (issue #152). Empty for a source that was not ingested.
+    captured: Vec<CapturedDocument>,
+}
+
+/// One captured upstream document: the bytes fetched plus the response metadata
+/// that identified them. A source's content identity is a hash over its captured
+/// bytes, and its `ETag` / `Last-Modified` are the freshness hints carried onto
+/// the source record — neither is fabricated, so an upstream that supplies none
+/// leaves them `None`.
+#[derive(Debug, Clone)]
+struct CapturedDocument {
+    /// The URL this document was fetched from.
+    url: Url,
+    /// The raw bytes captured (the content identity is hashed over these).
+    bytes: Vec<u8>,
+    /// The upstream `ETag` header, when present.
+    etag: Option<String>,
+    /// The upstream `Last-Modified` header, when present (an HTTP-date / RFC 3339
+    /// string as served).
+    last_modified: Option<String>,
+}
+
+impl IngestedSource {
+    /// The captured document bytes, concatenated in URL-stable order and
+    /// NUL-separated, for a content identity that is independent of fetch order
+    /// (mirroring `crate::ingest::bundle`'s captured-content hashing). An
+    /// empty source hashes the empty inventory, which is still a stable, unique
+    /// identity for that source.
+    fn captured_bytes(&self) -> Vec<u8> {
+        let mut docs: Vec<&CapturedDocument> = self.captured.iter().collect();
+        docs.sort_by(|a, b| a.url.as_str().cmp(b.url.as_str()));
+        let mut bytes = Vec::new();
+        for doc in docs {
+            bytes.extend_from_slice(&doc.bytes);
+            bytes.push(0);
+        }
+        bytes
+    }
+
+    /// The content identity of this source: a hash over the captured bytes. A
+    /// different body yields a different identity; an identical body keeps it
+    /// stable — so a no-change refresh preserves content identity while the
+    /// check time advances (issue #152).
+    fn content_hash(&self) -> crate::model::CorpusHash {
+        crate::model::CorpusHash::compute(self.captured_bytes())
+    }
+
+    /// The representative upstream `ETag` — the `ETag` of the URL-smallest
+    /// captured document that carries one, when any do. `None` when no upstream
+    /// supplied an ETag (preserved, never fabricated).
+    fn representative_etag(&self) -> Option<String> {
+        let mut docs: Vec<&CapturedDocument> = self.captured.iter().collect();
+        docs.sort_by(|a, b| a.url.as_str().cmp(b.url.as_str()));
+        docs.iter().find_map(|doc| doc.etag.clone())
+    }
+
+    /// The upstream-modification hint: the most-recent parseable `Last-Modified`
+    /// across the captured documents, canonicalised to the RFC 3339 UTC grammar
+    /// via [`crate::provenance::Instant::to_rfc3339`], when any supplied a
+    /// parseable one. `None` when the upstream supplied none or none parsed — an
+    /// honest "we don't know," never a fabricated value.
+    fn upstream_modified(&self) -> Option<crate::model::Timestamp> {
+        use crate::model::Timestamp;
+        let latest = self
+            .captured
+            .iter()
+            .filter_map(|doc| doc.last_modified.as_deref())
+            .filter_map(crate::provenance::parse_date_time)
+            .max();
+        latest.map(|instant| {
+            Timestamp::new(instant.to_rfc3339()).expect("a canonical RFC 3339 timestamp is valid")
+        })
+    }
+}
+
+/// Capture the bytes and response metadata of one fetched document, for the
+/// content identity and the `ETag` / `Last-Modified` evidence carried onto the
+/// source record. The caller borrows `fetched` for extraction; this clones only
+/// the small metadata and the (already-buffered, capped) body.
+fn capture_document(url: &Url, fetched: &crate::ingest::fetch::Fetched) -> CapturedDocument {
+    CapturedDocument {
+        url: url.clone(),
+        bytes: fetched.body.clone(),
+        etag: fetched.etag.clone(),
+        last_modified: fetched.last_modified.clone(),
+    }
 }
 
 /// Run one explicit sync: discover (or take the pinned) document URLs for each
@@ -337,10 +427,12 @@ pub async fn sync(
     let mut source_records: Vec<Source> = Vec::with_capacity(SourceCollection::ALL.len());
 
     for collection in SourceCollection::ALL {
+        let previous_source = previous_source(&previous, collection.id());
         let source_record = build_source_record(
             collection,
             ingested.get(collection.id()),
-            created_at.clone(),
+            previous_source,
+            &created_at,
             &config.parser_version,
         )?;
         source_records.push(source_record);
@@ -435,6 +527,7 @@ async fn ingest_source(
             // `ingest_chapter`. Both land as `Section`s.
             for url in urls {
                 let fetched = client.fetch(url).await?;
+                out.captured.push(capture_document(url, &fetched));
                 let sections = if cargo::is_command_page(url) {
                     cargo::ingest_command_page(&fetched).map_err(|e| extract_err(collection, e))?
                 } else {
@@ -446,6 +539,7 @@ async fn ingest_source(
         SourceCollection::Rustfmt => {
             for url in urls {
                 let fetched = client.fetch(url).await?;
+                out.captured.push(capture_document(url, &fetched));
                 let sections =
                     rustfmt::ingest_markdown(&fetched).map_err(|e| extract_err(collection, e))?;
                 out.sections.extend(sections);
@@ -464,6 +558,9 @@ async fn ingest_source(
             let mut checklist_page: Option<Fetched> = None;
             for url in urls {
                 let fetched = client.fetch(url).await?;
+                // Capture the bytes/metadata before `fetched` may be moved into
+                // `checklist_page` below.
+                out.captured.push(capture_document(url, &fetched));
                 let chapter = api_guidelines::ingest_chapter(&fetched)
                     .map_err(|e| extract_err(collection, e))?;
                 out.sections.extend(chapter);
@@ -491,7 +588,9 @@ async fn ingest_source(
         // The remaining collections (style-guide, rustc, rustup, rustdoc, and
         // the clippy *book*) share the HTML chapter adapter.
         _ => {
-            out.sections = ingest_book(collection, urls, client).await?;
+            let (sections, captured) = ingest_book(collection, urls, client).await?;
+            out.sections = sections;
+            out.captured = captured;
         }
     }
 
@@ -499,15 +598,18 @@ async fn ingest_source(
 }
 
 /// Fetch and split each `url` through the HTML chapter adapter for `collection`,
-/// accumulating the resulting sections.
+/// accumulating the resulting sections and the captured documents (the bytes and
+/// response metadata a content identity and freshness evidence are built from).
 async fn ingest_book(
     collection: SourceCollection,
     urls: &[Url],
     client: &BoundClient,
-) -> Result<Vec<Section>, SyncError> {
+) -> Result<(Vec<Section>, Vec<CapturedDocument>), SyncError> {
     let mut sections = Vec::new();
+    let mut captured = Vec::new();
     for url in urls {
         let fetched = client.fetch(url).await?;
+        captured.push(capture_document(url, &fetched));
         // Each arm maps its source-specific `IngestError` to a `SyncError` so
         // the match unifies to one result type.
         let chapter: Result<Vec<Section>, SyncError> = match collection {
@@ -538,16 +640,34 @@ async fn ingest_book(
         };
         sections.extend(chapter?);
     }
-    Ok(sections)
+    Ok((sections, captured))
 }
 
 /// Build the source record for `collection`, recording the ingested document
-/// URLs when the source was ingested, else an (empty) placeholder record so the
-/// manifest always carries all eight sources.
+/// URLs and the capture's real provenance when the source was ingested, else an
+/// (empty) placeholder record so the manifest always carries all eight sources.
+///
+/// Provenance (issue #152):
+///
+/// * `content_hash` is a hash over the captured document *bytes* when the source
+///   was ingested — so distinct bodies hash distinctly and an unchanged body
+///   hashes identically — rather than a constant over the collection id.
+/// * `etag` / `upstream_modified` carry the capture's real ETag and
+///   `Last-Modified` evidence when the upstream supplied it (else `None`).
+/// * `fetched_at` (download time) and `upstream_modified` are preserved across a
+///   no-change refresh (identical content hash to the prior record) so content
+///   identity is stable; a content change records the fresh capture.
+/// * `last_checked` (the check time) advances on every successful check, so a
+///   no-change refresh updates the check time while preserving the content
+///   identity; for a source the run did not ingest it preserves the last known
+///   check (or stays unknown) rather than fabricating one.
+/// * `release` keeps the source-specific revision/channel provenance
+///   ([`release_for`], e.g. rustfmt's approved revision).
 fn build_source_record(
     collection: SourceCollection,
     ingested: Option<&IngestedSource>,
-    fetched_at: Timestamp,
+    previous: Option<&Source>,
+    now: &Timestamp,
     parser_version: &str,
 ) -> Result<Source, SyncError> {
     let id = SourceId::new(collection.id())?;
@@ -563,15 +683,59 @@ fn build_source_record(
         .transpose()?
         .unwrap_or_default();
 
+    // Content identity: a hash over the captured document bytes when the source
+    // was ingested, else a deterministic placeholder over the collection id so a
+    // source the run did not fetch still carries a stable, non-empty identity.
+    let content_hash = match ingested {
+        Some(source) => source.content_hash(),
+        None => CorpusHash::compute(collection.id().as_bytes()),
+    };
+
+    // A no-change refresh (identical captured content to the prior record)
+    // preserves the download time and the upstream-modification hint; a content
+    // change (or a first sync) records the fresh capture.
+    let content_unchanged = previous.is_some_and(|prior| prior.content_hash == content_hash);
+
+    // The upstream-modification hint: the capture's most recent `Last-Modified`
+    // when present; on a no-change refresh the prior hint is preserved rather
+    // than re-stamped (so the hint is stable across an unchanged refresh).
+    let upstream_modified = if content_unchanged {
+        previous
+            .and_then(|prior| prior.upstream_modified.clone())
+            .or_else(|| ingested.and_then(|source| source.upstream_modified()))
+    } else {
+        ingested.and_then(|source| source.upstream_modified())
+    };
+
+    // Download time: preserved on a no-change refresh, else the current check
+    // time (the canonical RFC 3339 `now` supplied by the caller).
+    let fetched_at = if content_unchanged {
+        previous
+            .map(|prior| prior.fetched_at.clone())
+            .unwrap_or_else(|| now.clone())
+    } else {
+        now.clone()
+    };
+
+    // The check time advances on every successful check; for a source the run
+    // did not ingest this run we preserve the last known check (or stay unknown)
+    // rather than fabricate one — the explicit-unknown representation the issue
+    // asks for.
+    let last_checked = match ingested {
+        Some(_) => Some(now.clone()),
+        None => previous.and_then(|prior| prior.last_checked.clone()),
+    };
+
     Ok(Source {
         id,
         title: collection.title().to_string(),
         entry_url,
         document_urls,
-        last_checked: None,
+        last_checked,
         fetched_at,
-        upstream_modified: None,
-        content_hash: CorpusHash::compute(collection.id().as_bytes()),
+        upstream_modified,
+        etag: ingested.and_then(|source| source.representative_etag()),
+        content_hash,
         release: release_for(collection),
         parser: parser_version.to_string(),
     })
@@ -629,6 +793,24 @@ fn previous_document_urls(previous: &Option<SnapshotManifest>, source_id: &str) 
     }
 }
 
+/// The previous snapshot's [`Source`] record for `source_id`, when a prior
+/// snapshot was published and carried a record for that source. Used to carry
+/// download time, the upstream-modification hint, and the last check time
+/// forward on a no-change refresh (issue #152: preserve evidence rather than
+/// fabricate a new one, while still advancing the check time).
+fn previous_source<'a>(
+    previous: &'a Option<SnapshotManifest>,
+    source_id: &str,
+) -> Option<&'a Source> {
+    previous.as_ref().and_then(|manifest| {
+        manifest
+            .body
+            .sources
+            .iter()
+            .find(|source| source.id.as_str() == source_id)
+    })
+}
+
 /// Compute the [`InventoryDiff`] of `current` document URLs against the
 /// `previous` set: URLs in `current` but not `previous` are `added`; URLs in
 /// `previous` but not `current` are `removed`. (Nothing is probed for
@@ -666,15 +848,14 @@ fn parser_version() -> String {
     format!("rust-docs-mcp/{}", env!("CARGO_PKG_VERSION"))
 }
 
-/// A "now" timestamp for the snapshot, derived from the system clock. A numeric
-/// nanoseconds-since-epoch string is a valid [`Timestamp`] (non-empty, ASCII,
-/// no whitespace).
+/// A "now" timestamp for the snapshot, derived from the system clock, as a
+/// canonical RFC 3339 instant (issue #152). It round-trips through
+/// [`crate::provenance::Instant::parse`] and matches the format a `Last-Modified`
+/// hint is normalized to, so the snapshot's check time and the upstream-modified
+/// hint share one representation (both parseable, both comparable).
 fn now_timestamp() -> Timestamp {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    Timestamp::new(nanos.to_string()).expect("a numeric timestamp is valid")
+    let instant = crate::provenance::Instant::from_system_time(SystemTime::now());
+    Timestamp::new(instant.to_rfc3339()).expect("a canonical RFC 3339 timestamp is valid")
 }
 
 /// A fresh, unique snapshot identity, combining the parser version and a
@@ -1891,6 +2072,339 @@ mod tests {
         assert!(
             rustfmt.sections > 0,
             "the Markdown adapter emitted sections"
+        );
+    }
+
+    // -- Issue #152: real source provenance (content hash, freshness timestamps,
+    //    and upstream ETag / Last-Modified / pinned revision) is recorded during
+    //    sync. These five acceptance tests exercise the fix over a loopback
+    //    `FixtureServer` (no network) and through the real sync path. --
+
+    /// A captured document for the content-identity tests: raw `bytes` plus the
+    /// response metadata a content identity and freshness evidence are built
+    /// from. `etag`/`last_modified` are optional upstream evidence.
+    fn captured_doc(url: &str, bytes: &[u8], etag: Option<&str>) -> super::CapturedDocument {
+        super::CapturedDocument {
+            url: reqwest::Url::parse(url).expect("a valid capture URL"),
+            bytes: bytes.to_vec(),
+            etag: etag.map(str::to_string),
+            last_modified: None,
+        }
+    }
+
+    /// A minimal ingested source carrying exactly the given captured documents
+    /// (no sections / checklist), so a test can drive `content_hash` / the
+    /// representative `ETag` / `Last-Modified` directly over a captured set.
+    fn ingested_with_captured(docs: Vec<super::CapturedDocument>) -> super::IngestedSource {
+        let urls = docs.iter().map(|d| d.url.clone()).collect();
+        super::IngestedSource {
+            urls,
+            sections: Vec::new(),
+            checklist: Vec::new(),
+            captured: docs,
+        }
+    }
+
+    /// AC1 (issue #152): a content identity is computed over the captured
+    /// document *bytes* — distinct bodies hash distinctly, an unchanged body
+    /// hashes identically — never a constant per-source hash over the
+    /// collection id. The identity is also independent of fetch order (the
+    /// captured documents are URL-sorted before hashing).
+    #[test]
+    fn ac1_content_hash_distinguishes_bodies() {
+        // An identical body hashes identically.
+        let a = ingested_with_captured(vec![captured_doc("https://e/a", b"the body", None)])
+            .content_hash();
+        let b = ingested_with_captured(vec![captured_doc("https://e/a", b"the body", None)])
+            .content_hash();
+        assert_eq!(a, b, "an identical body must hash identically");
+
+        // A different body hashes differently.
+        let c =
+            ingested_with_captured(vec![captured_doc("https://e/a", b"a different body", None)])
+                .content_hash();
+        assert_ne!(a, c, "a different body must hash differently");
+
+        // The identity is order-independent: the captured documents are
+        // URL-sorted before hashing, so two fetch orders of the same documents
+        // hash identically.
+        let multi = ingested_with_captured(vec![
+            captured_doc("https://e/a", b"first", None),
+            captured_doc("https://e/b", b"second", None),
+        ])
+        .content_hash();
+        let multi_rev = ingested_with_captured(vec![
+            captured_doc("https://e/b", b"second", None),
+            captured_doc("https://e/a", b"first", None),
+        ])
+        .content_hash();
+        assert_eq!(
+            multi, multi_rev,
+            "the content identity is independent of fetch order"
+        );
+    }
+
+    /// AC2 (issue #152): a successful sync records a *parseable* `last_checked`
+    /// (a real instant, not a raw counter) and a *fresh* verdict — the source's
+    /// last check is the sync's "now", within the staleness threshold.
+    #[tokio::test]
+    async fn ac2_successful_sync_records_parseable_last_checked_and_fresh_verdict() {
+        use crate::provenance::{StaleThreshold, evaluate_freshness};
+
+        let server = FixtureServer::start(vec![(
+            "/style-guide/naming.html".to_string(),
+            Behavior::Text {
+                body: one_section_html("naming", "Naming").into_bytes(),
+                etag: Some("\"naming-1\"".to_string()),
+                last_modified: Some("Wed, 09 Oct 2024 06:00:00 GMT".to_string()),
+                content_type: Some("text/html".to_string()),
+            },
+        )]);
+        let client = loopback_client().expect("the loopback client builds");
+        let data_dir = temp_data_dir();
+        let url = reqwest::Url::parse(&format!("http://{}/style-guide/naming.html", server.addr))
+            .expect("a valid loopback URL");
+        let config = style_guide_config(url);
+
+        sync(&config, &data_dir, &client)
+            .await
+            .expect("a successful sync publishes a snapshot");
+
+        let loaded = crate::corpus::load_published_snapshot(&data_dir)
+            .expect("the snapshot is published and loadable");
+        let src = loaded
+            .body
+            .sources
+            .iter()
+            .find(|s| s.id.as_str() == "style-guide")
+            .expect("the style-guide source record is present");
+
+        // `last_checked` is recorded and is a real, parseable instant.
+        let last_checked = src
+            .last_checked
+            .as_ref()
+            .expect("a successful sync records a last_checked");
+        crate::provenance::Instant::parse(last_checked.as_str())
+            .expect("a recorded last_checked is a real, parseable instant");
+
+        // ... and it yields a fresh verdict: the check is the sync's "now",
+        // within the threshold.
+        let as_of = crate::provenance::Instant::from_system_time(std::time::SystemTime::now());
+        let verdict = evaluate_freshness(src, as_of, StaleThreshold::default());
+        assert_eq!(
+            verdict.stale,
+            Some(false),
+            "a just-synced source is fresh, not stale"
+        );
+    }
+
+    /// AC3 (issue #152): a no-change refresh (a second sync over identical
+    /// captured content) preserves the content *identity* — the content hash and
+    /// the download time are unchanged — while the *check time advances* (the
+    /// second check stamps a later-or-equal instant). The two syncs share a data
+    /// directory, so the second reads the first's published snapshot as its
+    /// `previous` and measures "unchanged" against it.
+    #[tokio::test]
+    async fn ac3_no_change_refresh_preserves_identity_and_advances_check_time() {
+        let server = FixtureServer::start(vec![(
+            "/style-guide/naming.html".to_string(),
+            Behavior::Text {
+                body: one_section_html("naming", "Naming").into_bytes(),
+                etag: Some("\"naming-1\"".to_string()),
+                last_modified: Some("Wed, 09 Oct 2024 06:00:00 GMT".to_string()),
+                content_type: Some("text/html".to_string()),
+            },
+        )]);
+        let client = loopback_client().expect("the loopback client builds");
+        let data_dir = temp_data_dir();
+        let url = reqwest::Url::parse(&format!("http://{}/style-guide/naming.html", server.addr))
+            .expect("a valid loopback URL");
+        let config = style_guide_config(url);
+
+        // The first sync publishes the snapshot.
+        sync(&config, &data_dir, &client)
+            .await
+            .expect("the first sync publishes");
+        let m1 = crate::corpus::load_published_snapshot(&data_dir)
+            .expect("the first snapshot is loadable");
+        let s1 = m1
+            .body
+            .sources
+            .iter()
+            .find(|s| s.id.as_str() == "style-guide")
+            .expect("the style-guide record is present in the first snapshot");
+
+        // The second sync reads the first's published snapshot as `previous` and
+        // finds the content unchanged (the fixture serves identical bytes).
+        sync(&config, &data_dir, &client)
+            .await
+            .expect("the second sync publishes");
+        let m2 = crate::corpus::load_published_snapshot(&data_dir)
+            .expect("the second snapshot is loadable");
+        let s2 = m2
+            .body
+            .sources
+            .iter()
+            .find(|s| s.id.as_str() == "style-guide")
+            .expect("the style-guide record is present in the second snapshot");
+
+        // Content identity is preserved across the no-change refresh.
+        assert_eq!(
+            s1.content_hash, s2.content_hash,
+            "a no-change refresh preserves the content identity"
+        );
+        assert_eq!(
+            s1.fetched_at, s2.fetched_at,
+            "a no-change refresh preserves the download time"
+        );
+        // The check time advanced: the second check stamped a later-or-equal
+        // instant (it can only equal under the same clock instant, never go
+        // backward).
+        let lc1 = crate::provenance::Instant::parse(
+            s1.last_checked
+                .as_ref()
+                .expect("the first sync recorded a check time")
+                .as_str(),
+        )
+        .expect("the first check time parses");
+        let lc2 = crate::provenance::Instant::parse(
+            s2.last_checked
+                .as_ref()
+                .expect("the second sync recorded a check time")
+                .as_str(),
+        )
+        .expect("the second check time parses");
+        assert!(
+            lc2 >= lc1,
+            "the check time advanced (or held) on the no-change refresh"
+        );
+    }
+
+    /// AC4 (issue #152): a sync retains the upstream `ETag` and `Last-Modified`
+    /// evidence on the source record (the `ETag` is the URL-representative one;
+    /// the `Last-Modified` is the most-recent parseable hint, normalized to UTC
+    /// RFC 3339), and rustfmt's record carries its approved *pinned revision* as
+    /// release provenance.
+    #[tokio::test]
+    async fn ac4_etag_last_modified_and_pinned_revision_retained() {
+        // Only `README.md` carries the `ETag` / `Last-Modified` evidence, so the
+        // representative `ETag` is unambiguous and the `Last-Modified` hint is
+        // the one the upstream supplied.
+        let readme = "rustfmt is a tool for formatting Rust code.\n\n## Configuration\n\nrustfmt reads its options from a `rustfmt.toml` file.\n";
+        let configs = "The rustfmt configuration options reference.\n\n## Stable options\n\nA stable formatting option that is always available.\n";
+        let server = FixtureServer::start(vec![
+            (
+                "/rustfmt/README.md".to_string(),
+                Behavior::Text {
+                    body: readme.as_bytes().to_vec(),
+                    etag: Some("\"readme-42\"".to_string()),
+                    last_modified: Some("Mon, 13 May 2024 14:30:00 GMT".to_string()),
+                    content_type: Some("text/markdown; charset=utf-8".to_string()),
+                },
+            ),
+            (
+                "/rustfmt/Configurations.md".to_string(),
+                Behavior::Text {
+                    body: configs.as_bytes().to_vec(),
+                    etag: None,
+                    last_modified: None,
+                    content_type: Some("text/markdown; charset=utf-8".to_string()),
+                },
+            ),
+        ]);
+        let client = loopback_client().expect("the loopback client builds");
+        let data_dir = temp_data_dir();
+        let readme_url = reqwest::Url::parse(&format!("http://{}/rustfmt/README.md", server.addr))
+            .expect("a valid loopback URL");
+        let configs_url =
+            reqwest::Url::parse(&format!("http://{}/rustfmt/Configurations.md", server.addr))
+                .expect("a valid loopback URL");
+        let config = SyncConfig {
+            parser_version: "test/152".to_string(),
+            sources: vec![SourceId::new("rustfmt").expect("a registry id is URI-safe")],
+            direct: None,
+            rustfmt_urls: Some(vec![readme_url, configs_url]),
+            require_complete: false,
+        };
+
+        sync(&config, &data_dir, &client)
+            .await
+            .expect("the rustfmt sync succeeds through its own adapter");
+        let loaded = crate::corpus::load_published_snapshot(&data_dir)
+            .expect("the snapshot is published and loadable");
+        let rustfmt = loaded
+            .body
+            .sources
+            .iter()
+            .find(|s| s.id.as_str() == "rustfmt")
+            .expect("the rustfmt source record is present");
+
+        // The `ETag` the upstream supplied is retained on the record.
+        assert_eq!(
+            rustfmt.etag.as_deref(),
+            Some("\"readme-42\""),
+            "the captured ETag is retained on the record"
+        );
+        // The `Last-Modified` hint is retained and parseable, normalized to
+        // UTC RFC 3339.
+        let um = rustfmt
+            .upstream_modified
+            .as_ref()
+            .expect("the Last-Modified hint is retained");
+        let parsed =
+            crate::provenance::Instant::parse(um.as_str()).expect("the hint is a real instant");
+        assert_eq!(
+            parsed.to_rfc3339(),
+            "2024-05-13T14:30:00Z",
+            "the HTTP-date Last-Modified normalizes to UTC RFC 3339"
+        );
+        // rustfmt's record carries its approved pinned revision as provenance.
+        assert_eq!(
+            rustfmt.release.revision.as_deref(),
+            Some(crate::ingest::rustfmt::APPROVED_REVISION),
+            "the pinned revision is retained on rustfmt's record"
+        );
+    }
+
+    /// AC5 (issue #152): the sync's timestamps are canonical RFC 3339 and
+    /// round-trip through `Instant::parse` — `now_timestamp` emits a parseable
+    /// instant, a parsed instant's canonical form round-trips exactly, and an
+    /// HTTP-date `Last-Modified` hint parses to the same instant its RFC 3339
+    /// spelling would (so a captured hint and a `last_checked` share one
+    /// representation).
+    #[test]
+    fn ac5_timestamps_round_trip_through_instant_parse() {
+        use crate::provenance::Instant;
+
+        // The sync's "now" stamp is RFC 3339 and round-trips.
+        let now = super::now_timestamp();
+        let parsed = Instant::parse(now.as_str()).expect("now_timestamp emits RFC 3339");
+        assert_eq!(
+            parsed.to_rfc3339(),
+            now.as_str(),
+            "the sync's stamp round-trips exactly"
+        );
+
+        // Parsed instants of the canonical grammar round-trip exactly, including
+        // the pre-epoch and far-future boundaries.
+        for literal in [
+            "1970-01-01T00:00:00Z",
+            "2024-05-13T14:30:00Z",
+            "2037-12-31T23:59:59Z",
+        ] {
+            let i = Instant::parse(literal).expect("a valid RFC 3339 literal");
+            assert_eq!(i.to_rfc3339(), literal, "round-trips: {literal}");
+        }
+
+        // An HTTP-date `Last-Modified` hint parses (via the dual-path
+        // `parse_date_time`) to the same instant its RFC 3339 spelling does, so a
+        // captured hint and a `last_checked` share one representation.
+        let http = crate::provenance::parse_date_time("Mon, 13 May 2024 14:30:00 GMT")
+            .expect("the HTTP-date hint parses");
+        assert_eq!(
+            http.to_rfc3339(),
+            "2024-05-13T14:30:00Z",
+            "the HTTP-date hint normalizes to the same instant as its RFC 3339 spelling"
         );
     }
 }

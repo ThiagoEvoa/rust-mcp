@@ -759,9 +759,17 @@ pub struct Source {
     /// When this content was downloaded.
     pub fetched_at: Timestamp,
     /// The known upstream modification time, when available; `None` means
-    /// unknown.
+    /// unknown. When present it is canonicalised to the same RFC 3339 UTC
+    /// grammar `fetched_at`/`last_checked` use, so every recorded timestamp
+    /// round-trips through `Instant::parse` (issue #152).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_modified: Option<Timestamp>,
+    /// The upstream `ETag` carried through ingestion when the fetch layer saw
+    /// one — a cheap cache identity / freshness hint retained on the source
+    /// record (issue #152). `None` when no upstream supplied an ETag: an honest
+    /// "we don't know," preserved rather than defaulted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
     /// Hash identifying the captured content of this source.
     pub content_hash: CorpusHash,
     /// The documentation release / channel / revision this was captured from;
@@ -1756,6 +1764,7 @@ mod tests {
                     last_checked: Some(Timestamp::new("2026-10-28T00:00:00Z").unwrap()),
                     fetched_at: Timestamp::new("2026-10-30T00:00:00Z").unwrap(),
                     upstream_modified: None,
+                    etag: None,
                     content_hash: CorpusHash::compute(b"cargo"),
                     release: Release::channel_only(Channel::Stable),
                     parser: "books/2024".into(),

@@ -1122,6 +1122,7 @@ mod tests {
             last_checked: None,
             fetched_at: Timestamp::new("2026-10-30T00:00:00Z").unwrap(),
             upstream_modified: None,
+            etag: None,
             content_hash: CorpusHash::compute(b"fixture"),
             release: Release::channel_only(Channel::Stable),
             parser: "test/1".into(),
