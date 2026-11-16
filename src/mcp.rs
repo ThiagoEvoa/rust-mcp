@@ -536,12 +536,18 @@ impl DocsServer {
         tool: &str,
         args: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<T, ErrorData> {
+        // #154: route the malformed-args error through the same final
+        // serialized-size backstop as every other error-construction site in
+        // `dispatch_call`/`dispatch_read`, so no error response can exceed the
+        // cap even if an input cap is bypassed. For a normally-sized error the
+        // backstop is a no-op
+        // (`protocol_error::bound_error_response_is_a_noop_for_small_errors`).
         serde_json::from_value(serde_json::Value::Object(args.clone())).map_err(|e| {
-            ErrorData::new(
+            protocol_error::bound_error(ErrorData::new(
                 ErrorCode::INVALID_PARAMS,
                 format!("the '{tool}' request arguments could not be parsed: {e}"),
                 Some(serde_json::json!({ "tool": tool })),
-            )
+            ))
         })
     }
 }
