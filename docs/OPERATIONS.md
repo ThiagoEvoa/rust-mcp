@@ -54,7 +54,7 @@ rust-docs-mcp inspect
 | `serve` | No | Launch the stdio MCP server on the selected immutable snapshot; run until the client disconnects. |
 | `sync` | **Yes** (the only one) | Refresh the corpus from the official sources and atomically publish a new snapshot. |
 | `status` | No | Report the selected snapshot's identity, source/section counts, and per-source freshness against a configurable threshold. |
-| `inspect` | No | Operator view: corpus coverage and extraction fidelity over the active snapshot. |
+| `inspect` | No | Operator view: corpus coverage and extraction fidelity over the **active loaded corpus** (the corpus's own sections, with the inspected snapshot identity and section count). Reports a complete/incomplete verdict and exits non-zero on a load failure or an incomplete inspection. |
 
 Two **global** flags are accepted **before or after** the subcommand (they are the
 same option in every position):
