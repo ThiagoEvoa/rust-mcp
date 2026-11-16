@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html>
+<head><title>Clippy: lints (curated seed subset)</title></head>
+<body>
+<h1>Lint catalog</h1>
+<article id="unwrap_used"><input id="label-unwrap_used" type="checkbox"><label for="label-unwrap_used"><h2 class="lint-title"><div class="panel-title-name" id="lint-unwrap_used">unwrap_used
+<a href="#unwrap_used" class="anchor label">&para;</a> <a href="" class="copy-to-clipboard anchor label">&#128203;</a></div><span class="label lint-group group-restriction">restriction</span> <span class="label lint-level level-allow">allow</span> <span class="label doc-folding"></span></h2></label><div class="lint-docs"><div class="lint-doc-md"><h3>What it does</h3>
+<p>Checks for <code>.unwrap()</code> or <code>.unwrap_err()</code> calls on <code>Result</code>s and <code>.unwrap()</code> call on <code>Option</code>s.</p>
+<h3>Why restrict this?</h3>
+<p>It is better to handle the <code>None</code> or <code>Err</code> case,
+or at least call <code>.expect(_)</code> with a more helpful message. Still, for a lot of
+quick-and-dirty code, <code>unwrap</code> is a good choice, which is why this lint is
+<code>Allow</code> by default.</p>
+<p><code>result.unwrap()</code> will let the thread panic on <code>Err</code> values.
+Normally, you want to implement more sophisticated error handling,
+and propagate errors upwards with <code>?</code> operator.</p>
+<p>Even if you want to panic on errors, not all <code>Error</code>s implement good
+messages on display. Therefore, it may be beneficial to look at the places
+where they may get displayed. Activate this lint to do just that.</p>
+<h3>Examples</h3>
+<pre><code class="language-rust">option.unwrap();
+result.unwrap();
+</code></pre>
+<p>Use instead:</p>
+<pre><code class="language-rust">option.expect("more helpful message");
+result.expect("more helpful message");
+</code></pre>
+<p>If <a href="#expect_used">expect_used</a> is enabled, instead:</p>
+<pre><code class="language-rust">option?;
+
+// or
+
+result?;
+</code></pre>
+<h3>Past names</h3>
+<ul>
+<li>option_unwrap_used</li>
+<li>result_unwrap_used</li>
+</ul>
+<h3>Configuration</h3>
+<ul>
+<li>
+<p><code>allow-unwrap-in-consts</code>:  Whether <code>unwrap</code> should be allowed in code always evaluated at compile time</p>
+<p>(default: <code>true</code>)</p>
+</li>
+<li>
+<p><code>allow-unwrap-in-tests</code>:  Whether <code>unwrap</code> should be allowed in test functions or <code>#[cfg(test)]</code></p>
+<p>(default: <code>false</code>)</p>
+</li>
+<li>
+<p><code>allow-unwrap-types</code>:  List of types to allow <code>unwrap()</code> and <code>expect()</code> on.</p>
+</li>
+</ul>
+<h4>Example</h4>
+<pre><code class="language-toml">allow-unwrap-types = [ "std::sync::LockResult" ]
+</code></pre>
+<p>(default: <code>[]</code>)</p>
+</div><div class="lint-additional-info"><div>Applicability: <span class="label applicability">Unspecified</span><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_lint_defs/enum.Applicability.html#variants">(?)</a></div><div>Added in: <span class="label label-version">1.45.0</span></div><a href="https://github.com/rust-lang/rust-clippy/issues?q=is%3Aissue+unwrap_used">Related Issues</a><a href="https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/methods/mod.rs#L4751">View Source</a></div></div></article>
+<article id="clone_on_copy"><input id="label-clone_on_copy" type="checkbox"><label for="label-clone_on_copy"><h2 class="lint-title"><div class="panel-title-name" id="lint-clone_on_copy">clone_on_copy
+<a href="#clone_on_copy" class="anchor label">&para;</a> <a href="" class="copy-to-clipboard anchor label">&#128203;</a></div><span class="label lint-group group-complexity">complexity</span> <span class="label lint-level level-warn">warn</span> <span class="label doc-folding"></span></h2></label><div class="lint-docs"><div class="lint-doc-md"><h3>What it does</h3>
+<p>Checks for usage of <code>.clone()</code> on a <code>Copy</code> type.</p>
+<h3>Why is this bad?</h3>
+<p>The only reason <code>Copy</code> types implement <code>Clone</code> is for
+generics, not for using the <code>clone</code> method on a concrete type.</p>
+<h3>Example</h3>
+<pre><code class="language-rust">42u64.clone();
+</code></pre>
+</div><div class="lint-additional-info"><div>Applicability: <span class="label applicability">MachineApplicable</span><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_lint_defs/enum.Applicability.html#variants">(?)</a></div><div>Added in: <span class="label label-version">pre 1.29.0</span></div><a href="https://github.com/rust-lang/rust-clippy/issues?q=is%3Aissue+clone_on_copy">Related Issues</a><a href="https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/methods/mod.rs#L422">View Source</a></div></div></article>
+<article id="expect_used"><input id="label-expect_used" type="checkbox"><label for="label-expect_used"><h2 class="lint-title"><div class="panel-title-name" id="lint-expect_used">expect_used
+<a href="#expect_used" class="anchor label">&para;</a> <a href="" class="copy-to-clipboard anchor label">&#128203;</a></div><span class="label lint-group group-restriction">restriction</span> <span class="label lint-level level-allow">allow</span> <span class="label doc-folding"></span></h2></label><div class="lint-docs"><div class="lint-doc-md"><h3>What it does</h3>
+<p>Checks for <code>.expect()</code> or <code>.expect_err()</code> calls on <code>Result</code>s and <code>.expect()</code> call on <code>Option</code>s.</p>
+<h3>Why restrict this?</h3>
+<p>Usually it is better to handle the <code>None</code> or <code>Err</code> case.
+Still, for a lot of quick-and-dirty code, <code>expect</code> is a good choice, which is why
+this lint is <code>Allow</code> by default.</p>
+<p><code>result.expect()</code> will let the thread panic on <code>Err</code>
+values. Normally, you want to implement more sophisticated error handling,
+and propagate errors upwards with <code>?</code> operator.</p>
+<h3>Examples</h3>
+<pre><code class="language-rust">option.expect("one");
+result.expect("one");
+</code></pre>
+<p>Use instead:</p>
+<pre><code class="language-rust">option?;
+
+// or
+
+result?;
+</code></pre>
+<h3>Past names</h3>
+<ul>
+<li>option_expect_used</li>
+<li>result_expect_used</li>
+</ul>
+<h3>Configuration</h3>
+<ul>
+<li>
+<p><code>allow-expect-in-consts</code>:  Whether <code>expect</code> should be allowed in code always evaluated at compile time</p>
+<p>(default: <code>true</code>)</p>
+</li>
+<li>
+<p><code>allow-expect-in-tests</code>:  Whether <code>expect</code> should be allowed in test functions or <code>#[cfg(test)]</code></p>
+<p>(default: <code>false</code>)</p>
+</li>
+<li>
+<p><code>allow-unwrap-types</code>:  List of types to allow <code>unwrap()</code> and <code>expect()</code> on.</p>
+</li>
+</ul>
+<h4>Example</h4>
+<pre><code class="language-toml">allow-unwrap-types = [ "std::sync::LockResult" ]
+</code></pre>
+<p>(default: <code>[]</code>)</p>
+</div><div class="lint-additional-info"><div>Applicability: <span class="label applicability">Unspecified</span><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_lint_defs/enum.Applicability.html#variants">(?)</a></div><div>Added in: <span class="label label-version">1.45.0</span></div><a href="https://github.com/rust-lang/rust-clippy/issues?q=is%3Aissue+expect_used">Related Issues</a><a href="https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/methods/mod.rs#L669">View Source</a></div></div></article>
+<article id="redundant_clone"><input id="label-redundant_clone" type="checkbox"><label for="label-redundant_clone"><h2 class="lint-title"><div class="panel-title-name" id="lint-redundant_clone">redundant_clone
+<a href="#redundant_clone" class="anchor label">&para;</a> <a href="" class="copy-to-clipboard anchor label">&#128203;</a></div><span class="label lint-group group-nursery">nursery</span> <span class="label lint-level level-allow">allow</span> <span class="label doc-folding"></span></h2></label><div class="lint-docs"><div class="lint-doc-md"><h3>What it does</h3>
+<p>Checks for a redundant <code>clone()</code> (and its relatives) which clones an owned
+value that is going to be dropped without further use.</p>
+<h3>Why is this bad?</h3>
+<p>It is not always possible for the compiler to eliminate useless
+allocations and deallocations generated by redundant <code>clone()</code>s.</p>
+<h3>Known problems</h3>
+<p>False-negatives: analysis performed by this lint is conservative and limited.</p>
+<h3>Example</h3>
+<pre><code class="language-rust">{
+    let x = Foo::new();
+    call(x.clone());
+    call(x.clone()); // this can just pass `x`
+}
+
+["lorem", "ipsum"].join(" ").to_string();
+
+Path::new("/a/b").join("c").to_path_buf();
+</code></pre>
+</div><div class="lint-additional-info"><div>Applicability: <span class="label applicability">MachineApplicable</span><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_lint_defs/enum.Applicability.html#variants">(?)</a></div><div>Added in: <span class="label label-version">1.32.0</span></div><a href="https://github.com/rust-lang/rust-clippy/issues?q=is%3Aissue+redundant_clone">Related Issues</a><a href="https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/redundant_clone.rs#L19">View Source</a></div></div></article>
+<article id="new_without_default"><input id="label-new_without_default" type="checkbox"><label for="label-new_without_default"><h2 class="lint-title"><div class="panel-title-name" id="lint-new_without_default">new_without_default
+<a href="#new_without_default" class="anchor label">&para;</a> <a href="" class="copy-to-clipboard anchor label">&#128203;</a></div><span class="label lint-group group-style">style</span> <span class="label lint-level level-warn">warn</span> <span class="label doc-folding"></span></h2></label><div class="lint-docs"><div class="lint-doc-md"><h3>What it does</h3>
+<p>Checks for public types with a <code>pub fn new() -&gt; Self</code> method and no
+implementation of
+<a href="https://doc.rust-lang.org/std/default/trait.Default.html"><code>Default</code></a>.</p>
+<h3>Why is this bad?</h3>
+<p>The user might expect to be able to use
+<a href="https://doc.rust-lang.org/std/default/trait.Default.html"><code>Default</code></a> as the
+type can be constructed without arguments.</p>
+<h3>Example</h3>
+<pre><code class="language-rust">pub struct Foo(Bar);
+
+impl Foo {
+    pub fn new() -&gt; Self {
+        Foo(Bar::new())
+    }
+}
+</code></pre>
+<p>To fix the lint, add a <code>Default</code> implementation that delegates to <code>new</code>:</p>
+<pre><code class="language-rust">pub struct Foo(Bar);
+
+impl Default for Foo {
+    fn default() -&gt; Self {
+        Foo::new()
+    }
+}
+</code></pre>
+<h3>Past names</h3>
+<ul>
+<li>new_without_default_derive</li>
+</ul>
+</div><div class="lint-additional-info"><div>Applicability: <span class="label applicability">MachineApplicable</span><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_lint_defs/enum.Applicability.html#variants">(?)</a></div><div>Added in: <span class="label label-version">pre 1.29.0</span></div><a href="https://github.com/rust-lang/rust-clippy/issues?q=is%3Aissue+new_without_default">Related Issues</a><a href="https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/new_without_default.rs#L13">View Source</a></div></div></article>
+<article id="panic"><input id="label-panic" type="checkbox"><label for="label-panic"><h2 class="lint-title"><div class="panel-title-name" id="lint-panic">panic
+<a href="#panic" class="anchor label">&para;</a> <a href="" class="copy-to-clipboard anchor label">&#128203;</a></div><span class="label lint-group group-restriction">restriction</span> <span class="label lint-level level-allow">allow</span> <span class="label doc-folding"></span></h2></label><div class="lint-docs"><div class="lint-doc-md"><h3>What it does</h3>
+<p>Checks for usage of <code>panic!</code>.</p>
+<h3>Why restrict this?</h3>
+<p>This macro, or panics in general, may be unwanted in production code.</p>
+<h3>Example</h3>
+<pre><code class="language-rust">panic!("even with a good reason");
+</code></pre>
+<h3>Configuration</h3>
+<ul>
+<li>
+<p><code>allow-panic-in-tests</code>:  Whether <code>panic</code> should be allowed in test functions or <code>#[cfg(test)]</code></p>
+<p>(default: <code>false</code>)</p>
+</li>
+</ul>
+</div><div class="lint-additional-info"><div>Applicability: <span class="label applicability">Unspecified</span><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_lint_defs/enum.Applicability.html#variants">(?)</a></div><div>Added in: <span class="label label-version">1.40.0</span></div><a href="https://github.com/rust-lang/rust-clippy/issues?q=is%3Aissue+panic">Related Issues</a><a href="https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/panic_unimplemented.rs#L21">View Source</a></div></div></article>
+<article id="while_let_on_iterator"><input id="label-while_let_on_iterator" type="checkbox"><label for="label-while_let_on_iterator"><h2 class="lint-title"><div class="panel-title-name" id="lint-while_let_on_iterator">while_let_on_iterator
+<a href="#while_let_on_iterator" class="anchor label">&para;</a> <a href="" class="copy-to-clipboard anchor label">&#128203;</a></div><span class="label lint-group group-style">style</span> <span class="label lint-level level-warn">warn</span> <span class="label doc-folding"></span></h2></label><div class="lint-docs"><div class="lint-doc-md"><h3>What it does</h3>
+<p>Checks for <code>while let</code> expressions on iterators.</p>
+<h3>Why is this bad?</h3>
+<p>Readability. A simple <code>for</code> loop is shorter and conveys
+the intent better.</p>
+<h3>Example</h3>
+<pre><code class="language-rust">while let Some(val) = iter.next() {
+    ..
+}
+</code></pre>
+<p>Use instead:</p>
+<pre><code class="language-rust">for val in &amp;mut iter {
+    ..
+}
+</code></pre>
+</div><div class="lint-additional-info"><div>Applicability: <span class="label applicability">MachineApplicable</span><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_lint_defs/enum.Applicability.html#variants">(?)</a></div><div>Added in: <span class="label label-version">pre 1.29.0</span></div><a href="https://github.com/rust-lang/rust-clippy/issues?q=is%3Aissue+while_let_on_iterator">Related Issues</a><a href="https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/loops/mod.rs#L790">View Source</a></div></div></article>
+<article id="missing_panics_doc"><input id="label-missing_panics_doc" type="checkbox"><label for="label-missing_panics_doc"><h2 class="lint-title"><div class="panel-title-name" id="lint-missing_panics_doc">missing_panics_doc
+<a href="#missing_panics_doc" class="anchor label">&para;</a> <a href="" class="copy-to-clipboard anchor label">&#128203;</a></div><span class="label lint-group group-pedantic">pedantic</span> <span class="label lint-level level-allow">allow</span> <span class="label doc-folding"></span></h2></label><div class="lint-docs"><div class="lint-doc-md"><h3>What it does</h3>
+<p>Checks the doc comments of publicly visible functions that
+may panic and warns if there is no <code># Panics</code> section.</p>
+<h3>Why is this bad?</h3>
+<p>Documenting the scenarios in which panicking occurs
+can help callers who do not want to panic to avoid those situations.</p>
+<h3>Examples</h3>
+<p>Since the following function may panic it has a <code># Panics</code> section in
+its doc comment:</p>
+<pre><code class="language-rust">/// # Panics
+///
+/// Will panic if y is 0
+pub fn divide_by(x: i32, y: i32) -&gt; i32 {
+    if y == 0 {
+        panic!("Cannot divide by 0")
+    } else {
+        x / y
+    }
+}
+</code></pre>
+<p>Individual panics within a function can be ignored with <code>#[expect]</code> or
+<code>#[allow]</code>:</p>
+<pre><code class="language-rust">pub fn will_not_panic(x: usize) {
+    #[expect(clippy::missing_panics_doc, reason = "infallible")]
+    let y = NonZeroUsize::new(1).unwrap();
+
+    // If any panics are added in the future the lint will still catch them
+}
+</code></pre>
+<h3>Configuration</h3>
+<ul>
+<li>
+<p><code>check-private-items</code>:  Whether to also run the listed lints on private items.</p>
+<p>(default: <code>false</code>)</p>
+</li>
+</ul>
+</div><div class="lint-additional-info"><div>Applicability: <span class="label applicability">Unspecified</span><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_lint_defs/enum.Applicability.html#variants">(?)</a></div><div>Added in: <span class="label label-version">1.51.0</span></div><a href="https://github.com/rust-lang/rust-clippy/issues?q=is%3Aissue+missing_panics_doc">Related Issues</a><a href="https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/doc/mod.rs#L452">View Source</a></div></div></article>
+</body>
+</html>

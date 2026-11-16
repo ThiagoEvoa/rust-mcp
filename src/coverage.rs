@@ -556,8 +556,8 @@ mod tests {
 
     /// The bundled seed, loaded through the same version gate the runtime uses,
     /// so the coverage tests exercise the real corpus rather than a fabricated
-    /// one. This is also the seed-vs-fixture split the task asks to report
-    /// honestly: the seed is a representative subset, not every content type.
+    /// one. The seed is now the full, faithfully captured upstream corpus, so
+    /// the coverage tests report against that real content.
     fn seed_manifest() -> SnapshotManifest {
         SnapshotManifest::from_json_str(crate::bundled::JSON).expect("bundled seed loads")
     }
@@ -567,9 +567,19 @@ mod tests {
         let report = record_coverage(&seed_manifest());
 
         assert_eq!(report.source_count, 8, "seed has all eight sources");
-        assert_eq!(report.section_count, 8, "seed has eight sections");
-        assert_eq!(report.checklist_entries, 1, "seed has the C-CONV checklist");
-        assert_eq!(report.command_entries, 3, "seed has three commands");
+        assert_eq!(
+            report.section_count, 544,
+            "seed captures the full upstream corpus"
+        );
+        assert_eq!(
+            report.checklist_entries, 15,
+            "seed carries the upstream checklist"
+        );
+        assert_eq!(
+            report.command_entries, 11,
+            "seed carries the routine command families: the eight cargo subcommands \n\
+             (build/test/check/fmt/clippy/doc/add/new) plus rustup show, rustc, and rustfmt"
+        );
         assert_eq!(
             report.per_collection.len(),
             SourceCollection::ALL.len(),
@@ -645,16 +655,25 @@ mod tests {
         let report = record_coverage(&seed_manifest());
         let doc_sum: usize = report.per_collection.iter().map(|c| c.document_count).sum();
         let section_sum: usize = report.per_collection.iter().map(|c| c.section_count).sum();
-        // The seed carries one document per source and every section belongs to
-        // a registered collection, so the per-collection breakdowns reconcile
-        // with the corpus totals.
-        assert_eq!(
-            doc_sum, report.source_count,
-            "document counts sum to sources"
-        );
+        let manifest = seed_manifest();
+        // Every section belongs to a registered collection, so the per-collection
+        // section breakdown reconciles with the corpus section total.
         assert_eq!(
             section_sum, report.section_count,
             "section counts sum to sections",
+        );
+        // Documents are counted per source's document_urls (a source may carry
+        // more than one document, e.g. api-guidelines' four pages), so the
+        // document breakdown reconciles with the corpus's document total.
+        let doc_total = manifest
+            .body
+            .sources
+            .iter()
+            .map(|s| s.document_urls.len())
+            .sum::<usize>();
+        assert_eq!(
+            doc_sum, doc_total,
+            "document counts sum to the corpus's documents"
         );
     }
 
@@ -749,45 +768,17 @@ mod tests {
 
     #[test]
     fn seed_records_which_types_it_actually_covers() {
-        // The bundled seed is a representative subset (by design), so it does not
-        // exercise every content type. Record what it *does* cover honestly
-        // rather than fabricating the rest; the dedicated representative
-        // fixtures above close the remaining types.
+        // The bundled seed is now the full, faithfully captured upstream corpus,
+        // so it exercises every content type the extractors must retain offline.
+        // The fidelity report records all of them present, with no recorded gap.
         let report = inspect_fidelity(&seed_manifest().body.sections);
 
-        assert_eq!(report.sections_inspected, 8);
-        // The seed carries command syntax (two command sections), stability
-        // callouts (qualifications on five sections), and no leaked chrome.
-        for ty in [
-            FidelityType::CommandSyntax,
-            FidelityType::StabilityCallout,
-            FidelityType::NoNavigationOrScripts,
-        ] {
-            assert!(
-                report.present.contains(&ty),
-                "seed should cover {ty:?}: absent={:?}",
-                report.absent,
-            );
-        }
-        // The seed does NOT carry nested headings, anchors, lists, tables,
-        // relative links, lint "known issues" notes, or fenced examples. Each is
-        // a recorded gap, proven retained by the representative fixtures in
-        // `fidelity_reports_every_content_type_present`.
-        for ty in [
-            FidelityType::NestedHeading,
-            FidelityType::Anchor,
-            FidelityType::List,
-            FidelityType::Table,
-            FidelityType::RelativeLink,
-            FidelityType::LintKnownIssues,
-            FidelityType::FencedExample,
-        ] {
-            assert!(
-                report.absent.contains(&ty),
-                "seed should not cover {ty:?}: present={:?}",
-                report.present,
-            );
-        }
+        assert_eq!(report.sections_inspected, 544);
+        assert!(
+            report.all_types_present(),
+            "the faithful seed covers every content type: {}",
+            report.render(),
+        );
     }
 
     #[test]

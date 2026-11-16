@@ -206,20 +206,21 @@ async fn assembled_surface_serves_offline_without_network_or_sync() {
     );
 
     // (2) search_docs works offline *across all eight sources* (plan §11: "search
-    //     across all eight sources"). Each source carries exactly one section in
-    //     the embedded bundle, so a source-specific query returns that section's
-    //     single hit offline. A per-source loop over the eight registry ids proves
-    //     cross-source search — not one source — while every response naming the
-    //     embedded snapshot proves the search is offline, not a network lookup.
+    //     across all eight sources"). Each source carries many sections in the
+    //     faithful upstream bundle, so a source-specific query returns that
+    //     source's hits offline. A per-source loop over the eight registry ids
+    //     proves cross-source search — not one source — while every response
+    //     naming the embedded snapshot proves the search is offline, not a network
+    //     lookup.
     let per_source_queries: &[(&str, &str)] = &[
         ("api-guidelines", "guideline"),
-        ("style-guide", "conventions"),
+        ("style-guide", "format"),
         ("cargo", "package"),
         ("rustc", "diagnostics"),
-        ("rustup", "installer"),
-        ("rustfmt", "formatter"),
-        ("clippy", "renamed"),
-        ("rustdoc", "generator"),
+        ("rustup", "install"),
+        ("rustfmt", "whitespace"),
+        ("clippy", "lint"),
+        ("rustdoc", "crate"),
     ];
     for (source, query) in per_source_queries {
         let ctx = format!("search_docs {source}");
@@ -262,10 +263,7 @@ async fn assembled_surface_serves_offline_without_network_or_sync() {
     let checklist = complete(
         server
             .dispatch_call(
-                call(
-                    "get_api_checklist",
-                    &[("category", json!("Conversions and From"))],
-                ),
+                call("get_api_checklist", &[("category", json!("Naming"))]),
                 Some(&version),
             )
             .await,
@@ -291,7 +289,10 @@ async fn assembled_surface_serves_offline_without_network_or_sync() {
             .dispatch_call(
                 call(
                     "get_section",
-                    &[("section_id", json!("api-guidelines/about"))],
+                    &[(
+                        "section_id",
+                        json!("api-guidelines/about#rust-api-guidelines"),
+                    )],
                 ),
                 Some(&version),
             )
@@ -348,7 +349,9 @@ async fn assembled_surface_serves_offline_without_network_or_sync() {
         serde_json::from_str::<Value>(&catalog).is_ok(),
         "the catalog resource reads as JSON offline"
     );
-    let section_uri = format!("rust-docs://snapshots/{snapshot_id}/sections/api-guidelines/about");
+    let section_uri = format!(
+        "rust-docs://snapshots/{snapshot_id}/sections/api-guidelines/about#rust-api-guidelines"
+    );
     let section_resource = resource_text(
         server
             .dispatch_read(ReadResourceRequestParams::new(&section_uri), Some(&version))
@@ -393,7 +396,7 @@ async fn adversarial_inputs_are_refused_never_executed_fetched_or_read() {
     let ok_read = server
         .dispatch_read(
             ReadResourceRequestParams::new(format!(
-                "rust-docs://snapshots/{snapshot_id}/sections/api-guidelines/about"
+                "rust-docs://snapshots/{snapshot_id}/sections/api-guidelines/about#rust-api-guidelines"
             )),
             Some(&version),
         )

@@ -321,6 +321,17 @@ pub(crate) fn split_markdown_sections(
     flush_block(&mut block, &mut open.segments);
     sections.push(open.finish());
 
+    // Drop heading-less, content-free sections: an empty preamble (a file that
+    // opens on a heading, as `README.md`/`Configurations.md` do, leaves no
+    // content before the first heading) or an empty trailing section is an
+    // artifact of the open/close bookkeeping, not a real section — and an empty
+    // body is exactly what `validate_snapshot` rejects. A heading-less section
+    // that *does* carry a preamble (content before the first heading) is kept.
+    let sections: Vec<ArticleSection> = sections
+        .into_iter()
+        .filter(|s| s.heading.is_some() || s.segments.iter().any(|b| !b.trim().is_empty()))
+        .collect();
+
     // An empty shell (no heading and no content in any section) is a failure,
     // never an empty result a caller could read as "ingested successfully".
     let any_content = sections

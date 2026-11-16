@@ -31,26 +31,25 @@
 //! 3. `tools/list` → the agent discovers the five tools, including
 //!    `get_api_checklist` and `search_docs`.
 //! 4. `search_docs "C-CONV"` → the *exact-guideline-code* search, the reliable
-//!    path to the conversion guideline's section: it surfaces
-//!    `api-guidelines/about`, carrying the `C-CONV` guideline-code citation.
-//! 5. `get_api_checklist { category: "Conversions and From" }` → the checklist
-//!    entry for the conversion guideline: `C-CONV` "Prefer `From`/`Into` for
-//!    conversions", explaining `api-guidelines/about`.
-//! 6. `get_section "api-guidelines/about"` → the section the agent cites: its
-//!    body, `canonical_url`, `content_hash`, and citations (including the
+//!    path to the conversion guideline's section: it surfaces the `api-guidelines`
+//!    naming section, carrying the `C-CONV` guideline-code citation.
+//! 5. `get_api_checklist { category: "Naming" }` → the checklist entries for
+//!    the naming chapter: `C-CONV` "Ad-hoc conversions should use as_ / to_ /
+//!    into_", explaining the naming section.
+//! 6. `get_section` the naming section → the section the agent cites: its body,
+//!    `canonical_url`, `content_hash`, and citations (including the
 //!    `guideline code: C-CONV` note).
-//! 7. `search_docs "lint"` → the reliable path to the **Clippy lint** the
-//!    reviewer would cite: it surfaces `clippy/configuration` (the seed's one
-//!    Clippy section), carrying the "Clippy is a nightly component …"
-//!    qualification citation.
-//! 8. `get_section "clippy/configuration"` → the Clippy section the agent cites:
-//!    its body, `canonical_url`, `content_hash`, and citations (the canonical
-//!    document + the nightly-component qualification).
-//! 9. `get_section "style-guide/intro"` → a **style-guide** section the agent
-//!    cites for a style finding: its body, `canonical_url`, `content_hash`, and
-//!    the canonical-document citation.
+//! 7. `search_docs "unwrap_used"` → the reliable path to the **Clippy lint** the
+//!    reviewer would cite: it surfaces `clippy/clippy-catalog#unwrap_used`
+//!    (the catalog entry), carrying the per-lint qualification citation.
+//! 8. `get_section` the `unwrap_used` catalog section → the Clippy section the
+//!    agent cites: its `canonical_url`, `content_hash`, and citations (the
+//!    canonical document + the per-lint qualification).
+//! 9. `get_section` the `casts-as` style section → a **style-guide** section the
+//!    agent cites for a style finding: its body, `canonical_url`, `content_hash`,
+//!    and the canonical-document citation.
 //! 10. `search_docs "needless_return"` → a **coverage-limitation probe** (AC2):
-//!     a *specific* Clippy lint whose section the representative seed does **not**
+//!     a *specific* Clippy lint whose section the faithful corpus does **not**
 //!     ship — a useful `0 hit` result with `next_steps`, the recorded gap rather
 //!     than a fabricated lint section.
 //! 11. Clean client disconnect → the server self-exits.
@@ -95,39 +94,46 @@ const SNAPSHOT_ID: &str = "rust-docs-bundled-seed";
 /// guideline's section (the reliable path a reviewer would use).
 const CONVERSION_QUERY: &str = "C-CONV";
 
-/// The checklist category the conversion-naming guideline sits in.
-const CONVERSION_CATEGORY: &str = "Conversions and From";
+/// The checklist category the conversion-naming guideline sits in. In the
+/// faithful #150 corpus the C-CONV rule is filed under the "Naming" chapter's
+/// checklist (the old hand-authored seed used a "Conversions and From" category).
+const CONVERSION_CATEGORY: &str = "Naming";
 
-/// The section the conversion finding cites (the `api-guidelines` intro that
-/// carries the `C-CONV` guideline code).
-const API_GUIDELINES_SECTION: &str = "api-guidelines/about";
+/// The section the conversion finding cites: the faithful `api-guidelines`
+/// naming section that carries the `C-CONV` guideline code (the ad-hoc
+/// conversion as_/to_/into_ convention).
+const API_GUIDELINES_SECTION: &str =
+    "api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv";
 /// Its captured content identity and canonical upstream URL (the citation the
 /// agent records).
-const API_GUIDELINES_HASH: &str = "c128-ffa531f24bfdd996c9ef3d1a076dd56a";
-const API_GUIDELINES_URL: &str = "https://rust-lang.github.io/api-guidelines/about.html";
-/// The guideline-code citation note the seed's section carries.
+const API_GUIDELINES_HASH: &str = "c128-ffa51d275f6a20c3c6d4a02b1a369f52";
+const API_GUIDELINES_URL: &str = "https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv";
+/// The guideline-code citation note the section carries.
 const API_GUIDELINES_NOTE: &str = "guideline code: C-CONV";
 
-/// The search query that reliably surfaces the seed's one Clippy section.
-const CLIPPY_QUERY: &str = "lint";
+/// The search query that reliably surfaces the Clippy lint section — the
+/// `unwrap_used` catalog entry a reviewer would look up.
+const CLIPPY_QUERY: &str = "unwrap_used";
 /// The Clippy section the lint finding cites.
-const CLIPPY_SECTION: &str = "clippy/configuration";
+const CLIPPY_SECTION: &str = "clippy/clippy-catalog#unwrap_used";
 /// Its captured content identity and canonical upstream URL.
-const CLIPPY_HASH: &str = "c128-ffa5381340fae3e97c387c8bd729fcbc";
-const CLIPPY_URL: &str = "https://doc.rust-lang.org/clippy/configuration.html";
-/// The nightly-component qualification citation note the seed's section carries.
-const CLIPPY_QUAL_NOTE: &str = "qualification: Clippy is a nightly component; a lint may be added or removed between releases.";
+const CLIPPY_HASH: &str = "c128-ffa531aa94de0f70e2b6956e7bc807b5";
+const CLIPPY_URL: &str = "https://clippy.rust-lang.org/stable/index.html#unwrap_used";
+/// The per-lint qualification citation note the catalog section carries (the
+/// faithful corpus records each lint's default level as a qualification note).
+const CLIPPY_QUAL_NOTE: &str = "qualification: default level: allow";
 
-/// The style-guide section the style finding cites.
-const STYLE_SECTION: &str = "style-guide/intro";
+/// The style-guide section the style finding cites (a real expressions entry in
+/// the faithful corpus; the old seed used `style-guide/intro`).
+const STYLE_SECTION: &str = "style-guide/expressions#casts-as";
 /// Its captured content identity and canonical upstream URL.
-const STYLE_HASH: &str = "c128-ffa549d71811a6f0c1df98d4204e09dc";
-const STYLE_URL: &str = "https://doc.rust-lang.org/nightly/style-guide/intro.html";
+const STYLE_HASH: &str = "c128-ffa58b2eca2ddeefbc32644e4bf612b4";
+const STYLE_URL: &str = "https://doc.rust-lang.org/style-guide/expressions.html#casts-as";
 
 /// A *specific* Clippy lint the coverage-limitation probe searches for. The
-/// representative seed ships only the `clippy/configuration` section, not the
-/// per-lint catalog, so this lint's section is absent — a `0 hit` the trial
-/// records as a coverage gap rather than a fabricated section.
+/// faithful corpus ships the per-lint catalog, but this lint's section is
+/// absent, so the search is a `0 hit` the trial records as a coverage gap
+/// rather than a fabricated section.
 const MISSING_LINT_QUERY: &str = "needless_return";
 
 /// The five tools the trial expects the agent to discover.
@@ -471,10 +477,10 @@ fn findings() -> Vec<Finding> {
         },
         Finding {
             id: "F-2 clippy lint",
-            // The review target: a trailing `return` a Clippy lint would flag.
+            // The review target: an `.unwrap()` a Clippy lint would flag.
             // Described, not executed (the trial does not run `cargo clippy`).
             location: "src/parser/parse.rs:37",
-            snippet: "fn parse(t: &[Token]) -> Result<Expr> { let e = build(t); return Ok(e); }",
+            snippet: "fn get(name: &str) -> Option<T> { map.get(name).unwrap() }",
             source: "clippy",
             section_id: CLIPPY_SECTION,
             canonical_url: CLIPPY_URL,
@@ -591,8 +597,8 @@ async fn the_review_agent_trial_retrieves_and_cites_review_evidence() {
     );
     assert_citations_carry_note(cited, API_GUIDELINES_NOTE, "the code-search hit");
 
-    // ---- (4) get_api_checklist "Conversions and From": the checklist entry
-    //         for the conversion guideline, explaining `api-guidelines/about`.
+    // ---- (4) get_api_checklist "Naming": the checklist entry for the
+    //         conversion guideline, explaining the C-CONV naming section.
     let checklist = client
         .call_tool(
             "get_api_checklist",
@@ -631,8 +637,8 @@ async fn the_review_agent_trial_retrieves_and_cites_review_evidence() {
         "the `C-CONV` entry explains the `{API_GUIDELINES_SECTION}` section; got {explains:?}"
     );
 
-    // ---- (5) get_section "api-guidelines/about": the section the conversion
-    //         finding cites — its body, provenance, and citations. ------------
+    // ---- (5) get_section the C-CONV naming section: the section the
+    //         conversion finding cites — body, provenance, and citations. -----
     let api_section = client
         .call_tool(
             "get_section",
@@ -655,8 +661,8 @@ async fn the_review_agent_trial_retrieves_and_cites_review_evidence() {
     );
     assert_citations_carry_note(s, API_GUIDELINES_NOTE, "the cited section");
 
-    // ---- (6) Clippy: the reliable search surfaces the seed's one Clippy
-    //         section, with its nightly-component qualification citation. -----
+    // ---- (6) Clippy: the reliable search surfaces the `unwrap_used` catalog
+    //         section, with its per-lint qualification citation. --------------
     let clippy_search = client
         .call_tool("search_docs", json!({ "query": CLIPPY_QUERY }))
         .await;
@@ -679,8 +685,8 @@ async fn the_review_agent_trial_retrieves_and_cites_review_evidence() {
     );
     assert_citations_carry_note(clippy_cited, CLIPPY_QUAL_NOTE, "the lint-search hit");
 
-    // ---- (7) get_section "clippy/configuration": the section the lint finding
-    //         cites — its body, provenance, and the qualification citation. ----
+    // ---- (7) get_section the `unwrap_used` catalog section: the section the
+    //         lint finding cites — its provenance and qualification citation. --
     let clippy_section = client
         .call_tool("get_section", json!({ "section_id": CLIPPY_SECTION }))
         .await;
@@ -688,8 +694,8 @@ async fn the_review_agent_trial_retrieves_and_cites_review_evidence() {
     assert_section_identity(c, "clippy", CLIPPY_SECTION, CLIPPY_HASH, CLIPPY_URL);
     assert_citations_carry_note(c, CLIPPY_QUAL_NOTE, "the cited clippy section");
 
-    // ---- (8) get_section "style-guide/intro": the section the style finding
-    //         cites — its body, provenance, and the canonical citation. --------
+    // ---- (8) get_section the `casts-as` style section: the section the style
+    //         finding cites — its provenance and the canonical citation. ------
     let style_section = client
         .call_tool("get_section", json!({ "section_id": STYLE_SECTION }))
         .await;

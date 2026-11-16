@@ -1375,7 +1375,7 @@ mod tests {
         // drift. A small section is used so the tool's body clip is a no-op and
         // the two reads are byte-identical.
         let m = snapshot();
-        let id = "cargo/commands%2Fcargo-build";
+        let id = "cargo/commands%2Fcargo-build#cargo-build1";
         let uri = section_uri(m.body.snapshot_id.as_str(), id);
 
         let tool = crate::mcp::get_section::get_section(
@@ -1409,10 +1409,13 @@ mod tests {
         // canonical URL, snapshot identity, and a freshness verdict the read
         // computed (never invented).
         let m = snapshot();
-        let uri = section_uri(m.body.snapshot_id.as_str(), "cargo/commands%2Fcargo-build");
+        let uri = section_uri(
+            m.body.snapshot_id.as_str(),
+            "cargo/commands%2Fcargo-build#cargo-build1",
+        );
         let view = read_section_resource(&m, &uri, as_of(), threshold())
             .expect("the resource read resolves");
-        assert_eq!(view.id, "cargo/commands%2Fcargo-build");
+        assert_eq!(view.id, "cargo/commands%2Fcargo-build#cargo-build1");
         assert_eq!(view.source, "cargo");
         assert_eq!(view.snapshot_id, m.body.snapshot_id.as_str());
         assert!(
@@ -1460,7 +1463,10 @@ mod tests {
         // The resource result carries the section under a `section` key and fits
         // the response cap.
         let m = snapshot();
-        let uri = section_uri(m.body.snapshot_id.as_str(), "cargo/commands%2Fcargo-build");
+        let uri = section_uri(
+            m.body.snapshot_id.as_str(),
+            "cargo/commands%2Fcargo-build#cargo-build1",
+        );
         let view = read_section_resource(&m, &uri, as_of(), threshold())
             .expect("the resource read resolves");
         let call = section_resource_result(&view).expect("the result fits the cap");
@@ -1473,7 +1479,10 @@ mod tests {
             structured.get("section").is_some(),
             "the payload carries the section"
         );
-        assert_eq!(structured["section"]["id"], "cargo/commands%2Fcargo-build");
+        assert_eq!(
+            structured["section"]["id"],
+            "cargo/commands%2Fcargo-build#cargo-build1"
+        );
     }
 
     // ===== [055] AC2: the URI grammar rejects non-canonical forms ===========

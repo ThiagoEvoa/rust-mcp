@@ -740,10 +740,12 @@ mod tests {
                 .with_arguments(call_args(&[("query", json!("C-CONV"))])),
             CallToolRequestParams::new("search_docs")
                 .with_arguments(call_args(&[("query", json!("Rust")), ("limit", json!(1))])),
-            CallToolRequestParams::new("get_section")
-                .with_arguments(call_args(&[("section_id", json!("api-guidelines/about"))])),
+            CallToolRequestParams::new("get_section").with_arguments(call_args(&[(
+                "section_id",
+                json!("api-guidelines/about#rust-api-guidelines"),
+            )])),
             CallToolRequestParams::new("get_api_checklist")
-                .with_arguments(call_args(&[("category", json!("Conversions and From"))])),
+                .with_arguments(call_args(&[("category", json!("Naming"))])),
             CallToolRequestParams::new("get_command_guidance")
                 .with_arguments(call_args(&[("command", json!("cargo build"))])),
         ];
@@ -794,8 +796,9 @@ mod tests {
         // (c) The catalog and section resource reads are likewise consistent
         //     under concurrency: N concurrent reads, each byte-for-byte equal to
         //     its single-threaded reference and naming the active snapshot.
-        let section_uri =
-            format!("rust-docs://snapshots/{snapshot_id}/sections/api-guidelines/about");
+        let section_uri = format!(
+            "rust-docs://snapshots/{snapshot_id}/sections/api-guidelines/about#rust-api-guidelines"
+        );
         let resource_requests: Vec<ReadResourceRequestParams> = vec![
             ReadResourceRequestParams::new("rust-docs://catalog"),
             ReadResourceRequestParams::new(&section_uri),

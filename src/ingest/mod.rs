@@ -55,6 +55,7 @@
 
 mod api_guidelines;
 mod books;
+pub(crate) mod bundle; // faithful seed corpus generation over recorded upstream fixtures
 mod cargo;
 mod clippy;
 mod clippy_book;

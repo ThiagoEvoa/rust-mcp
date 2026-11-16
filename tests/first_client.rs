@@ -22,7 +22,7 @@
 //!    snapshot id (`rust-docs-bundled-seed`).
 //! 2. `search_docs` for a query that matches the seed corpus (`"C-CONV"`)
 //!    returns ranked hits, each backed by a non-empty `citations` array.
-//! 3. `get_section` for a valid id (`"api-guidelines/about"`) returns the
+//! 3. `get_section` for a valid id (`"api-guidelines/about#rust-api-guidelines"`) returns the
 //!    section body *with its provenance citations and canonical URL*.
 //!
 //! The check is hermetic: a per-test temp `--data-dir`, and `serve` loads the
@@ -92,7 +92,7 @@ const SOURCES: [&str; 8] = [
 /// The query and section the AC2 evidence uses: an exact guideline-code search
 /// that matches the seed corpus, and the section it resolves to.
 const SEARCH_QUERY: &str = "C-CONV";
-const SECTION_ID: &str = "api-guidelines/about";
+const SECTION_ID: &str = "api-guidelines/about#rust-api-guidelines";
 
 /// A temporary per-test data directory, given to the child as `--data-dir` so
 /// the process never writes the host's real application cache. `serve` does not
