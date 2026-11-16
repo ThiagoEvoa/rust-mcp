@@ -243,6 +243,20 @@ impl FixtureServer {
             .len()
     }
 
+    /// The request paths the client has made so far, in arrival order. Lets a
+    /// test assert a *specific* document (e.g. the Clippy lint catalog, issue
+    /// #155) was fetched, not merely that some request was made.
+    pub(super) fn request_paths(&self) -> Vec<String> {
+        self.shared
+            .log
+            .lock()
+            .expect("fixture log lock is poison-free")
+            .requests
+            .iter()
+            .map(|(_, path)| path.clone())
+            .collect()
+    }
+
     /// The observed concurrent-connection high water.
     pub(super) fn observed_high_water(&self) -> usize {
         self.high_water.load(Ordering::SeqCst)

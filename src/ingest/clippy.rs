@@ -27,15 +27,15 @@
 //! [`LintEntry`] data, and [`ingest_lint_catalog`] materializes full-fidelity
 //! [`Section`]s from it.
 //!
-//! The extraction is best-effort and never panics on malformed HTML: a lint with
-//! no usable id is skipped, and an unparseable section degrades to a text-only
-//! body rather than aborting the whole catalog.
+//! The extraction is best-effort and never panics on malformed HTML: a lint
+//! with no usable id is skipped, and an unparseable section degrades to a
+//! text-only body rather than aborting the whole catalog.
 //!
-//! Like the sibling ingest modules, this stage is transitional: its first
-//! consumer is the sync pipeline that lands in `[011]`, so the items are
-//! dead until then.
-
-#![allow(dead_code)] // transitional: first consumer is the [011] sync pipeline
+//! The sync pipeline ([`crate::ingest::pipeline`]) is the catalog's consumer:
+//! for the `clippy` source it fetches this catalog (via
+//! [`catalog_url`]/[`fetch_lint_catalog`]) and merges the per-lint sections it
+//! produces ([`ingest_lint_catalog`]) into the same `clippy` source, so a sync
+//! publishes the catalog alongside the Clippy book (issue #155).
 
 use crate::ingest::fetch::{BoundClient, FetchError, Fetched};
 use crate::ingest::html::convert_article;
@@ -59,6 +59,22 @@ const CHAPTER_PATH: &str = "clippy-catalog";
 /// section the extractor produces is small; this cap bounds the *page
 /// download*, not individual sections.
 pub const LINT_CATALOG_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// The canonical stable Clippy lint catalog page — the single, large HTML page
+/// that lists every lint, fetched and parsed per-lint by
+/// [`ingest_lint_catalog`]. This is the `clippy` source's *catalog* boundary
+/// ([`crate::registry::SourceCollection::Clippy`]), distinct from its book
+/// entry (`doc.rust-lang.org/clippy/`). It resolves through the registry's
+/// `clippy.rust-lang.org` / `/stable/` boundary, and its legacy alias
+/// (`rust-lang.github.io/rust-clippy/stable/`) is the accepted equivalent.
+pub const CATALOG_URL: &str = "https://clippy.rust-lang.org/stable/index.html";
+
+/// The [`reqwest::Url`] for the canonical Clippy lint catalog, parsed from
+/// [`CATALOG_URL`]. The sync pipeline resolves the `clippy` source's catalog
+/// boundary to this URL; a hermetic test overrides it with a loopback fixture.
+pub fn catalog_url() -> Url {
+    Url::parse(CATALOG_URL).expect("the canonical clippy catalog URL is a valid absolute URL")
+}
 
 /// A single Clippy lint, extracted as structured data (before it is
 /// materialized into a [`Section`]).

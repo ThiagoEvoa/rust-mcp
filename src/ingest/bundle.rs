@@ -800,6 +800,7 @@ fn source_specs() -> Vec<(String, String, String, Vec<String>, Release)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingest::fetch::{BoundClient, FetchPolicy};
 
     #[test]
     fn c_conv_and_c_conv_traits_resolve_to_distinct_correct_explanations() {
@@ -944,6 +945,90 @@ mod tests {
                     s
                 );
             }
+        }
+    }
+
+    // --- AC4 (issue #155): the canonical Clippy lint-catalog fixture and its
+    //     regression guards. The fixture freezes the canonical lint set; a
+    //     hermetic test guards drift against the embedded catalog, and an
+    //     ignored live test guards drift against the live catalog. ------
+
+    /// Extract the canonical Clippy lint-catalog lint ids (the `clippy::…` ids
+    /// the catalog sections document), sorted deterministically. This is the
+    /// emitter that keeps the frozen fixture in sync with the catalog.
+    fn extract_catalog_lint_ids(sections: &[Section]) -> Vec<String> {
+        let mut ids: BTreeSet<String> = BTreeSet::new();
+        for section in sections {
+            if section.id.as_str().starts_with("clippy/clippy-catalog#") {
+                for lint in &section.lint_ids {
+                    ids.insert(lint.clone());
+                }
+            }
+        }
+        ids.into_iter().collect()
+    }
+
+    /// Load the canonical lint ids frozen in the committed fixture (issue #155,
+    /// AC4). `include_str!` takes a string literal, so the `data/fixtures/`
+    /// path is inlined here.
+    fn fixture_catalog_lint_ids() -> Vec<String> {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../data/fixtures/clippy-catalog.json"))
+                .expect("the clippy catalog fixture is valid JSON");
+        fixture["lint_ids"]
+            .as_array()
+            .expect("the fixture carries a `lint_ids` array")
+            .iter()
+            .map(|v| v.as_str().expect("a lint id string").to_string())
+            .collect()
+    }
+
+    /// AC4 (hermetic): the committed fixture stays in sync with the embedded
+    /// catalog. If the catalog's lint set drifts from the frozen fixture, this
+    /// fails loudly, pointing at the emitter to regenerate the fixture.
+    #[test]
+    fn clippy_catalog_fixture_stays_current() {
+        let corpus = build_seed_corpus().expect("the seed corpus builds");
+        let extracted = extract_catalog_lint_ids(&corpus.sections);
+        assert_eq!(
+            extracted,
+            fixture_catalog_lint_ids(),
+            "the frozen clippy catalog fixture is stale — re-run the emitter so \n             `data/fixtures/clippy-catalog.json` reflects the current catalog lint set"
+        );
+    }
+
+    /// AC4 (live, opt-in): the live Clippy catalog still contains the canonical
+    /// lints frozen in the fixture, failing loudly if they drift. Ignored by
+    /// default — an opt-in network fetch, off the normal hermetic suite — and
+    /// env-gated so even an accidental `--ignored` run doesn't touch the
+    /// network without `RUST_DOCS_MCP_LIVE`.
+    #[tokio::test]
+    #[ignore = "opt-in live upstream fetch; off the normal suite"]
+    async fn clippy_live_catalog_still_covers_the_canonical_fixture() {
+        if std::env::var_os("RUST_DOCS_MCP_LIVE").is_none() {
+            eprintln!(
+                "skipping: set RUST_DOCS_MCP_LIVE=1 to run the live Clippy \
+                 catalog regression (issue #155, AC4)"
+            );
+            return;
+        }
+        let client =
+            BoundClient::new(FetchPolicy::default()).expect("a registry-gated client builds");
+        let fetched = client
+            .fetch(&crate::ingest::clippy::catalog_url())
+            .await
+            .expect("the live clippy catalog fetches within the registry boundary");
+        let live = ingest_lint_catalog(&fetched).expect("the live clippy catalog parses");
+        let live_lints: BTreeSet<String> = live
+            .iter()
+            .flat_map(|section| section.lint_ids.clone())
+            .collect();
+        for lint in fixture_catalog_lint_ids() {
+            assert!(
+                live_lints.contains(&lint),
+                "the live clippy catalog no longer contains the canonical lint \
+                 `{lint}` — the catalog drifted; update the frozen fixture"
+            );
         }
     }
 }

@@ -57,6 +57,7 @@ use crate::corpus::{
 use crate::ingest::api_guidelines;
 use crate::ingest::books::{DiscoveryError, InventoryDiff, discover_inventory};
 use crate::ingest::cargo;
+use crate::ingest::clippy;
 use crate::ingest::clippy_book;
 use crate::ingest::fetch::{BoundClient, FetchError, FetchPolicy, Fetched};
 use crate::ingest::rustc;
@@ -100,6 +101,15 @@ pub struct SyncConfig {
     /// commit-pinned raw documents. The override is read on every run, so it is
     /// not dead code; production sets it to `None`.
     pub rustfmt_urls: Option<Vec<Url>>,
+    /// A test-only override for the Clippy lint *catalog* URL: when `Some`, this
+    /// URL is fetched and its per-lint sections merged into the `clippy` source,
+    /// instead of the production catalog ([`clippy::catalog_url`]); so a
+    /// hermetic test can point the catalog at a loopback fixture. `None` skips
+    /// the catalog entirely, so the `clippy` source carries only its book
+    /// sections and the completeness gate reports the missing lint catalog
+    /// (`MissingLintCatalog`) for a `require_complete` run. `production` sets it
+    /// to the canonical catalog URL, so the production sync ingests the catalog.
+    pub clippy_catalog_url: Option<Url>,
     /// Whether this run must publish a *complete* production corpus
     /// ([`crate::corpus::check_completeness`]) — every required collection
     /// populated, the checklist/lint catalog/command catalog nonempty, and
@@ -126,6 +136,7 @@ impl SyncConfig {
                 .collect(),
             direct: None,
             rustfmt_urls: None,
+            clippy_catalog_url: Some(clippy::catalog_url()),
             require_complete: true,
         }
     }
@@ -403,7 +414,13 @@ pub async fn sync(
             }
         };
 
-        let ingested_source = ingest_source(collection, &urls, client).await?;
+        // The Clippy *catalog* URL (a separate boundary from the book) is
+        // resolved from the config's override (a loopback fixture in the
+        // hermetic tests) or left `None` to skip it; only the `clippy` source
+        // consumes it. A `require_complete` run reports the missing catalog as
+        // a completeness gap rather than silently shipping an empty catalog.
+        let ingested_source =
+            ingest_source(collection, &urls, &config.clippy_catalog_url, client).await?;
         ingested.insert(collection.id().to_string(), ingested_source.clone());
         results.push(SyncSourceResult {
             id: collection.id().to_string(),
@@ -507,16 +524,27 @@ pub async fn sync(
 /// rustfmt Markdown adapter, the cargo chapter + command-manual extractors, and
 /// the api-guidelines chapter + checklist extractors. A fetch failure or a
 /// parse failure surfaces as a [`SyncError`] that aborts the run.
+///
+/// The `clippy` source is special: besides its book chapters it owns the
+/// per-lint **catalog** (`clippy.rust-lang.org/stable/`), a separate large page
+/// parsed into one lint section per lint. Its URL arrives via `catalog_url`
+/// (the [`SyncConfig::clippy_catalog_url`] override); when present, the catalog
+/// is fetched and its lint sections merged into the same `clippy` source
+/// (issue #155).
 async fn ingest_source(
     collection: SourceCollection,
     urls: &[Url],
+    catalog_url: &Option<Url>,
     client: &BoundClient,
 ) -> Result<IngestedSource, SyncError> {
     let mut out = IngestedSource {
         urls: urls.to_vec(),
         ..Default::default()
     };
-    if urls.is_empty() {
+    // A source with neither a document inventory nor a catalog to fetch
+    // contributes nothing; return early so an empty inventory yields an empty
+    // (but recorded) source.
+    if urls.is_empty() && catalog_url.is_none() {
         return Ok(out);
     }
 
@@ -543,6 +571,23 @@ async fn ingest_source(
                 let sections =
                     rustfmt::ingest_markdown(&fetched).map_err(|e| extract_err(collection, e))?;
                 out.sections.extend(sections);
+            }
+        }
+        // The clippy *book* (HTML navigation on `doc.rust-lang.org/clippy/`,
+        // shared with the other book adapters) plus the per-lint *catalog*
+        // (`clippy.rust-lang.org/stable/`). The catalog's lint-tagged sections
+        // merge into the same `clippy` source, retaining group / level /
+        // applicability / added-in and citations (issue #155). A missing catalog
+        // (a `None` override) or a fetched page that yields no lints (empty /
+        // unparseable) contributes no lint sections; the completeness gate then
+        // reports `MissingLintCatalog` and a `require_complete` run refuses the
+        // corpus, preserving the last valid snapshot.
+        SourceCollection::Clippy => {
+            let (book_sections, captured) = ingest_book(collection, urls, client).await?;
+            out.sections = book_sections;
+            out.captured = captured;
+            if let Some(catalog_url) = catalog_url {
+                merge_lint_catalog(collection, catalog_url, client, &mut out).await?;
             }
         }
         SourceCollection::ApiGuidelines => {
@@ -585,8 +630,9 @@ async fn ingest_source(
                     .map_err(|e| extract_err(collection, e))?;
             out.checklist = checklist;
         }
-        // The remaining collections (style-guide, rustc, rustup, rustdoc, and
-        // the clippy *book*) share the HTML chapter adapter.
+        // The remaining book-shaped collections (style-guide, rustc, rustup,
+        // rustdoc) share the HTML chapter adapter; the clippy source has its own
+        // branch above (it additionally fetches the lint catalog).
         _ => {
             let (sections, captured) = ingest_book(collection, urls, client).await?;
             out.sections = sections;
@@ -595,6 +641,35 @@ async fn ingest_source(
     }
 
     Ok(out)
+}
+
+/// Fetch the Clippy lint catalog and merge its per-lint sections into `out`.
+///
+/// A catalog *fetch failure* is a transport error and aborts the run (a fetch
+/// failure aborts before publication, preserving the last valid snapshot). A
+/// fetched page that yields *no* lint entries (an empty or unparseable catalog)
+/// contributes no sections — the completeness gate then reports
+/// `MissingLintCatalog` and a `require_complete` run refuses the corpus —
+/// rather than a hard extraction abort (issue #155). The catalog's capture (its
+/// bytes and response metadata) is always recorded, so the source carries the
+/// catalog's provenance even when it contributes no sections.
+async fn merge_lint_catalog(
+    collection: SourceCollection,
+    catalog_url: &Url,
+    client: &BoundClient,
+    out: &mut IngestedSource,
+) -> Result<(), SyncError> {
+    let fetched = clippy::fetch_lint_catalog(client, catalog_url).await?;
+    // Record the catalog's capture before `fetched` may be consumed below.
+    out.captured.push(capture_document(catalog_url, &fetched));
+    match clippy::ingest_lint_catalog(&fetched) {
+        Ok(sections) => out.sections.extend(sections),
+        // An empty or unparseable catalog contributes no lint sections; the
+        // completeness gate reports the gap rather than aborting here.
+        Err(clippy::IngestError::EmptyCatalog) => {}
+        Err(e) => return Err(extract_err(collection, e)),
+    }
+    Ok(())
 }
 
 /// Fetch and split each `url` through the HTML chapter adapter for `collection`,
@@ -1066,6 +1141,7 @@ mod tests {
             sources: vec![SourceId::new("style-guide").expect("a registry id is URI-safe")],
             direct: Some(direct),
             rustfmt_urls: None,
+            clippy_catalog_url: None,
             require_complete: false,
         }
     }
@@ -1144,6 +1220,7 @@ mod tests {
             sources: vec![SourceId::new("api-guidelines").expect("a registry id is URI-safe")],
             direct: Some(direct),
             rustfmt_urls: None,
+            clippy_catalog_url: None,
             require_complete: false,
         }
     }
@@ -1197,6 +1274,7 @@ mod tests {
             sources: vec![SourceId::new("style-guide").expect("a registry id is URI-safe")],
             direct: Some(direct),
             rustfmt_urls: None,
+            clippy_catalog_url: None,
             require_complete: false,
         };
 
@@ -1293,6 +1371,7 @@ mod tests {
                 .collect(),
             direct: Some(direct),
             rustfmt_urls: None,
+            clippy_catalog_url: None,
             require_complete: true,
         };
 
@@ -1322,6 +1401,257 @@ mod tests {
         assert_eq!(
             loaded.body.snapshot_id, good_report.snapshot,
             "the prior snapshot identity is preserved"
+        );
+    }
+
+    /// AC1 (issue #155): a sync that ingests the `clippy` source fetches the
+    /// per-lint **catalog** (not just the Clippy book) and publishes its
+    /// lint-tagged sections. The catalog is served from loopback via the
+    /// `clippy_catalog_url` override (production points it at the registry's
+    /// `clippy.rust-lang.org/stable/` boundary); the published manifest must
+    /// carry the three named lints, including the `needless_return` section the
+    /// catalog fixture now ships.
+    #[tokio::test]
+    async fn clippy_sync_requests_the_catalog_and_publishes_its_lint_sections() {
+        // The real Clippy lint catalog fixture (now carrying `needless_return`)
+        // served from loopback, alongside a minimal Clippy book chapter so the
+        // source has a book URL as well as its catalog.
+        let catalog_html = fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/upstream/clippy_lints.html"),
+        )
+        .expect("read the clippy lint catalog fixture");
+        let book_html = one_section_html("usage", "Usage");
+        let server = FixtureServer::start(vec![
+            (
+                "/clippy/usage.html".to_string(),
+                Behavior::Text {
+                    body: book_html.into_bytes(),
+                    etag: Some("\"clippy-usage-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/clippy_lints.html".to_string(),
+                Behavior::Text {
+                    body: catalog_html.into_bytes(),
+                    etag: Some("\"clippy-catalog-1\"".to_string()),
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+        ]);
+        let client = loopback_client().expect("the loopback client builds");
+        let data_dir = temp_data_dir();
+
+        let book_url = reqwest::Url::parse(&format!("http://{}/clippy/usage.html", server.addr))
+            .expect("a valid loopback clippy book URL");
+        let catalog_url = reqwest::Url::parse(&format!("http://{}/clippy_lints.html", server.addr))
+            .expect("a valid loopback clippy catalog URL");
+        let mut direct: BTreeMap<String, Vec<reqwest::Url>> = BTreeMap::new();
+        direct.insert("clippy".to_string(), vec![book_url]);
+        let config = SyncConfig {
+            parser_version: "test/155".to_string(),
+            sources: vec![SourceId::new("clippy").expect("a registry id is URI-safe")],
+            direct: Some(direct),
+            rustfmt_urls: None,
+            clippy_catalog_url: Some(catalog_url),
+            require_complete: false,
+        };
+
+        let report = sync(&config, &data_dir, &client)
+            .await
+            .expect("the clippy sync succeeds through its catalog adapter");
+
+        // The catalog URL was fetched during the sync (the pipeline requested it,
+        // not merely the book). The book path and the catalog path are both in
+        // the request log.
+        let paths = server.request_paths();
+        assert!(
+            paths.iter().any(|p| p == "/clippy_lints.html"),
+            "the sync must fetch the clippy lint catalog, requested paths: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p == "/clippy/usage.html"),
+            "the sync also fetches the clippy book chapter, requested paths: {paths:?}"
+        );
+
+        // The clippy source ingested both its book and its catalog; the catalog
+        // contributed the lint sections.
+        let clippy = report
+            .sources
+            .iter()
+            .find(|s| s.id == "clippy")
+            .expect("the clippy result is present");
+        assert!(
+            clippy.sections >= 3,
+            "the clippy source ingested book + catalog sections, got {}",
+            clippy.sections
+        );
+
+        // The published manifest carries the three named lints — the core of
+        // AC1: the catalog's per-lint sections are retrievable by id, including
+        // the `needless_return` section the fixture now ships.
+        let loaded = crate::corpus::load_published_snapshot(&data_dir)
+            .expect("the snapshot is published and loadable");
+        let lint_ids: HashSet<&str> = loaded
+            .body
+            .sections
+            .iter()
+            .filter(|s| s.source_id.as_str() == "clippy" && !s.lint_ids.is_empty())
+            .flat_map(|s| s.lint_ids.iter())
+            .map(|l| l.as_str())
+            .collect();
+        for target in [
+            "clippy::unwrap_used",
+            "clippy::clone_on_copy",
+            "clippy::needless_return",
+        ] {
+            assert!(
+                lint_ids.contains(target),
+                "the published corpus must carry {target}; published lint ids: {lint_ids:?}"
+            );
+        }
+    }
+
+    /// AC2 (issue #155): when the clippy catalog is **missing** (a `None`
+    /// override) or **empty/unparseable**, the completeness gate reports
+    /// `MissingLintCatalog` and a `require_complete` run refuses the corpus,
+    /// preserving the last valid snapshot. This is the gate-integration half of
+    /// the fix: a sync that no longer publishes the catalog is not silently
+    /// degraded into a corpus without lint sections.
+    #[tokio::test]
+    async fn clippy_missing_catalog_reports_missing_lint_catalog_and_preserves_the_prior() {
+        // A good catalog published first, so there is a valid prior to preserve.
+        let catalog_html = fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/upstream/clippy_lints.html"),
+        )
+        .expect("read the clippy lint catalog fixture");
+        let server = FixtureServer::start(vec![
+            (
+                "/clippy/usage.html".to_string(),
+                Behavior::Text {
+                    body: one_section_html("usage", "Usage").into_bytes(),
+                    etag: None,
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/clippy_lints.html".to_string(),
+                Behavior::Text {
+                    body: catalog_html.into_bytes(),
+                    etag: None,
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            // An empty catalog page: an HTML document with no lint `<article>`s,
+            // which the extractor reports as `EmptyCatalog` (no lint sections).
+            (
+                "/clippy_empty.html".to_string(),
+                Behavior::Text {
+                    body: "<!DOCTYPE html><html><body><h1>Lints</h1><p>No lints.</p></body></html>"
+                        .as_bytes()
+                        .to_vec(),
+                    etag: None,
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+        ]);
+        let client = loopback_client().expect("the loopback client builds");
+        let data_dir = temp_data_dir();
+
+        let book_url = reqwest::Url::parse(&format!("http://{}/clippy/usage.html", server.addr))
+            .expect("a valid loopback clippy book URL");
+        let catalog_url = reqwest::Url::parse(&format!("http://{}/clippy_lints.html", server.addr))
+            .expect("a valid loopback clippy catalog URL");
+        let empty_url = reqwest::Url::parse(&format!("http://{}/clippy_empty.html", server.addr))
+            .expect("a valid loopback empty-catalog URL");
+
+        // 1. Establish a valid prior through a dev sync that publishes the
+        //    catalog (so the corpus carries lint sections).
+        let mut direct: BTreeMap<String, Vec<reqwest::Url>> = BTreeMap::new();
+        direct.insert("clippy".to_string(), vec![book_url.clone()]);
+        let good = SyncConfig {
+            parser_version: "test/155-good".to_string(),
+            sources: vec![SourceId::new("clippy").expect("a registry id is URI-safe")],
+            direct: Some(direct.clone()),
+            rustfmt_urls: None,
+            clippy_catalog_url: Some(catalog_url),
+            require_complete: false,
+        };
+        sync(&good, &data_dir, &client)
+            .await
+            .expect("the good dev sync publishes a snapshot with the catalog");
+        let prior_bytes =
+            fs::read(corpus::published_snapshot_path(&data_dir)).expect("the prior is on disk");
+
+        // 2. A `require_complete` run with the catalog **missing** (a `None`
+        //    override): the gate reports `MissingLintCatalog` and refuses the
+        //    corpus, preserving the prior.
+        let missing = SyncConfig {
+            parser_version: "test/155-missing".to_string(),
+            sources: vec![SourceId::new("clippy").expect("a registry id is URI-safe")],
+            direct: Some(direct.clone()),
+            rustfmt_urls: None,
+            clippy_catalog_url: None,
+            require_complete: true,
+        };
+        let err = sync(&missing, &data_dir, &client)
+            .await
+            .expect_err("a missing catalog must be rejected by the completeness gate");
+        let report = match err {
+            SyncError::IncompleteCorpus { report } => report,
+            other => panic!("expected IncompleteCorpus, got {other:?}"),
+        };
+        assert!(
+            report
+                .gaps
+                .iter()
+                .any(|g| matches!(g, crate::corpus::CompletenessGap::MissingLintCatalog)),
+            "a missing catalog must report MissingLintCatalog, gaps: {}",
+            report.render()
+        );
+        // The rejected run must not have overwritten the last valid snapshot.
+        let still = fs::read(corpus::published_snapshot_path(&data_dir)).expect("prior intact");
+        assert_eq!(
+            still, prior_bytes,
+            "a missing catalog must not overwrite the last valid snapshot"
+        );
+
+        // 3. A `require_complete` run with an **empty/unparseable** catalog
+        //    (a fetched page with no lint `<article>`s): the same gate fires.
+        let empty = SyncConfig {
+            parser_version: "test/155-empty".to_string(),
+            sources: vec![SourceId::new("clippy").expect("a registry id is URI-safe")],
+            direct: Some(direct),
+            rustfmt_urls: None,
+            clippy_catalog_url: Some(empty_url),
+            require_complete: true,
+        };
+        let err = sync(&empty, &data_dir, &client)
+            .await
+            .expect_err("an empty catalog must be rejected by the completeness gate");
+        let report = match err {
+            SyncError::IncompleteCorpus { report } => report,
+            other => panic!("expected IncompleteCorpus, got {other:?}"),
+        };
+        assert!(
+            report
+                .gaps
+                .iter()
+                .any(|g| matches!(g, crate::corpus::CompletenessGap::MissingLintCatalog)),
+            "an empty catalog must report MissingLintCatalog, gaps: {}",
+            report.render()
+        );
+        let still = fs::read(corpus::published_snapshot_path(&data_dir)).expect("prior intact");
+        assert_eq!(
+            still, prior_bytes,
+            "an empty catalog must not overwrite the last valid snapshot"
         );
     }
 
@@ -1378,6 +1708,7 @@ mod tests {
             // fixture — so the live-dispatch branch is exercised, not `direct`.
             direct: None,
             rustfmt_urls: Some(vec![readme_url, configs_url]),
+            clippy_catalog_url: None,
             require_complete: false,
         };
 
@@ -1997,6 +2328,7 @@ mod tests {
             sources: vec![SourceId::new("api-guidelines").expect("a registry id is URI-safe")],
             direct: None,
             rustfmt_urls: None,
+            clippy_catalog_url: None,
             require_complete: false,
         };
         let report = sync(&config, &data_dir, &client)
@@ -2054,6 +2386,7 @@ mod tests {
             sources: vec![SourceId::new("rustfmt").expect("a registry id is URI-safe")],
             direct: None,
             rustfmt_urls: None,
+            clippy_catalog_url: None,
             require_complete: false,
         };
         let report = sync(&config, &data_dir, &client)
@@ -2324,6 +2657,7 @@ mod tests {
             sources: vec![SourceId::new("rustfmt").expect("a registry id is URI-safe")],
             direct: None,
             rustfmt_urls: Some(vec![readme_url, configs_url]),
+            clippy_catalog_url: None,
             require_complete: false,
         };
 

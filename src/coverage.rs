@@ -715,7 +715,7 @@ mod tests {
 
         assert_eq!(report.source_count, 8, "seed has all eight sources");
         assert_eq!(
-            report.section_count, 544,
+            report.section_count, 545,
             "seed captures the full upstream corpus"
         );
         assert_eq!(
@@ -920,7 +920,7 @@ mod tests {
         // The fidelity report records all of them present, with no recorded gap.
         let report = inspect_fidelity(&seed_manifest().body.sections);
 
-        assert_eq!(report.sections_inspected, 544);
+        assert_eq!(report.sections_inspected, 545);
         assert!(
             report.all_types_present(),
             "the faithful seed covers every content type: {}",
@@ -1128,10 +1128,10 @@ mod tests {
         let report = inspect_corpus(&seed_manifest());
 
         assert_eq!(
-            report.sections_inspected, 544,
+            report.sections_inspected, 545,
             "the inspection reports the loaded corpus count"
         );
-        assert_eq!(report.coverage.section_count, 544);
+        assert_eq!(report.coverage.section_count, 545);
         assert!(
             report.is_complete(),
             "the faithful seed is complete: {}",
