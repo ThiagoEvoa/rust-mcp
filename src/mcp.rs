@@ -314,6 +314,43 @@ impl ServerHandler for DocsServer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #154 response-bounding helpers.
+//
+// The 32 KiB response cap bounds a *successful* page; the error path needs the
+// same protection. These two helpers apply the two layers defined in
+// [`protocol_error`] — the handler-boundary input cap and the final serialized-
+// size backstop — at the dispatch seam, so no error response can exceed the cap.
+
+/// Cap a user-controlled identifier string at
+/// [`protocol_error::MAX_IDENTIFIER_BYTES`], returning its version-aware,
+/// size-bounded `INVALID_PARAMS` [`ErrorData`] when it exceeds the cap.
+///
+/// Applied at the handler boundary ([`DocsServer::dispatch_call`] /
+/// [`dispatch_read`]) so an over-long input is rejected *before* it reaches a
+/// handler's not-found mapping, and never echoes into an over-cap error response
+/// (#154). The rejection carries a bounded preview plus the original byte
+/// length, not the full input.
+fn cap_identifier(
+    field: &'static str,
+    value: &str,
+    version: Option<&rmcp::model::ProtocolVersion>,
+) -> Result<(), ErrorData> {
+    protocol_error::check_identifier(field, value)
+        .map_err(|error| protocol_error::bound_error(protocol_error::map(error, version)))
+}
+
+/// Map an internal retrieval error to a version-aware, size-bounded
+/// [`ErrorData`]: the version-aware code upgrade ([`protocol_error::map`]) then
+/// the final serialized-size backstop ([`protocol_error::bound_error`]), so no
+/// error response can exceed the 32 KiB cap even if an input cap is bypassed.
+fn bounded_map<E: protocol_error::ProtocolError>(
+    error: E,
+    version: Option<&rmcp::model::ProtocolVersion>,
+) -> ErrorData {
+    protocol_error::bound_error(protocol_error::map(error, version))
+}
+
 impl DocsServer {
     /// Dispatch a `call_tool` request by tool name. Deserializes the request
     /// arguments into the tool's typed request struct, runs the module, and
@@ -337,49 +374,69 @@ impl DocsServer {
         let result = match request.name.as_ref() {
             crate::mcp::list_sources::TOOL_NAME => {
                 // No request fields; the response is derived purely from the
-                // manifest snapshot.
+                // manifest snapshot, so there is no user-controlled string to cap.
                 let resp =
                     crate::mcp::list_sources::response(&self.manifest, self.as_of, self.threshold)
-                        .map_err(|e| protocol_error::map(e, version))?;
-                crate::mcp::list_sources::result(&resp)
-                    .map_err(|e| protocol_error::map(e, version))?
+                        .map_err(|e| bounded_map(e, version))?;
+                crate::mcp::list_sources::result(&resp).map_err(|e| bounded_map(e, version))?
             }
             crate::mcp::search_docs::TOOL_NAME => {
                 let req =
                     self.parse_args::<crate::mcp::schema::SearchDocsRequest>("search_docs", &args)?;
+                // #154: cap the user-controlled strings at the boundary. The query
+                // is also bounded by the search layer's byte limit; capping it here
+                // rejects an over-long query before it is echoed into any error.
+                cap_identifier("query", &req.query, version)?;
+                if let Some(source) = &req.source {
+                    cap_identifier("source", source, version)?;
+                }
+                if let Some(cursor) = &req.cursor {
+                    cap_identifier("cursor", cursor, version)?;
+                }
                 let resp = crate::mcp::search_docs::search(&self.manifest, &req)
-                    .map_err(|e| protocol_error::map(e, version))?;
-                crate::mcp::search_docs::result(&resp)
-                    .map_err(|e| protocol_error::map(e, version))?
+                    .map_err(|e| bounded_map(e, version))?;
+                crate::mcp::search_docs::result(&resp).map_err(|e| bounded_map(e, version))?
             }
             crate::mcp::get_section::TOOL_NAME => {
                 let req =
                     self.parse_args::<crate::mcp::schema::GetSectionRequest>("get_section", &args)?;
+                cap_identifier("section_id", &req.section_id, version)?;
+                if let Some(cursor) = &req.cursor {
+                    cap_identifier("cursor", cursor, version)?;
+                }
                 let resp = crate::mcp::get_section::get_section(
                     &self.manifest,
                     &req,
                     self.as_of,
                     self.threshold,
                 )
-                .map_err(|e| protocol_error::map(e, version))?;
-                crate::mcp::get_section::result(&resp)
-                    .map_err(|e| protocol_error::map(e, version))?
+                .map_err(|e| bounded_map(e, version))?;
+                crate::mcp::get_section::result(&resp).map_err(|e| bounded_map(e, version))?
             }
             crate::mcp::get_api_checklist::TOOL_NAME => {
                 let req = self.parse_args::<crate::mcp::schema::GetApiChecklistRequest>(
                     "get_api_checklist",
                     &args,
                 )?;
+                if let Some(category) = &req.category {
+                    cap_identifier("category", category, version)?;
+                }
+                if let Some(cursor) = &req.cursor {
+                    cap_identifier("cursor", cursor, version)?;
+                }
                 let resp = crate::mcp::get_api_checklist::checklist(&self.manifest, &req)
-                    .map_err(|e| protocol_error::map(e, version))?;
-                crate::mcp::get_api_checklist::result(&resp)
-                    .map_err(|e| protocol_error::map(e, version))?
+                    .map_err(|e| bounded_map(e, version))?;
+                crate::mcp::get_api_checklist::result(&resp).map_err(|e| bounded_map(e, version))?
             }
             crate::mcp::get_command_guidance::TOOL_NAME => {
                 let req = self.parse_args::<crate::mcp::schema::GetCommandGuidanceRequest>(
                     "get_command_guidance",
                     &args,
                 )?;
+                cap_identifier("command", &req.command, version)?;
+                if let Some(cursor) = &req.cursor {
+                    cap_identifier("cursor", cursor, version)?;
+                }
                 let resp = crate::mcp::get_command_guidance::get_command_guidance(
                     &self.catalog,
                     &self.manifest,
@@ -387,16 +444,20 @@ impl DocsServer {
                     self.as_of,
                     self.threshold,
                 )
-                .map_err(|e| protocol_error::map(e, version))?;
+                .map_err(|e| bounded_map(e, version))?;
                 crate::mcp::get_command_guidance::result(&resp)
-                    .map_err(|e| protocol_error::map(e, version))?
+                    .map_err(|e| bounded_map(e, version))?
             }
             other => {
-                return Err(ErrorData::new(
+                // #154: the unknown-tool name is user-controlled and is echoed in
+                // the message, so apply the final serialized-size backstop to the
+                // `METHOD_NOT_FOUND` error too — an over-long tool name must not
+                // produce an over-cap error response.
+                return Err(protocol_error::bound_error(ErrorData::new(
                     ErrorCode::METHOD_NOT_FOUND,
                     format!("unknown tool: {other}"),
                     None,
-                ));
+                )));
             }
         };
         Ok(result.into())
@@ -418,6 +479,12 @@ impl DocsServer {
         version: Option<&rmcp::model::ProtocolVersion>,
     ) -> Result<ReadResourceResponse, ErrorData> {
         let uri = request.uri;
+        // #154: cap the user-controlled resource URI at the boundary so an
+        // over-long URI (e.g. a 40,000-character section id embedded in a
+        // `rust-docs://…/sections/…` URI) is rejected before it is echoed into a
+        // `MalformedUri`/`MismatchedSnapshot` error, which would otherwise be
+        // over-cap.
+        cap_identifier("uri", &uri, version)?;
         let structured = if uri == crate::mcp::resources::CATALOG_URI {
             let view = crate::mcp::resources::catalog_resource_view(
                 &self.manifest,
@@ -427,9 +494,9 @@ impl DocsServer {
                 self.as_of,
                 self.threshold,
             )
-            .map_err(|e| protocol_error::map(e, version))?;
+            .map_err(|e| bounded_map(e, version))?;
             crate::mcp::resources::catalog_resource_result(&view)
-                .map_err(|e| protocol_error::map(e, version))?
+                .map_err(|e| bounded_map(e, version))?
         } else {
             let view = crate::mcp::resources::read_section_resource(
                 &self.manifest,
@@ -437,18 +504,25 @@ impl DocsServer {
                 self.as_of,
                 self.threshold,
             )
-            .map_err(|e| protocol_error::map(e, version))?;
+            .map_err(|e| bounded_map(e, version))?;
             // Render the section view as the resource's JSON payload. The
             // `structured_content` is built the same way the [056] resource
             // layer would, so the catalog resource and the section resource
             // share one JSON shape.
             serde_json::to_value(crate::mcp::schema::SectionResourceView { section: view })
                 .map_err(|e| {
-                    ErrorData::internal_error(format!("encode section resource: {e}"), None)
+                    protocol_error::bound_error(ErrorData::internal_error(
+                        format!("encode section resource: {e}"),
+                        None,
+                    ))
                 })?
         };
-        let text = serde_json::to_string(&structured)
-            .map_err(|e| ErrorData::internal_error(format!("render resource text: {e}"), None))?;
+        let text = serde_json::to_string(&structured).map_err(|e| {
+            protocol_error::bound_error(ErrorData::internal_error(
+                format!("render resource text: {e}"),
+                None,
+            ))
+        })?;
         Ok(ReadResourceResponse::from(ReadResourceResult::new(vec![
             ResourceContents::text(text, uri).with_mime_type("application/json"),
         ])))

@@ -40,7 +40,7 @@ use rmcp::model::{ErrorCode, ErrorData, ProtocolVersion};
 use crate::commands::{CommandGuidanceError, LookupError};
 use crate::error::AppError;
 use crate::model::SchemaError;
-use crate::pagination::CursorError;
+use crate::pagination::{CursorError, MAX_RESPONSE_BYTES};
 use crate::reads::ReadError;
 use crate::runtime::LoadError;
 use crate::search::SearchError;
@@ -471,6 +471,187 @@ pub fn map<E: ProtocolError>(err: E, version: Option<&ProtocolVersion>) -> Error
 }
 
 // ---------------------------------------------------------------------------
+// Response-size bounding — issue #154.
+//
+// The 32 KiB response cap ([`crate::pagination::MAX_RESPONSE_BYTES`]) bounds a
+// *successful* page, but an error response carries the same JSON-RPC envelope, so
+// it must be bounded too. #154 is the gap: a 40,000-character identifier echoed
+// in *both* the error message and the structured `data` payload produced an ~80 KB
+// error that bypassed the cap, because no input-length gate or bounded-error
+// assembly protected the error path. Two layers close it:
+//
+//   1. **Handler-boundary input cap.** A user-controlled identifier (section id,
+//      category, command key, source, cursor, resource URI) larger than
+//      [`MAX_IDENTIFIER_BYTES`] is rejected *before* it reaches a handler's
+//      not-found mapping, so the full input is never echoed. The rejection is a
+//      bounded [`IdentifierTooLarge`] error: a short diagnostic preview plus the
+//      original byte length, never the full string — the "bounded preview plus
+//      original length" the issue asks for, replacing the duplicate full echo.
+//   2. **Final serialized-size backstop.** Even a bounded error is serialized and
+//      checked against [`ERROR_RESPONSE_BUDGET`] ([`bound_error_response`]); a
+//      response that would still exceed the cap (a pathological case the input cap
+//      did not anticipate) has its structured `data` dropped to a truncation
+//      marker so the whole message fits under the cap.
+//
+// Together they guarantee no error response — from any of the five tools or the
+// two resources — can exceed the 32 KiB cap.
+
+/// The per-identifier UTF-8 byte cap applied at the handler boundary. A
+/// user-controlled selector larger than this is rejected with a bounded
+/// [`IdentifierTooLarge`] error rather than echoed into the response.
+///
+/// 4096 is far larger than any real section id, category, command key, source, or
+/// cursor (all well under a few hundred bytes), so a legitimate input is never
+/// rejected; yet it keeps even a *rejected* input's diagnostic small enough that
+/// the message + `data` together stay far under the 32 KiB cap.
+pub const MAX_IDENTIFIER_BYTES: usize = 4096;
+
+/// The bounded preview length (UTF-8 bytes) carried by an over-identifier
+/// diagnostic. The original byte length is carried alongside so the caller knows
+/// how much was truncated.
+pub const IDENTIFIER_PREVIEW_BYTES: usize = 64;
+
+/// The serialized-byte budget for a single error response. The 32 KiB response
+/// cap ([`MAX_RESPONSE_BYTES`]) is shared with the JSON-RPC envelope
+/// (`jsonrpc`, `id`, `error` keys and the `data` truncation marker); this leaves
+/// a margin so the `error` object itself never pushes the whole message over the
+/// cap.
+pub const ERROR_RESPONSE_BUDGET: usize = MAX_RESPONSE_BYTES - 512;
+
+/// A user-controlled identifier that exceeded [`MAX_IDENTIFIER_BYTES`].
+///
+/// The handler rejects it *before* dispatch (the #154 fix), so the full input
+/// never reaches a not-found mapping and is never echoed. The error carries a
+/// bounded preview ([`bounded_preview`]) and the original byte length — enough to
+/// be actionable (the caller knows the input was too long, and by how much,
+/// without re-sending the oversized string).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentifierTooLarge {
+    /// Which field was over the cap (`section_id`, `category`, `command`,
+    /// `source`, `cursor`, `uri`, …).
+    pub field: &'static str,
+    /// The original UTF-8 byte length of the input.
+    pub bytes: usize,
+    /// The cap that was exceeded ([`MAX_IDENTIFIER_BYTES`]).
+    pub limit: usize,
+    /// A bounded, UTF-8-safe preview of the input (never the full string).
+    pub preview: String,
+}
+
+impl ProtocolError for IdentifierTooLarge {
+    fn error_class(&self) -> ErrorClass {
+        // An over-long identifier is a caller-input problem, not a missing
+        // resource: the input is malformed *by length*, so `INVALID_PARAMS`.
+        // (This also means the 2026-07-28 resource-not-found upgrade does not
+        // touch it — the code is already `INVALID_PARAMS`.)
+        ErrorClass::InvalidParams
+    }
+
+    fn message(&self) -> String {
+        // A fixed, bounded sentence: the field name, the original byte length, and
+        // the cap. The (bounded) preview is carried in `data`, not re-echoed here
+        // — this is the duplicate-echo #154 flags, now removed.
+        format!(
+            "oversized {} identifier: {} UTF-8 bytes exceeds the {}-byte limit; \
+             shorten the input to at most {} bytes (a bounded preview is in `data`)",
+            self.field, self.bytes, self.limit, self.limit,
+        )
+    }
+
+    fn data(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "field": self.field,
+            "bytes": self.bytes,
+            "limit": self.limit,
+            "preview": self.preview,
+            "truncated": true,
+        }))
+    }
+}
+
+/// Truncate `value` to a bounded, UTF-8-safe preview, appending a U+2026 ellipsis
+/// when truncated. The cut is backed off to the nearest char boundary so the
+/// prefix is always valid UTF-8 (a multibyte character is never split across the
+/// cut); the original length is the caller's responsibility to record alongside.
+///
+/// `0` is always a char boundary, so the back-off loop always terminates even for
+/// a value shorter than the cap (the early return below handles that case, so the
+/// loop only runs when `value.len() > IDENTIFIER_PREVIEW_BYTES`).
+pub fn bounded_preview(value: &str) -> String {
+    if value.len() <= IDENTIFIER_PREVIEW_BYTES {
+        return value.to_string();
+    }
+    let mut cut = IDENTIFIER_PREVIEW_BYTES;
+    while !value.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let prefix = &value[..cut];
+    format!("{prefix}\u{2026}")
+}
+
+/// Check a user-controlled identifier against [`MAX_IDENTIFIER_BYTES`],
+/// returning an [`IdentifierTooLarge`] when it exceeds the cap. This is the
+/// handler-boundary gate ([`crate::mcp::DocsServer::dispatch_call`] /
+/// [`dispatch_read`]) that keeps an over-long input from echoing into an
+/// over-cap error response.
+///
+/// `value.len()` is the UTF-8 *byte* length — the quantity the response cap
+/// measures — so a multibyte input is bounded by its serialized size, not its
+/// character count.
+pub fn check_identifier(field: &'static str, value: &str) -> Result<(), IdentifierTooLarge> {
+    if value.len() <= MAX_IDENTIFIER_BYTES {
+        return Ok(());
+    }
+    Err(IdentifierTooLarge {
+        field,
+        bytes: value.len(),
+        limit: MAX_IDENTIFIER_BYTES,
+        preview: bounded_preview(value),
+    })
+}
+
+/// The final serialized-size backstop. Serialize `error_data`; if it fits the
+/// `budget`, return it unchanged. If it exceeds the budget, drop its structured
+/// `data` (the likely culprit — a large input echoed into the payload) to a
+/// bounded truncation marker that records the original byte count, so the
+/// `error` object fits. The `code` is preserved; the `message` is already bounded
+/// by the input cap, but a pathological unbounded message is truncated to a
+/// preview as a final guard so the whole object fits under any budget.
+pub fn bound_error_response(mut error_data: ErrorData, budget: usize) -> ErrorData {
+    let serialized = serde_json::to_vec(&error_data)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    if serialized <= budget {
+        return error_data;
+    }
+    // Over budget: replace the structured `data` with a bounded truncation marker
+    // that records how many bytes the full response would have been, so a caller
+    // (or the operator) can see the error was dropped rather than mis-truncated.
+    error_data.data = Some(serde_json::json!({
+        "truncated": true,
+        "bytes": serialized,
+        "limit": budget,
+    }));
+    // Re-check: a bounded `data` may still leave the message over budget. If so,
+    // truncate the message to a bounded preview as the final guard.
+    let recheck = serde_json::to_vec(&error_data)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    if recheck <= budget {
+        return error_data;
+    }
+    error_data.message = std::borrow::Cow::Owned(bounded_preview(&error_data.message));
+    error_data
+}
+
+/// The final serialized-size backstop using the module's
+/// [`ERROR_RESPONSE_BUDGET`]. The handlers call this after [`map`] so no error
+/// response can exceed the 32 KiB cap, even if an input cap is bypassed.
+pub fn bound_error(error_data: ErrorData) -> ErrorData {
+    bound_error_response(error_data, ERROR_RESPONSE_BUDGET)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -684,5 +865,153 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // #154 response-bounding tests.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bounded_preview_passes_through_short_values() {
+        // A value at or under the preview cap is returned unchanged, no ellipsis.
+        assert_eq!(bounded_preview("cargo/01-build"), "cargo/01-build");
+        assert_eq!(
+            bounded_preview("a".repeat(IDENTIFIER_PREVIEW_BYTES).as_str()),
+            "a".repeat(IDENTIFIER_PREVIEW_BYTES),
+        );
+    }
+
+    #[test]
+    fn bounded_preview_truncates_long_values_with_ellipsis() {
+        let preview = bounded_preview("a".repeat(1000).as_str());
+        // The preview is the cap-sized prefix plus the U+2026 ellipsis — never the
+        // full 1000-byte input.
+        assert_eq!(
+            preview,
+            format!("{}\u{2026}", "a".repeat(IDENTIFIER_PREVIEW_BYTES)),
+        );
+        assert!(preview.len() <= IDENTIFIER_PREVIEW_BYTES + 3);
+    }
+
+    #[test]
+    fn bounded_preview_is_utf8_safe_at_multibyte_boundaries() {
+        // A multibyte character straddling the cut must not be split: the prefix
+        // is valid UTF-8 (the back-off loop stops at the nearest char boundary).
+        let value = "e".repeat(IDENTIFIER_PREVIEW_BYTES + 1) + "\u{201c}"; // a 3-byte char at the end
+        let preview = bounded_preview(value.as_str());
+        assert!(
+            std::str::from_utf8(preview.as_bytes()).is_ok(),
+            "the preview must be valid UTF-8"
+        );
+        assert!(preview.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn check_identifier_accepts_within_cap_and_rejects_over() {
+        assert!(check_identifier("section_id", "cargo/01-build").is_ok());
+        // Exactly at the cap is accepted; one byte over is rejected.
+        assert!(check_identifier("section_id", "a".repeat(MAX_IDENTIFIER_BYTES).as_str()).is_ok());
+        let err = check_identifier("section_id", "a".repeat(MAX_IDENTIFIER_BYTES + 1).as_str())
+            .expect_err("one byte over the cap must be rejected");
+        assert_eq!(err.field, "section_id");
+        assert_eq!(err.bytes, MAX_IDENTIFIER_BYTES + 1);
+        assert_eq!(err.limit, MAX_IDENTIFIER_BYTES);
+        // The preview is bounded, not the full input.
+        assert!(err.preview.len() <= IDENTIFIER_PREVIEW_BYTES + 3);
+    }
+
+    #[test]
+    fn check_identifier_bounds_multibyte_utf8_by_bytes() {
+        // A multibyte input is bounded by its UTF-8 *byte* length, not its
+        // character count. Four 3-byte characters over the cap is 12 bytes over.
+        let value = "\u{201c}".repeat(MAX_IDENTIFIER_BYTES / 3 + 2);
+        let err = check_identifier("command", value.as_str())
+            .expect_err("a multibyte input over the byte cap must be rejected");
+        assert_eq!(err.bytes, value.len());
+        assert_eq!(err.bytes, 3 * (MAX_IDENTIFIER_BYTES / 3 + 2));
+    }
+
+    #[test]
+    fn oversized_identifier_maps_to_invalid_params_and_is_bounded() {
+        // The over-cap identifier is `INVALID_PARAMS` (never `RESOURCE_NOT_FOUND`,
+        // so the 2026-07-28 upgrade does not touch it) and the full input is not
+        // echoed: the serialized error is small even for a 40,000-char input.
+        let big = "a".repeat(40_000);
+        let err = check_identifier("section_id", big.as_str()).unwrap_err();
+        let mapped = err.protocol_error(Some(&v("2026-07-28")));
+        assert_eq!(mapped.code, ErrorCode::INVALID_PARAMS);
+        let bytes = serde_json::to_vec(&mapped).expect("serialize the error");
+        assert!(
+            bytes.len() < 512,
+            "the over-cap error must stay tiny, got {} bytes",
+            bytes.len(),
+        );
+        // The full 40,000-char input is not present anywhere in the response.
+        let serialized = String::from_utf8(bytes).expect("utf-8");
+        assert!(!serialized.contains("a".repeat(1000).as_str()));
+        // The diagnostic carries the original length and a bounded preview.
+        assert_eq!(
+            mapped.data.as_ref().unwrap().get("bytes"),
+            Some(&serde_json::json!(40_000))
+        );
+        assert_eq!(
+            mapped.data.as_ref().unwrap().get("truncated"),
+            Some(&serde_json::json!(true))
+        );
+    }
+
+    #[test]
+    fn bound_error_response_is_a_noop_for_small_errors() {
+        let small = SearchError::BlankQuery.protocol_error(None);
+        let bounded = bound_error_response(small.clone(), ERROR_RESPONSE_BUDGET);
+        // A small error passes through unchanged (its bytes are identical).
+        assert_eq!(
+            serde_json::to_vec(&bounded).unwrap(),
+            serde_json::to_vec(&small).unwrap(),
+        );
+        // And a small error is still under the cap.
+        assert!(serde_json::to_vec(&bounded).unwrap().len() <= ERROR_RESPONSE_BUDGET);
+    }
+
+    #[test]
+    fn bound_error_response_truncates_an_over_budget_error() {
+        // A pathological error whose `data` is enormous must be brought under the
+        // budget by dropping the structured data to a truncation marker.
+        let huge = serde_json::Value::String("a".repeat(200_000));
+        let err = ErrorData::new(ErrorCode::INVALID_PARAMS, "an error", Some(huge));
+        let serialized_before = serde_json::to_vec(&err).unwrap().len();
+        assert!(serialized_before > ERROR_RESPONSE_BUDGET);
+        let bounded = bound_error_response(err, ERROR_RESPONSE_BUDGET);
+        let serialized_after = serde_json::to_vec(&bounded).unwrap().len();
+        assert!(
+            serialized_after <= ERROR_RESPONSE_BUDGET,
+            "the backstop must bring the error under the budget, got {} bytes",
+            serialized_after,
+        );
+        // The truncation marker records the original byte count.
+        let data = bounded.data.as_ref().expect("a truncation marker");
+        assert_eq!(data.get("truncated"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            data.get("bytes"),
+            Some(&serde_json::json!(serialized_before))
+        );
+    }
+
+    #[test]
+    fn bound_error_truncates_a_pathological_message_too() {
+        // Defense in depth: even a huge *message* (an input cap bypassed) is
+        // truncated so the whole object fits.
+        let err = ErrorData::new(
+            ErrorCode::INTERNAL_ERROR,
+            "x".repeat(100_000),
+            Some(serde_json::json!({ "note": "x".repeat(100_000) })),
+        );
+        let bounded = bound_error(err);
+        let serialized = serde_json::to_vec(&bounded).unwrap().len();
+        assert!(
+            serialized <= ERROR_RESPONSE_BUDGET,
+            "a pathological error must be brought under the cap, got {} bytes",
+            serialized,
+        );
     }
 }
