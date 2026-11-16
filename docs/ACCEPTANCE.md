@@ -159,7 +159,7 @@ stdio by `tests/stdio_mcp.rs` ([057], PR #130):
     guidance).
   - **Rust review trial** — `tests/trial_review.rs`, `docs/trials/review.md`
     ([070], PR #142): `C-CONV` / `clippy/configuration` / `style-guide/intro`
-    findings plus a `needless_return` zero-hit coverage probe.
+    findings plus a `float_cmp` zero-hit coverage probe.
 
 ## Unresolved limitations and skipped checks
 

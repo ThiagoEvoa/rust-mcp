@@ -69,7 +69,7 @@ network. The agent's call sequence is:
 | 7 | `search_docs` — `"lint"` | the reliable path to the **Clippy lint** the reviewer would cite: it surfaces `clippy/configuration` (the seed's one Clippy section), carrying the nightly-component qualification. |
 | 8 | `get_section` — `"clippy/configuration"` | read the section the **lint finding** cites, with its body, `canonical_url`, `content_hash`, and the qualification citation. |
 | 9 | `get_section` — `"style-guide/intro"` | read the section the **style finding** cites, with its body, `canonical_url`, `content_hash`, and the canonical-document citation. |
-| 10 | `search_docs` — `"needless_return"` | a **coverage-limitation probe** (AC2): a *specific* Clippy lint whose section the representative seed does **not** ship — a useful `0 hit` with `next_steps`, the recorded gap rather than a fabricated lint section. |
+| 10 | `search_docs` — `"float_cmp"` | a **coverage-limitation probe** (AC2): a *specific* Clippy lint whose section the representative seed does **not** ship — a useful `0 hit` with `next_steps`, the recorded gap rather than a fabricated lint section. |
 | 11 | clean client disconnect | the server self-exits. |
 
 The trial's "findings" are the review conclusions the agent draws — each pairing a
@@ -308,13 +308,13 @@ records.
 }
 ```
 
-### 3.9 `search_docs "needless_return"` → a useful empty (the coverage-limitation probe)
+### 3.9 `search_docs "float_cmp"` → a useful empty (the coverage-limitation probe)
 
-`needless_return` is a *specific* Clippy lint. The representative seed ships only
-the `clippy/configuration` section — **not** the per-lint catalog — so a search for
-a specific lint id returns **`0 hits`** with `next_steps`. This is the trial's
-coverage-limitation probe (AC2): a useful empty the trial records, **not** a
-fabricated lint section.
+`float_cmp` is a *specific* Clippy lint. Since issue #155 the representative seed
+ships the per-lint catalog, but it is a **curated subset** — it does **not** ship
+`float_cmp` — so a search for this specific lint id returns **`0 hits`** with
+`next_steps`. This is the trial's coverage-limitation probe (AC2): a useful empty
+the trial records, **not** a fabricated lint section.
 
 ```json
 {
@@ -403,7 +403,7 @@ The trial makes the boundary explicit and asserts it
 **Coverage limitations recorded (AC2), not asserted away:**
 
 1. **A specific Clippy lint is not in the representative seed.** The `0 hit` for
-   `needless_return` (§3.9) shows the seed ships the Clippy *configuration
+   `float_cmp` (§3.9) shows the seed ships the Clippy *configuration
    reference* (`clippy/configuration`), not the per-lint catalog. The lint finding
    therefore cites the configuration section's **qualification**, not the
    individual lint's rule body; the detailed rule lives upstream at the
@@ -483,7 +483,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_docs","arguments":{"query":"lint"}}}' \
   '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"get_section","arguments":{"section_id":"clippy/configuration"}}}' \
   '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"get_section","arguments":{"section_id":"style-guide/intro"}}}' \
-  '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"search_docs","arguments":{"query":"needless_return"}}}' \
+  '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"search_docs","arguments":{"query":"float_cmp"}}}' \
   | target/release/rust-docs-mcp serve --data-dir /tmp/rust-docs-mcp-070
 
 # then close stdin (Ctrl-D); the server self-exits with no stdout protocol traffic.
@@ -491,7 +491,7 @@ printf '%s\n' \
 
 The responses match the transcript in §3: the `C-CONV` search and `lint` search
 surface their sections with citations; the three `get_section` reads return the
-cited sections with `content_hash` / `canonical_url`; the `needless_return` probe
+cited sections with `content_hash` / `canonical_url`; the `float_cmp` probe
 returns `0 hits` with `next_steps`. A clean client disconnect makes the server
 exit `0` with **no stdout protocol traffic** (the diagnostics go to stderr).
 

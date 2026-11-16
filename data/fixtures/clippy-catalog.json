@@ -1,0 +1,15 @@
+{
+  "catalog_url": "https://clippy.rust-lang.org/stable/index.html",
+  "note": "Frozen canonical Clippy lint-catalog lints. Extracted deterministically from the clippy catalog sections by `extract_catalog_lint_ids`; the hermetic `clippy_catalog_fixture_stays_current` guards drift against the embedded catalog, and the ignored `clippy_live_catalog_still_covers_the_canonical_fixture` guards drift against the live catalog.",
+  "lint_ids": [
+    "clippy::clone_on_copy",
+    "clippy::expect_used",
+    "clippy::missing_panics_doc",
+    "clippy::needless_return",
+    "clippy::new_without_default",
+    "clippy::panic",
+    "clippy::redundant_clone",
+    "clippy::unwrap_used",
+    "clippy::while_let_on_iterator"
+  ]
+}

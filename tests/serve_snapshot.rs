@@ -388,6 +388,78 @@ async fn serve_serves_the_local_snapshot_for_all_tools_and_resources() {
 }
 
 // ---------------------------------------------------------------------------
+// Acceptance 3 (issue #155): a spawned stdio `serve` over a synced corpus
+// resolves the three named Clippy lint sections by id — `clippy::unwrap_used`,
+// `clippy::clone_on_copy`, and `clippy::needless_return` — proving the per-lint
+// catalog sections published by the sync are retrievable end-to-end through the
+// assembled stdio client seam (not just the library API).
+// ---------------------------------------------------------------------------
+
+/// AC3 (issue #155): the three named Clippy lint sections resolve via
+/// `get_section` over a spawned stdio server. `unwrap_used` and `clone_on_copy`
+/// predate the sync; `needless_return` arrives only through the newly-connected
+/// catalog. A local snapshot (derived from the issue #155-bundled snapshot, which
+/// now carries the per-lint catalog) is the corpus the server serves; each of the
+/// three section ids resolves with a non-empty body and the right provenance.
+#[tokio::test]
+async fn spawned_serve_resolves_the_three_named_clippy_lints() {
+    const LOCAL_ID: &str = "audit-clippy-catalog";
+    let data_dir = fresh_data_dir();
+    // The local snapshot is derived from the bundled snapshot, which the issue
+    // #155 sync now publishes with the per-lint catalog (including
+    // `needless_return`).
+    write_local_snapshot(&data_dir, LOCAL_ID);
+
+    let mut server = Server::spawn(&data_dir).await;
+    server.initialize().await;
+
+    for section_id in [
+        "clippy/clippy-catalog#unwrap_used",
+        "clippy/clippy-catalog#clone_on_copy",
+        "clippy/clippy-catalog#needless_return",
+    ] {
+        let response = server
+            .call_tool("get_section", json!({ "section_id": section_id }))
+            .await;
+        assert_eq!(
+            response.get("error"),
+            None,
+            "`get_section` must resolve {section_id} over the spawned server, got: {response}"
+        );
+        let section = &response["result"]["structuredContent"]["section"];
+        // The resolved section names its own id and the `clippy` source, and
+        // carries its captured content identity and canonical URL (provenance),
+        // plus a non-empty normalized body.
+        assert_eq!(
+            section.get("id").and_then(Value::as_str),
+            Some(section_id),
+            "the resolved section must name the requested id {section_id}"
+        );
+        assert_eq!(
+            section.get("source").and_then(Value::as_str),
+            Some("clippy"),
+            "the resolved section must name the clippy source"
+        );
+        assert!(
+            section
+                .get("content_hash")
+                .and_then(Value::as_str)
+                .is_some_and(|h| !h.is_empty()),
+            "the resolved {section_id} section must carry a content hash"
+        );
+        assert!(
+            section
+                .get("body")
+                .and_then(Value::as_str)
+                .is_some_and(|b| !b.trim().is_empty()),
+            "the resolved {section_id} section must carry a non-empty body"
+        );
+    }
+
+    server.close_and_read_stderr().await;
+}
+
+// ---------------------------------------------------------------------------
 // Acceptance 2: a missing or invalid local corpus falls back to the embedded
 // seed and reports why.
 // ---------------------------------------------------------------------------

@@ -48,7 +48,7 @@
 //! 9. `get_section` the `casts-as` style section → a **style-guide** section the
 //!    agent cites for a style finding: its body, `canonical_url`, `content_hash`,
 //!    and the canonical-document citation.
-//! 10. `search_docs "needless_return"` → a **coverage-limitation probe** (AC2):
+//! 10. `search_docs "float_cmp"` → a **coverage-limitation probe** (AC2):
 //!     a *specific* Clippy lint whose section the faithful corpus does **not**
 //!     ship — a useful `0 hit` result with `next_steps`, the recorded gap rather
 //!     than a fabricated lint section.
@@ -131,10 +131,11 @@ const STYLE_HASH: &str = "c128-ffa58b2eca2ddeefbc32644e4bf612b4";
 const STYLE_URL: &str = "https://doc.rust-lang.org/style-guide/expressions.html#casts-as";
 
 /// A *specific* Clippy lint the coverage-limitation probe searches for. The
-/// faithful corpus ships the per-lint catalog, but this lint's section is
-/// absent, so the search is a `0 hit` the trial records as a coverage gap
-/// rather than a fabricated section.
-const MISSING_LINT_QUERY: &str = "needless_return";
+/// faithful corpus now ships the per-lint catalog (issue #155), so the probe
+/// targets a real Clippy lint (`float_cmp`) whose section the representative
+/// seed still does not ship; the search is a `0 hit` the trial records as a
+/// coverage gap rather than a fabricated section.
+const MISSING_LINT_QUERY: &str = "float_cmp";
 
 /// The five tools the trial expects the agent to discover.
 const TOOLS: [&str; 5] = [
@@ -887,11 +888,11 @@ fn observed_vs_unverified_are_separated(findings: &[Finding]) {
     }
 }
 
-/// AC2 — the coverage-limitation probe: a *specific* Clippy lint (`needless_
-/// return`) whose section the representative seed does not ship returns a
-/// **useful empty** — `0 hits` with `next_steps` — not a fabricated lint
-/// section. This is the "a lint whose section is not in the representative seed"
-/// gap the trial records.
+/// AC2 — the coverage-limitation probe: a *specific* Clippy lint (`float_cmp`)
+/// whose section the representative seed does not ship returns a **useful
+/// empty** — `0 hits` with `next_steps` — not a fabricated lint section. This is
+/// the "a lint whose section is not in the representative seed" gap the trial
+/// records.
 fn coverage_limitation_is_recorded(response: &Value, query: &str) {
     assert_eq!(
         response.get("error"),

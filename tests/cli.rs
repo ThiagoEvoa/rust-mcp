@@ -181,10 +181,10 @@ fn inspect_reports_the_active_corpus_not_the_fixtures() {
         stderr.contains("verdict=complete"),
         "a complete corpus must report a complete verdict:\n{stderr}"
     );
-    // The section count is the *loaded corpus* count (the faithful seed's 544
+    // The section count is the *loaded corpus* count (the faithful seed's 545
     // sections), not the 4-fixture count the bug reported.
     assert!(
-        stderr.contains("sections=544"),
+        stderr.contains("sections=545"),
         "inspect must report the loaded corpus section count, not a fixture count:\n{stderr}"
     );
     assert!(
