@@ -355,7 +355,7 @@ Exit: a fresh installation can answer design/style and tooling queries offline, 
 - Network failure, malformed HTML, missing chapters, corrupt snapshots, and interrupted publication preserve the last valid corpus and report actionable errors.
 - With outbound network disabled, a fresh binary containing its bundled corpus completes source listing, search across all eight sources, section reads, checklist retrieval, and command guidance retrieval.
 - MCP schemas and serialized outputs agree; tool and resource reads return the same section content and snapshot identity.
-- All tool responses respect the complete serialized size cap and make continuation explicit.
+- All tool responses — successful pages **and** error responses — respect the complete serialized size cap and make continuation explicit. Over-long user-controlled identifiers (section ids, commands, categories, cursors, resource URIs) are rejected at the handler boundary with a bounded error (a short diagnostic preview plus the original byte length), so a large input cannot produce an unbounded error response that bypasses the cap.
 
 Maintain at least forty hand-labeled queries spanning all eight sources, including exact guideline codes, command names, lint IDs, and ordinary agent phrasing. Include at least three queries per source and at least twelve command/workflow queries overall. Require the labeled relevant section in the top five for at least 90% of queries, and first place for every exact guideline-code, canonical command-name, and lint-ID case. Keep the query set distinct from ranking aliases to avoid merely testing hardcoded examples.
 

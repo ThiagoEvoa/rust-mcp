@@ -342,6 +342,333 @@ async fn serve_exposes_the_five_tools_and_two_resources_over_stdio() {
 }
 
 // ---------------------------------------------------------------------------
+// [P1][QA] #154 — error responses and user-controlled identifiers are bounded
+// under the 32 KiB response cap. Over-cap inputs (section id, command, category,
+// cursor, resource URI) are rejected at the handler boundary with a bounded
+// `INVALID_PARAMS` error (a short diagnostic preview plus the original byte
+// length), never the full input echoed in both the message and the `data`
+// payload. A final serialized-size backstop guards the error path too, so no
+// error response can exceed the cap. Success pagination and shell-operator
+// rejection (exercised by the main test above) are unaffected.
+// ---------------------------------------------------------------------------
+
+/// The complete serialized response cap, in bytes: `32 * 1024`, the same bound
+/// the successful-page path enforces ([`crate::pagination::MAX_RESPONSE_BYTES`]).
+/// A newline-delimited JSON-RPC frame is the serialized object plus one newline,
+/// so the object staying under this bound keeps the frame at or under the cap.
+const MAX_RESPONSE_BYTES: usize = 32 * 1024;
+
+/// The per-identifier cap the handler boundary enforces. Inputs at or under it
+/// are not rejected by the cap; over it, a bounded `INVALID_PARAMS` is returned.
+const MAX_IDENTIFIER_BYTES: usize = 4096;
+
+/// Measure the complete serialized JSON-RPC frame a `response` represents: the
+/// object re-serialized to its compact wire form (the frame the server writes is
+/// this object plus a single trailing newline, so this is `frame - 1`).
+fn serialized_frame_bytes(response: &Value) -> usize {
+    serde_json::to_vec(response)
+        .expect("a JSON-RPC response serializes to bytes")
+        .len()
+}
+
+/// Assert a JSON-RPC error response is an error with the expected code **and**
+/// that its complete serialized frame stays under the 32 KiB cap.
+fn assert_bounded_error(response: &Value, expected_code: i32, context: &str) {
+    assert_error(response, expected_code, context);
+    let bytes = serialized_frame_bytes(response);
+    assert!(
+        bytes <= MAX_RESPONSE_BYTES,
+        "{context}: the complete error frame must stay under the {MAX_RESPONSE_BYTES}-byte \
+         response cap, but was {bytes} bytes: {response}"
+    );
+}
+
+/// #154: the three reproduced over-cap inputs — a 40,000-character `section_id`,
+/// `command`, and `category` — each produce a complete error frame that fits the
+/// 32 KiB cap, over the real spawned stdio server. This is the exact
+/// reproduction the issue reports (80 KB error responses bypassing the cap);
+/// after the fix the responses are small `INVALID_PARAMS` errors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_cap_identifiers_produce_bounded_error_responses_over_stdio() {
+    let mut client = Client::new().await;
+
+    let big = "a".repeat(40_000);
+
+    // 1. `get_section` / large `section_id`. Before the fix this echoed the
+    //    full 40,000-char id into both the message and `data`, producing an
+    //    ~80 KB error that bypassed the cap.
+    let response = client
+        .call_tool("get_section", json!({ "section_id": big.clone() }))
+        .await;
+    assert_bounded_error(
+        &response,
+        -32602,
+        "a 40,000-char section_id is a bounded INVALID_PARAMS",
+    );
+    assert_bounded_diagnostic(&response, "section_id", &big, "get_section");
+
+    // 2. `get_command_guidance` / large `command`.
+    let response = client
+        .call_tool("get_command_guidance", json!({ "command": big.clone() }))
+        .await;
+    assert_bounded_error(
+        &response,
+        -32602,
+        "a 40,000-char command is a bounded INVALID_PARAMS",
+    );
+    assert_bounded_diagnostic(&response, "command", &big, "get_command_guidance");
+
+    // 3. `get_api_checklist` / large `category`.
+    let response = client
+        .call_tool("get_api_checklist", json!({ "category": big.clone() }))
+        .await;
+    assert_bounded_error(
+        &response,
+        -32602,
+        "a 40,000-char category is a bounded INVALID_PARAMS",
+    );
+    assert_bounded_diagnostic(&response, "category", &big, "get_api_checklist");
+
+    // The process is still alive and healthy: a subsequent valid call resolves.
+    let response = client.call_tool("list_sources", json!({})).await;
+    assert_eq!(
+        response.get("error"),
+        None,
+        "the server stays alive after the over-cap calls: {response}"
+    );
+
+    client.close_and_wait_clean().await;
+}
+
+/// #154: overlong *multibyte* UTF-8 inputs are bounded by their UTF-8 byte
+/// length (the quantity the cap measures), and the bounded preview never splits a
+/// character across the cut — Unicode boundaries are safe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_cap_multibyte_utf8_inputs_are_bounded_over_stdio() {
+    let mut client = Client::new().await;
+
+    // 40,000 × "é" (a 3-byte character) = 120,000 bytes, far over the cap. The
+    // byte-length cap rejects it, and the preview stays valid UTF-8.
+    let big = "\u{e9}".repeat(40_000);
+    assert!(
+        big.len() > MAX_IDENTIFIER_BYTES,
+        "the multibyte input exceeds the cap"
+    );
+
+    let response = client
+        .call_tool("get_section", json!({ "section_id": big.clone() }))
+        .await;
+    assert_bounded_error(
+        &response,
+        -32602,
+        "a 120,000-byte multibyte section_id is a bounded INVALID_PARAMS",
+    );
+    // The diagnostic's byte count is the UTF-8 length (120,000), not the char
+    // count (40,000) — the cap is measured in bytes.
+    let data = &response["error"]["data"];
+    assert_eq!(
+        data["bytes"],
+        json!(big.len()),
+        "the diagnostic carries the UTF-8 byte length"
+    );
+    // The preview is bounded and valid UTF-8 (no split character).
+    let preview = data["preview"]
+        .as_str()
+        .expect("the diagnostic carries a preview");
+    assert!(
+        preview.len() <= 64 + 3,
+        "the preview is bounded, got {} bytes",
+        preview.len()
+    );
+    assert!(
+        std::str::from_utf8(preview.as_bytes()).is_ok(),
+        "the preview is valid UTF-8"
+    );
+
+    client.close_and_wait_clean().await;
+}
+
+/// #154: every string-bearing input surface — a cursor, an unknown tool name, and
+/// a section-resource URI — is bounded the same way, so a large value in any of
+/// them cannot produce an over-cap error response.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_cap_cursors_tools_and_resource_uris_are_bounded_over_stdio() {
+    let mut client = Client::new().await;
+    let big = "a".repeat(40_000);
+
+    // A large `cursor` on an otherwise valid tool is a bounded `INVALID_PARAMS`
+    // (the cursor is capped before the cursor-decode error is reached).
+    let response = client
+        .call_tool(
+            "get_section",
+            json!({ "section_id": "api-guidelines/about#rust-api-guidelines", "cursor": big.clone() }),
+        )
+        .await;
+    assert_bounded_error(
+        &response,
+        -32602,
+        "a 40,000-char cursor is a bounded INVALID_PARAMS",
+    );
+
+    // An unknown (and over-long) tool name is a bounded `METHOD_NOT_FOUND`: the
+    // error's backstop truncates the echoed tool name so the frame fits.
+    let response = client
+        .request(
+            "tools/call",
+            &json!({ "name": big.clone(), "arguments": json!({}) }),
+        )
+        .await;
+    assert_bounded_error(
+        &response,
+        -32601,
+        "a 40,000-char unknown tool name is a bounded METHOD_NOT_FOUND",
+    );
+
+    // An over-long section-resource URI (a huge section id embedded in the URI) is
+    // a bounded `INVALID_PARAMS`.
+    let big_uri = format!("rust-docs://snapshots/{SNAPSHOT_ID}/sections/{}", big);
+    let response = client.read_resource(&big_uri).await;
+    assert_bounded_error(
+        &response,
+        -32602,
+        "an over-long section-resource URI is a bounded INVALID_PARAMS",
+    );
+
+    client.close_and_wait_clean().await;
+}
+
+/// #154: the two `search_docs` string fields — `query` and `source` — are
+/// bounded the same way. `search_docs` already caps a query at its own
+/// 1000-byte limit (`QueryTooLarge`), but the handler-boundary cap
+/// (`MAX_IDENTIFIER_BYTES`) fires first for a much larger input and returns a
+/// bounded `INVALID_PARAMS` rather than the full echo; an over-long `source`
+/// selector is bounded the same way. This exercises the remaining
+/// string-bearing fields for AC3.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_cap_search_docs_query_and_source_are_bounded_over_stdio() {
+    let mut client = Client::new().await;
+    let big = "a".repeat(40_000);
+
+    // A 40,000-char `query` is cap-rejected at the handler boundary (a bounded
+    // `INVALID_PARAMS`), long before the search layer's own 1000-byte cap.
+    let response = client
+        .call_tool("search_docs", json!({ "query": big.clone() }))
+        .await;
+    assert_bounded_error(
+        &response,
+        -32602,
+        "a 40,000-char query is a bounded INVALID_PARAMS",
+    );
+    assert_bounded_diagnostic(&response, "query", &big, "search_docs/query");
+
+    // An over-long optional `source` selector is bounded the same way.
+    let response = client
+        .call_tool(
+            "search_docs",
+            json!({ "query": "cargo build", "source": big.clone() }),
+        )
+        .await;
+    assert_bounded_error(
+        &response,
+        -32602,
+        "a 40,000-char source is a bounded INVALID_PARAMS",
+    );
+    assert_bounded_diagnostic(&response, "source", &big, "search_docs/source");
+
+    client.close_and_wait_clean().await;
+}
+
+/// #154: the cap is a gate, not a rejection of everything large. Inputs at or
+/// under the cap are not cap-rejected: a valid section id resolves, and an
+/// invalid input exactly at the cap still reaches the not-found mapping (bounded
+/// by the backstop) rather than the cap. A one-byte-over input is cap-rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn near_limit_valid_inputs_still_resolve_and_the_cap_gate_is_exact_over_stdio() {
+    let mut client = Client::new().await;
+
+    // A valid, short section id resolves — the cap does not interfere with
+    // legitimate inputs.
+    let response = client
+        .call_tool(
+            "get_section",
+            json!({ "section_id": "api-guidelines/about#rust-api-guidelines" }),
+        )
+        .await;
+    assert_eq!(
+        response.get("error"),
+        None,
+        "a valid section id resolves under the cap: {response}"
+    );
+
+    // An input exactly at the cap (4096 bytes) is *not* cap-rejected: it reaches
+    // the not-found mapping. The response stays bounded (the backstop guards the
+    // 4 KB echo).
+    let at_cap = "x".repeat(MAX_IDENTIFIER_BYTES);
+    let response = client
+        .call_tool("get_section", json!({ "section_id": at_cap.clone() }))
+        .await;
+    assert_bounded_error(
+        &response,
+        -32002,
+        "an at-cap invalid section_id is a bounded not-found (not a cap rejection)",
+    );
+
+    // One byte over the cap is cap-rejected (a bounded `INVALID_PARAMS`).
+    let over_cap = "x".repeat(MAX_IDENTIFIER_BYTES + 1);
+    let response = client
+        .call_tool("get_section", json!({ "section_id": over_cap }))
+        .await;
+    assert_bounded_error(
+        &response,
+        -32602,
+        "a one-byte-over-cap section_id is a bounded INVALID_PARAMS cap rejection",
+    );
+
+    client.close_and_wait_clean().await;
+}
+
+/// Assert a cap rejection's `data` payload carries the bounded diagnostic the
+/// issue asks for: the field name, the original byte length, a short bounded
+/// preview, and a `truncated` flag — **not** the full input echoed in the
+/// message or `data`.
+fn assert_bounded_diagnostic(response: &Value, field: &str, big_input: &str, tool: &str) {
+    let data = &response["error"]["data"];
+    assert_eq!(
+        data.get("field"),
+        Some(&json!(field)),
+        "{tool}: the diagnostic names the offending field"
+    );
+    // The original length is carried so the caller knows how much was truncated.
+    assert_eq!(
+        data.get("bytes"),
+        Some(&json!(big_input.len())),
+        "{tool}: the diagnostic carries the original byte length"
+    );
+    assert_eq!(
+        data.get("limit"),
+        Some(&json!(MAX_IDENTIFIER_BYTES)),
+        "{tool}: the diagnostic names the cap"
+    );
+    assert_eq!(
+        data.get("truncated"),
+        Some(&json!(true)),
+        "{tool}: the diagnostic marks itself truncated"
+    );
+    // The preview is bounded (a short prefix + ellipsis), never the full input.
+    let preview = data.get("preview").and_then(Value::as_str);
+    assert!(
+        preview.is_some_and(|p| p.len() <= 64 + 3),
+        "{tool}: the preview is bounded, got {preview:?}"
+    );
+    // The full input is not echoed anywhere in the frame.
+    let serialized = serde_json::to_string(response).expect("serialize the response");
+    assert!(
+        !serialized.contains("a".repeat(1000).as_str()),
+        "{tool}: the full input must not be echoed in the error frame"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // AC1 — discovery + each tool.
 // ---------------------------------------------------------------------------
 
