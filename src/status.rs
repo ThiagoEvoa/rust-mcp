@@ -39,7 +39,7 @@
 //! deterministic (a fixed `as_of`), and the report is a pure function of its
 //! inputs: two calls with equal inputs produce equal reports.
 
-use crate::model::{CorpusHash, SnapshotId, SnapshotManifest, Timestamp};
+use crate::model::{Channel, CorpusHash, SnapshotId, SnapshotManifest, Timestamp};
 use crate::provenance::{Instant, SourceFreshness, StaleThreshold, evaluate_freshness};
 
 /// The per-source slice of a [`StatusReport`]: the source's identity, its three
@@ -72,6 +72,24 @@ pub struct SourceStatus {
     /// The freshness verdict (`stale` / `as_of` / `threshold` / parsed
     /// `last_checked`) computed by [`evaluate_freshness`].
     pub freshness: SourceFreshness,
+    // [174] snapshot-derived scope / coverage and provenance, surfaced so a
+    // client can see how broad a source is and what it was captured from
+    // without reading the raw snapshot.
+    /// The source's entry point URL (the human-facing reference).
+    pub entry_url: String,
+    /// The number of discovered document URLs this source carries.
+    pub document_count: usize,
+    /// The number of sections this source contributes to the snapshot.
+    pub section_count: usize,
+    /// The distribution channel the documentation was captured from.
+    pub channel: Channel,
+    /// The documentation release identifier when identifiable; `None` = unknown.
+    pub documentation_release: Option<String>,
+    /// The upstream source revision when identifiable; `None` = unknown.
+    /// Provenance only — a pinned revision is never a stability guarantee.
+    pub revision: Option<String>,
+    /// The parser adapter that ingested this source.
+    pub parser: String,
 }
 
 impl SourceStatus {
@@ -79,6 +97,19 @@ impl SourceStatus {
     /// unknown (preserved, never guessed).
     pub fn is_stale(&self) -> Option<bool> {
         self.freshness.is_stale()
+    }
+
+    /// The human-readable distribution-channel label
+    /// (`stable` / `nightly` / `rolling` / `unknown`), matching `Channel`'s
+    /// `serde(rename_all = "lowercase")` serialization. `Unknown` is an explicit
+    /// "we do not know", not a guess.
+    pub fn channel_label(&self) -> &'static str {
+        match self.channel {
+            Channel::Stable => "stable",
+            Channel::Nightly => "nightly",
+            Channel::Rolling => "rolling",
+            Channel::Unknown => "unknown",
+        }
     }
 
     /// The human rendering of the verdict: `stale`, `fresh`, or `unknown`.
@@ -128,6 +159,17 @@ pub fn build_report(
     as_of: Instant,
     threshold: StaleThreshold,
 ) -> StatusReport {
+    // [174] precompute how many sections each source contributes, so the
+    // per-source `section_count` is a snapshot-derived coverage figure without a
+    // second pass per source. Keyed by the source id string.
+    let mut section_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for section in &manifest.body.sections {
+        *section_counts
+            .entry(section.source_id.as_str().to_string())
+            .or_default() += 1;
+    }
+
     let sources = manifest
         .body
         .sources
@@ -142,6 +184,14 @@ pub fn build_report(
                 upstream_modified: source.upstream_modified.clone(),
                 content_hash: source.content_hash.clone(),
                 freshness,
+                // [174] snapshot-derived scope / coverage and provenance.
+                entry_url: source.entry_url.as_str().to_string(),
+                document_count: source.document_urls.len(),
+                section_count: section_counts.get(source.id.as_str()).copied().unwrap_or(0),
+                channel: source.release.channel,
+                documentation_release: source.release.documentation_release.clone(),
+                revision: source.release.revision.clone(),
+                parser: source.parser.clone(),
             }
         })
         .collect();
@@ -580,6 +630,72 @@ mod tests {
         assert_eq!(report.source_count, 2);
         assert_eq!(report.section_count, 7);
         assert_eq!(report.sources.len(), 2);
+    }
+
+    // [174] build_report populates the snapshot-derived scope/coverage and
+    // provenance on each `SourceStatus`, so the discovery views can surface them
+    // without reading the raw snapshot. Unknown values stay explicit (`None`),
+    // and the per-source section count is derived from the manifest's sections.
+    #[test]
+    fn report_populates_source_scope_and_provenance() {
+        let s = source(
+            "cargo",
+            "The Cargo Book",
+            None,
+            "2026-10-30T00:00:00Z",
+            None,
+            b"a",
+        );
+        let report = build_report(
+            &manifest("rust-docs-2026-10-30", vec![s], 3),
+            as_of("2026-10-31T00:00:00Z"),
+            StaleThreshold::default(),
+        );
+        let status = report.sources.first().expect("one source");
+        assert_eq!(status.entry_url, "https://doc.rust-lang.org/cargo/");
+        assert_eq!(status.document_count, 0);
+        // The manifest's three sections all belong to the cargo source.
+        assert_eq!(status.section_count, 3);
+        assert_eq!(status.channel, Channel::Stable);
+        assert_eq!(status.channel_label(), "stable");
+        assert!(status.documentation_release.is_none());
+        assert!(status.revision.is_none());
+        assert_eq!(status.parser, "test/1");
+    }
+
+    // [174] An undetermined channel and absent revision/release are preserved
+    // explicitly by build_report (never guessed), so the discovery view can
+    // report "unknown" rather than fabricate a value.
+    #[test]
+    fn report_preserves_unknown_provenance_explicitly() {
+        let s = source(
+            "cargo",
+            "The Cargo Book",
+            None,
+            "2026-10-30T00:00:00Z",
+            None,
+            b"a",
+        );
+        // Build a source whose channel is explicitly unknown, with no release or
+        // revision, and confirm the report preserves that explicitly.
+        let unknown = {
+            let mut s = s;
+            s.release = Release::channel_only(Channel::Unknown);
+            s
+        };
+        let report = build_report(
+            &manifest("rust-docs-2026-10-30", vec![unknown], 0),
+            as_of("2026-10-31T00:00:00Z"),
+            StaleThreshold::default(),
+        );
+        let status = report.sources.first().expect("one source");
+        assert_eq!(status.channel, Channel::Unknown);
+        assert_eq!(status.channel_label(), "unknown");
+        assert!(status.revision.is_none(), "absent revision stays unknown");
+        assert!(
+            status.documentation_release.is_none(),
+            "absent release identifier stays unknown"
+        );
     }
 
     // A rendered report shows the threshold and notes whether it is the default.

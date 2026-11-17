@@ -645,35 +645,13 @@ pub fn section_resource_inventory(
 // View projection
 // ---------------------------------------------------------------------------
 
-/// Map a per-source [`SourceStatus`] to its [`SourceStatusView`], keeping the
-/// freshness verdict in the human label the [048] view contract uses
-/// (`stale` / `fresh` / `unknown`). Mirrors [`crate::mcp::list_sources`].
+/// Map a per-source [`SourceStatus`] to its [`SourceStatusView`].
+///
+/// Delegates to [`crate::mcp::list_sources::view_from`] — the single canonical
+/// projection — so the catalog's source view and `list_sources` can never drift
+/// apart ([174]: keep the catalog's view consistent with `list_sources`).
 fn source_view_from(status: &SourceStatus) -> SourceStatusView {
-    SourceStatusView {
-        id: status.id.as_str().to_string(),
-        title: status.title.clone(),
-        last_checked: status
-            .last_checked
-            .as_ref()
-            .map(|at| at.as_str().to_string()),
-        fetched_at: status.fetched_at.as_str().to_string(),
-        upstream_modified: status
-            .upstream_modified
-            .as_ref()
-            .map(|at| at.as_str().to_string()),
-        content_hash: status.content_hash.as_str().to_string(),
-        freshness: verdict_label(status.is_stale()).to_string(),
-    }
-}
-
-/// Render a freshness verdict as the label the [048] view contract uses
-/// (`Some(true)` → `stale`, `Some(false)` → `fresh`, `None` → `unknown`).
-fn verdict_label(stale: Option<bool>) -> &'static str {
-    match stale {
-        Some(true) => "stale",
-        Some(false) => "fresh",
-        None => "unknown",
-    }
+    crate::mcp::list_sources::view_from(status)
 }
 
 /// Project a [039]–[043] [`CommandEntry`](crate::model::CommandEntry) onto a
@@ -1114,6 +1092,55 @@ mod tests {
         let schema = output_schema::<CatalogResourceView>();
         value_conforms(&schema, &json)
             .unwrap_or_else(|e| panic!("catalog view does not conform: {e}\n{json}"));
+    }
+
+    // [174] The catalog's source rows carry the same snapshot-derived scope/
+    // provenance `list_sources` surfaces, and the catalog advertises the same
+    // concrete command-catalog URI — the two discovery surfaces stay consistent
+    // because the source view is a single delegated projection.
+    #[test]
+    fn catalog_sources_carry_the_same_scope_and_provenance_as_list_sources() {
+        let m = snapshot();
+        let view = catalog_resource_view(&m, &catalog(), None, None, as_of(), threshold())
+            .expect("the catalog builds");
+
+        // Every catalog source row carries a real entry URL, a non-zero section
+        // count, a channel, and a recorded parser — the same fields list_sources
+        // surfaces.
+        assert_eq!(view.sources.len(), 8, "the catalog lists all eight sources");
+        for source in &view.sources {
+            assert!(
+                source.entry_url.starts_with("http"),
+                "catalog source {} has a real entry URL",
+                source.id
+            );
+            assert!(
+                source.section_count > 0,
+                "catalog source {} contributes sections",
+                source.id
+            );
+            assert!(
+                !source.channel.is_empty(),
+                "catalog source {} reports a channel",
+                source.id
+            );
+            assert!(
+                source.parser.starts_with("rust-docs-mcp/"),
+                "catalog source {} records its parser",
+                source.id
+            );
+        }
+
+        // The catalog advertises the same concrete command-catalog URI
+        // (`rust-docs://snapshots/{id}/commands`) that list_sources reports.
+        let expected = format!(
+            "rust-docs://snapshots/{}/commands",
+            m.body.snapshot_id.as_str()
+        );
+        assert!(
+            view.resource_uris.iter().any(|uri| uri == &expected),
+            "the catalog advertises the command-catalog URI the client fetches"
+        );
     }
 
     // ----- AC1: the catalog resource result is cap-bounded ----------------

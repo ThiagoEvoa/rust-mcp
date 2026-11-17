@@ -63,6 +63,14 @@ pub struct CitationView {
 }
 
 /// The per-source status row in [`ListSourcesResponse`] / the catalog resource.
+///
+/// [174] folds in the snapshot-derived **scope/coverage** (`entry_url`,
+/// `document_count`, `section_count`) and **provenance** (`channel`,
+/// `documentation_release`, `revision`, `parser`) so a client can see how broad
+/// a source is and what it was captured from, without reading the raw snapshot.
+/// Provenance fields are emitted only when known; a missing `documentation_release`
+/// or `revision` is an explicit "unknown", never an inferred guarantee (a pinned
+/// upstream revision is provenance, not a stability claim).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SourceStatusView {
     /// The source identity (e.g. `cargo`).
@@ -81,6 +89,25 @@ pub struct SourceStatusView {
     pub content_hash: String,
     /// The freshness verdict (`stale` / `as_of` / `unknown` …).
     pub freshness: String,
+    /// The source's entry point URL (the human-facing reference).
+    pub entry_url: String,
+    /// The number of discovered document URLs this source carries.
+    pub document_count: usize,
+    /// The number of sections this source contributes to the snapshot.
+    pub section_count: usize,
+    /// The distribution channel the documentation was captured from
+    /// (`stable` / `nightly` / `rolling` / `unknown`); `unknown` when not
+    /// determined.
+    pub channel: String,
+    /// The documentation release identifier when identifiable; absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation_release: Option<String>,
+    /// The upstream source revision when identifiable (e.g. a git commit); absent
+    /// when unknown. Provenance only — never a stability guarantee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// The parser adapter that ingested this source.
+    pub parser: String,
 }
 
 /// A retrievable section, as returned by `get_section`, the section resource,
@@ -263,6 +290,10 @@ pub struct GetCommandGuidanceRequest {
 
 /// `list_sources` output: the snapshot identity plus one status row per source
 /// and the discoverable command-catalog keys.
+///
+/// [174] adds `command_catalog_uri`: the concrete command-catalog discovery URI
+/// (`rust-docs://snapshots/{snapshot_id}/commands`) a client fetches for command
+/// guidance, so `list_sources` and the catalog resource stay consistent.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ListSourcesResponse {
     /// The active snapshot's identity.
@@ -273,6 +304,9 @@ pub struct ListSourcesResponse {
     pub sources: Vec<SourceStatusView>,
     /// The command-catalog keys, for `get_command_guidance` discovery.
     pub commands: Vec<String>,
+    /// The concrete command-catalog discovery URI a client fetches for command
+    /// guidance: `rust-docs://snapshots/{snapshot_id}/commands`.
+    pub command_catalog_uri: String,
     /// The snapshot's schema version.
     pub schema_version: String,
 }
