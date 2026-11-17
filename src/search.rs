@@ -280,6 +280,20 @@ const EXACT_BOOST_CODE: f64 = 1.0;
 const EXACT_BOOST_LINT: f64 = 2.0;
 const EXACT_BOOST_COMMAND: f64 = 3.0;
 
+/// A query that *names* a source (a bare tool verb such as `rustfmt`, `rustdoc`,
+/// `clippy`, `cargo`, `rustc`, `rustup`, or the verb of a command phrase such as
+/// `cargo doc`) lifts sections from that source far enough that the named source
+/// wins over a coincidentally larger match from another source. This is the
+/// "rank primary guideline explanations first" behaviour of issue #173: e.g.
+/// "where do I set rustfmt configuration options" should surface the rustfmt
+/// *Configurations* section ahead of a dense api-guidelines section that merely
+/// mentions the same words.
+///
+/// It is a single flat boost, not one per named tool, so it prioritises the
+/// named source without letting a bare mention of a tool verb dominate every
+/// match.
+const TOOL_AFFINITY_BOOST: f64 = 5.0;
+
 /// A ranked match returned by [`SectionIndex::search`].
 ///
 /// It carries the **retrievable section identity** ([`SectionId`], AC1) plus
@@ -809,43 +823,67 @@ impl SectionIndex {
         }
 
         // Restrict to the requested source(s) *after* ranking, then apply the
-        // exact-match boost. The sort key is (tier desc, score desc, section id
-        // asc):
+        // exact-match boost and the tool affinity. The sort key is
+        // (tier desc, primary-code desc, score desc, section id asc):
         //
         //   * `tier` is the categorical guarantee that an exact match precedes a
         //     body-only match — so a large lint catalog cannot crowd out a
         //     command-usage answer when the query names the command (AC2);
-        //   * within a tier, the boosted `score` refines the order;
+        //   * `primary_code` lifts the *primary* guideline explanation — the
+        //     section whose own heading carries the `(C-…)` marker — above the
+        //     standard-library / example sections that merely *inherit* the same
+        //     code (issue #173: rank the primary guideline explanation first). It
+        //     is a separate sort key, not folded into the score, so a primary
+        //     explanation always precedes an inherited one even when the
+        //     inherited section scored higher on raw BM25;
+        //   * within a tier and primary/inherit status, the boosted `score`
+        //     refines the order; the tool affinity (below) is part of that
+        //     score, so a source the query *names* ranks ahead of a coincidental
+        //     match from another source when the named source genuinely has the
+        //     answer (issue #173: "where do I set rustfmt configuration options"
+        //     should surface the rustfmt *Configurations* section, not a dense
+        //     api-guidelines section that merely mentions the words);
         //   * `section id asc` is the total, deterministic tie-break (section
         //     ids are unique), preserving [034]'s deterministic total order.
         //
         // The ranking signal is computed over the whole corpus; the source
         // filter only decides which of the ranked hits are returned.
-        let mut ranked: Vec<(u8, Hit)> = scored
+        let named_sources = named_tool_sources(&query_tokens);
+        let mut ranked: Vec<(u8, bool, Hit)> = scored
             .into_iter()
             .filter(|(doc, _)| filter.contains(self.sections[*doc].source_id.as_str()))
             .map(|(doc, bm25)| {
                 let section = &self.sections[doc];
                 let (tier, boost) = section_boost(section, &codes, &commands, &lints);
+                // A flat tool affinity when the section's source is one the query
+                // explicitly names; it only ever adds, so it can never demote a
+                // section below a weaker match it did not name.
+                let affinity = if named_sources.contains(section.source_id.as_str()) {
+                    TOOL_AFFINITY_BOOST
+                } else {
+                    0.0
+                };
                 (
                     tier,
+                    primary_code_match(section, &codes),
                     Hit {
                         section_id: section.id.clone(),
-                        score: bm25 + boost,
+                        score: bm25 + boost + affinity,
                     },
                 )
             })
             .collect();
         ranked.sort_by(|a, b| {
             b.0.cmp(&a.0)
+                .then_with(|| b.1.cmp(&a.1))
                 .then_with(|| {
-                    b.1.score
-                        .partial_cmp(&a.1.score)
+                    b.2.score
+                        .partial_cmp(&a.2.score)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
-                .then_with(|| a.1.section_id.as_str().cmp(b.1.section_id.as_str()))
+                .then_with(|| a.2.section_id.as_str().cmp(b.2.section_id.as_str()))
         });
-        ranked.into_iter().map(|(_, hit)| hit).collect()
+        ranked.into_iter().map(|(_, _, hit)| hit).collect()
     }
 
     /// Resolve a server-issued [`SectionId`] to the full [`Section`] it names,
@@ -1075,6 +1113,58 @@ fn section_boost(
         return (EXACT_TIER_CODE, EXACT_BOOST_CODE);
     }
     (EXACT_TIER_NONE, 0.0)
+}
+
+/// The source ids a query explicitly *names* — a bare tool verb (`rustfmt`,
+/// `rustdoc`, `clippy`, `cargo`, `rustc`, `rustup`) or the verb of a multi-word
+/// command phrase (`cargo doc` → `cargo`). Matched case-insensitively, so a
+/// capitalized "Clippy" names `clippy` too. A query that names no tool yields an
+/// empty set, so the affinity never fabricates a source.
+///
+/// This is the "rank primary guideline explanations first" signal of issue #173
+/// for queries that name a tool by its (often lower-case) verb: the named source
+///'s sections rise above coincidental matches from a larger source. It is keyed
+/// off the verb set [`is_command_verb`] already trusts for the command tier, so
+/// it is the same "a tool verb names its tool" rule, extended to a ranking
+/// affinity rather than a hard tier — it cannot demote a section, only lift the
+/// named source.
+fn named_tool_sources(query_tokens: &[Token]) -> BTreeSet<String> {
+    use Token::{Command, Flag, GuidelineCode, LintId, Word};
+    query_tokens
+        .iter()
+        .filter_map(|token| match token {
+            Word(word) => Some(word.as_str()),
+            // A multi-word command names its verb's source (the first word).
+            Command(cmd) => cmd.split_whitespace().next(),
+            // A `lint::name` id already names `clippy`; the exact lint match
+            // handles it, so it adds no separate source affinity.
+            // A guideline code or a `-f`/`--flag` names no source.
+            LintId(_) | GuidelineCode(_) | Flag(_) => None,
+        })
+        .filter_map(|word| {
+            let lowered = word.to_ascii_lowercase();
+            is_command_verb(&lowered).then_some(lowered)
+        })
+        .collect()
+}
+
+/// Whether `section` is the *primary* explanation for a matched guideline code —
+/// its own leaf heading carries a `(C-…)` marker that is one of the codes the
+/// query matched (`codes`). Used to lift the primary guideline explanation above
+/// the standard-library / example sections that merely *inherit* the same code
+/// (issue #173: rank the primary guideline explanation first, e.g. the
+/// "Ad-hoc conversions (C-CONV)" heading over an inherited "More examples").
+///
+/// The marker check reuses the ingestion rule
+/// [`crate::ingest::guideline_code_in`], so ranking and ingestion agree on what
+/// a primary `(C-…)` heading is.
+fn primary_code_match(section: &Section, codes: &BTreeSet<String>) -> bool {
+    section
+        .heading_path
+        .last()
+        .and_then(|heading| crate::ingest::guideline_code_in(heading))
+        .map(|code| codes.contains(&code))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1366,7 +1456,12 @@ mod tests {
     fn equal_scores_tie_break_by_section_id() {
         // Identical body, codes, commands, lints => identical token multiset =>
         // identical length and identical BM25 contribution for any query. The
-        // only difference is the chapter path (and thus the section id).
+        // two sections also share a source, so the source affinity that issue
+        // #173 added to the score (a query that *names* a source lifts that
+        // source's sections) is symmetric across the two and cannot
+        // differentiate them: the id remains the sole tie-breaker. Making the
+        // source identical — rather than differing — is what keeps the two
+        // sections' scores equal now that the score carries a source signal.
         let a = section(
             "cargo",
             "aaa",
@@ -1377,7 +1472,7 @@ mod tests {
             &[],
         );
         let b = section(
-            "rustc",
+            "cargo",
             "zzz",
             "ignored",
             "cargo build compiles the package and its dependencies",

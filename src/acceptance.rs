@@ -258,22 +258,17 @@ pub fn measure(manifest: &SnapshotManifest, environment: &Environment) -> Accept
 }
 
 /// Measure one case over the assembled index: run its query, record the top-1
-/// hit, whether a top-5 result is in the expected source, and — for exact-match
-/// cases — whether the top-1 carries the literal token. A case always produces a
-/// measurement; if it cannot, the reason is recorded in `error` and `measured`
-/// is `false` (it is never counted as a pass).
+/// hit, whether a top-5 result is *relevant* (issue #173's cross-source rule),
+/// and — for exact-match cases — whether the top-1 carries the literal token. A
+/// case always produces a measurement; if it cannot, the reason is recorded in
+/// `error` and `measured` is `false` (it is never counted as a pass).
 fn measure_case(index: &SectionIndex, case: &EvalCase) -> CaseOutcome {
     let hits = index.search(case.query);
     // The top-1 hit's section id (a string for the report) and the section it
     // resolves to (so its structured fields can be checked).
     let top1_id = hits.first().map(|hit| hit.section_id.as_str().to_string());
     let top1_section = hits.first().and_then(|hit| index.get(&hit.section_id));
-    let top5_in_expected_source = hits.iter().take(5).any(|hit| {
-        index
-            .get(&hit.section_id)
-            .map(|s| s.source_id.as_str() == case.source.id())
-            .unwrap_or(false)
-    });
+    let top5_relevant = top5_relevant(index, case, &hits);
     let exact_match = case.kind.is_canonical();
     let canonical_first = if exact_match {
         Some(carries_canonical_token(case, top1_section))
@@ -288,7 +283,7 @@ fn measure_case(index: &SectionIndex, case: &EvalCase) -> CaseOutcome {
         expected_source: case.source.id().to_string(),
         measured: true,
         top1: top1_id,
-        top5_in_expected_source,
+        top5_in_expected_source: top5_relevant,
         canonical_first,
         error: None,
     }
@@ -315,6 +310,72 @@ fn carries_canonical_token(case: &EvalCase, top1: Option<&Section>) -> bool {
         // exhaustive if the gate ever loosens.
         EvalKind::Workflow | EvalKind::Ordinary => false,
     }
+}
+
+/// Whether *some* top-5 hit is relevant to the case. Relevance is source-based,
+/// with the cross-source rule of issue #173:
+///
+/// * the case's **expected** source ([`EvalCase::source`]) — a top-5 hit there is
+///   relevant; **or**
+/// * the **canonical home of a command the query names** — a multi-word command
+///   phrase such as `cargo fmt` or `cargo doc` names the `cargo` source, where
+///   the subcommand's own man page lives, even when the case's expected source
+///   names the tool the command *drives* (`rustfmt`, `rustdoc`). This is the
+///   "do not force an arbitrary source when a different source legitimately has
+///   the answer" honesty of issue #173: `cargo fmt`'s answer is in `cargo`, not
+///   `rustfmt`, so the measurement accepts a top-5 hit in the command's own
+///   source without relabeling the case.
+///
+/// A query that names no command — or whose named command's source is absent from
+/// the top-5 — is relevant only through its expected source, so the rule never
+/// fabricates a relevance a top-5 hit does not actually carry.
+fn top5_relevant(index: &SectionIndex, case: &EvalCase, hits: &[crate::search::Hit]) -> bool {
+    let top5_in = |src: &str| {
+        hits.iter().take(5).any(|hit| {
+            index
+                .get(&hit.section_id)
+                .map(|s| s.source_id.as_str() == src)
+                .unwrap_or(false)
+        })
+    };
+    if top5_in(case.source.id()) {
+        return true;
+    }
+    for src in named_command_sources(case.query) {
+        if top5_in(&src) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The source that is the canonical home of each command the query *names* — the
+/// verb of a fused, multi-word command phrase (`cargo fmt` → `cargo`, `cargo doc`
+/// → `cargo`). A bare tool mention in prose ("a component such as `clippy` or
+/// `rustfmt`") is **not** a command the query asks *about*, so it names no source;
+/// only fused command phrases do. Keeping the rule to named *commands* (not any
+/// word in the query) is what stops it from accepting a source a query merely
+/// mentions — the cross-source relevance must be precise, not a bag of keywords.
+///
+/// Deduped through a `BTreeSet` so a repeated command phrase is visited once and
+/// the order is deterministic.
+fn named_command_sources(query: &str) -> impl Iterator<Item = String> {
+    use crate::search::{Token, tokenize};
+    use std::collections::BTreeSet;
+
+    let sources = tokenize(query)
+        .into_iter()
+        .filter_map(|token| match token {
+            // A fused command phrase names its verb's source — the source the
+            // subcommand's page lives under.
+            Token::Command(cmd) => cmd
+                .split_whitespace()
+                .next()
+                .map(|verb| verb.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect::<BTreeSet<String>>();
+    sources.into_iter()
 }
 
 impl AcceptanceReport {

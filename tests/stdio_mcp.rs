@@ -1278,6 +1278,166 @@ async fn call_search_docs_query_binding(client: &mut Client) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// [P2][QA] #173 — the retrieval-quality ranking proof, driven through the *real*
+// spawned `serve` binary over genuine OS stdio (the seam the issue exercises,
+// not the index unit test). Two behaviours the fix must hold end-to-end:
+//
+//   * **Primary-first (C-CONV).** `search_docs({"query":"C-CONV"})` must rank
+//     the *primary* guideline explanation — the section whose own heading carries
+//     the `(C-CONV)` marker — ahead of the standard-library section that merely
+//     *inherits* the same code. Before the fix the inherited
+//     `more-examples-from-the-standard-library` section won on raw BM25; the
+//     `primary_code` sort key now lifts the primary rule first.
+//   * **Cross-source NL ranking + preserved bounds/citations.** A couple of the
+//     natural-language queries the issue reported as misses (E-009 imports, E-044
+//     rustdoc options) now surface their expected source in the top five, and
+//     every response stays within the server's response bound with its citations
+//     intact — the ranking change must not trade the C-CONV order for a broken
+//     or unbounded response.
+//
+// This is a *separate* test with its own session budget so the per-query ranked
+// walks cannot regress the main surface test's wall-clock.
+// ---------------------------------------------------------------------------
+
+/// The primary C-CONV explanation: the `api-guidelines/naming` section whose own
+/// heading carries the `(C-CONV)` marker.
+const CCONV_PRIMARY: &str =
+    "api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv";
+
+/// The inherited secondary section that used to outrank the primary C-CONV rule
+/// on raw BM25; the fix must demote it below `CCONV_PRIMARY`.
+const CCONV_INHERITED: &str = "api-guidelines/naming#more-examples-from-the-standard-library";
+
+/// Assert a `search_docs` response is a successful, *bounded* result whose hits
+/// each carry the fields the response contract promises: a source, a non-empty
+/// excerpt, and a non-empty, source-attributed citations array. The whole
+/// response frame must stay under the 32 KiB response cap — the "preserve
+/// response bounds" half of the issue, so the ranking change never trades order
+/// for an oversized or citation-less response.
+fn assert_bounded_ranked<'a>(response: &'a Value, context: &str) -> Vec<&'a Value> {
+    assert_eq!(
+        response.get("error"),
+        None,
+        "the ranked search must succeed: {response}"
+    );
+    let structured = &response["result"]["structuredContent"];
+    // The complete serialized frame must stay under the response cap.
+    let bytes = serialized_frame_bytes(response);
+    assert!(
+        bytes <= MAX_RESPONSE_BYTES,
+        "{context}: the complete response frame must stay under the \
+         {MAX_RESPONSE_BYTES}-byte response cap, but was {bytes} bytes: {response}"
+    );
+    let hits = structured["hits"]
+        .as_array()
+        .expect("a ranked search returns a hits array");
+    assert!(
+        !hits.is_empty(),
+        "{context}: the query must match a section"
+    );
+    for hit in hits {
+        assert!(
+            hit.get("section_id").and_then(Value::as_str).is_some(),
+            "every hit names a section id: {hit}"
+        );
+        assert!(
+            hit.get("source").and_then(Value::as_str).is_some(),
+            "every hit names its source: {hit}"
+        );
+        assert!(
+            hit.get("excerpt")
+                .and_then(Value::as_str)
+                .is_some_and(|e| !e.is_empty()),
+            "every hit carries a non-empty excerpt: {hit}"
+        );
+        // Citations back the hit: a non-empty, source-attributed array.
+        let citations = hit.get("citations").and_then(Value::as_array);
+        let citations = citations.expect("every hit carries a citations array: {hit}");
+        assert!(!citations.is_empty(), "every hit carries citations: {hit}");
+        for citation in citations {
+            assert!(
+                citation.get("source").and_then(Value::as_str).is_some(),
+                "every citation names its source: {citation}"
+            );
+        }
+    }
+    hits.iter().collect()
+}
+
+/// #173: the real `serve` binary ranks the primary C-CONV explanation first (not
+/// the inherited example list) and keeps the reported NL queries both surfaced
+/// and response-bounded with citations intact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_docs_ranks_primary_guideline_first_over_inherited_sections() {
+    let mut client = Client::new().await;
+
+    // --- AC2: C-CONV ranks the primary rule first. -------------------------
+    // The exact reproduction the issue reports. No `limit` (the default five) so
+    // the response is the server's natural ranking, not a page slice.
+    let response = client
+        .call_tool("search_docs", json!({ "query": "C-CONV" }))
+        .await;
+    let hits = assert_bounded_ranked(&response, "the C-CONV ranking");
+    let top1 = hits[0]["section_id"]
+        .as_str()
+        .expect("the top hit names a section id");
+    assert_eq!(
+        top1, CCONV_PRIMARY,
+        "`C-CONV` must rank the primary guideline explanation first, not the \
+         inherited example section: {response}"
+    );
+    // The inherited secondary section must no longer lead; if it is present it is
+    // ranked *after* the primary rule, not ahead of it.
+    let inherited_positions: Vec<usize> = hits
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| h["section_id"] == CCONV_INHERITED)
+        .map(|(i, _)| i)
+        .collect();
+    for &pos in &inherited_positions {
+        assert!(
+            pos > 0,
+            "the inherited section must be demoted below the primary rule: {response}"
+        );
+    }
+
+    // --- AC2: two previously-missing NL queries surface their source. -------
+    // Each was in the issue's miss list; the ranking change must now surface its
+    // expected source in the top five, with the response still bounded and cited.
+    for (query, expected_source, context) in [
+        (
+            "how should use imports be organized and grouped?",
+            "style-guide",
+            "E-009 imports",
+        ),
+        (
+            "what rustdoc configuration options exist?",
+            "rustdoc",
+            "E-044 rustdoc options",
+        ),
+    ] {
+        let response = client
+            .call_tool("search_docs", json!({ "query": query, "limit": 5 }))
+            .await;
+        let hits = assert_bounded_ranked(&response, context);
+        // The ranking change must keep the result within the requested bound.
+        assert!(
+            hits.len() <= 5,
+            "{context}: the limit-5 request must return at most five hits, got {}",
+            hits.len()
+        );
+        let surfaced = hits.iter().any(|h| h["source"] == expected_source);
+        assert!(
+            surfaced,
+            "{context}: the query must surface its expected source `{expected_source}` in the top five: {response}"
+        );
+    }
+
+    // --- AC2: a clean disconnect proves the session leaves no orphan. -------
+    client.close_and_wait_clean().await;
+}
+
 /// `get_section`: a valid section id yields its body + provenance + citations; a
 /// missing id is a typed not-found carrying the offending id.
 async fn call_get_section(client: &mut Client) {

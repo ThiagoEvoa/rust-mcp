@@ -18,14 +18,19 @@
 //! * **Completeness** — every case produces a measurement; a skipped or unmeasured
 //!   case never counts as a complete result (criterion 5).
 //!
-//! ## Honest, not gated to a pass
+//! ## A meaningful quality gate, not a pinned baseline
 //!
-//! The shipped corpus currently measures *below* the plan's 90% top-5 target
-//! (see the emitted report and `docs/ACCEPTANCE.md`). This test therefore pins
-//! the *measured* baseline as a regression guard and asserts the gap explicitly —
-//! it does **not** assert that 90% is met. That is the honesty the task
-//! requires: the layer reports what the corpus achieves and names the misses,
-//! rather than reporting a green bar it does not clear.
+//! The shipped corpus now *clears* the plan's 90% top-5 top-5 recall target
+//! (see the emitted report and `docs/ACCEPTANCE.md`): the ranking changes of
+//! issue #173 — primary-guideline-explanation ranking and the cross-source
+//! relevance rule — lifted the measurement from the 76% baseline to 91%. This
+//! test therefore asserts the gate is **met**: it pins the current measured
+//! baseline as a regression guard *and* asserts `top-5 recall ≥ 90%` and
+//! `canonical-first == 100%`, so a future regression drops the build rather than
+//! masquerading as a pass. The remaining misses (the corpus's genuine content
+//! gaps and ranking limitations) are named in the emitted report, not hidden —
+//! honesty lives in *what is reported*, and the gate lives in *what is
+//! asserted*.
 //!
 //! ## Two seams
 //!
@@ -66,16 +71,18 @@ const SHIPPED_SECTION_COUNT: usize = 877;
 // Seam 1: the index-level measurement over the shipped corpus.
 // ---------------------------------------------------------------------------
 
-/// The genuine 45-case eval dataset is measured over the *shipped* corpus: the
-/// top-5 recall and the canonical-first numbers are recorded, the gap to the
-/// plan's 90% target is asserted explicitly (so the test can never masquerade as
-/// a 90%-met pass), and the full report is emitted.
+/// The genuine 45-case eval dataset is measured over the *shipped* corpus and
+/// the plan's §11 quality gate is asserted (issue #173): top-5 recall ≥ 90% and
+/// canonical-first 100%. The current measured baseline is pinned as a regression
+/// guard, and the full report (including the remaining honest misses) is emitted
+/// so a regression drops the build rather than masquerading as a pass.
 #[test]
-fn acceptance_recall_measured_over_shipped_corpus() {
+fn acceptance_recall_meets_quality_target() {
     let manifest = rust_docs_mcp::bundled::manifest();
     let report = measure(&manifest, &Environment::current());
 
-    // Emit the report so the gap is visible in the test output.
+    // Emit the report so the numbers and the remaining misses are visible in the
+    // test output.
     eprintln!("\n{}", report.render());
 
     // Criterion 5: a harness that skips or fails a case must not report a
@@ -111,21 +118,21 @@ fn acceptance_recall_measured_over_shipped_corpus() {
             .join("\n")
     );
 
-    // Top-5 recall is measured honestly. The shipped corpus does NOT yet clear
-    // the plan's 90% target; the test pins the *measured* baseline as a
-    // regression guard and asserts the gap, rather than faking a pass.
+    // The plan's §11 quality gate: top-5 recall ≥ 90%. The current measured
+    // baseline is pinned so a regression is a visible, deliberate re-pin, and the
+    // gate is asserted so the build fails if recall ever drops below 90%.
     let (recall_pass, recall_total) = report.top5_recall();
     assert_eq!(
         (recall_pass, recall_total),
-        (34, 45),
-        "the measured top-5 recall baseline is 34/45; re-pin this if the corpus \
+        (41, 45),
+        "the measured top-5 recall baseline is 41/45; re-pin this if the corpus \
          is intentionally changed, and record the new number in docs/ACCEPTANCE.md"
     );
-    // The gap is asserted explicitly so this can never read as a 90%-met pass.
+    // The gate is asserted so the build fails if recall ever drops below 90%;
+    // a passing measurement is the goal, not a pinned gap.
     assert!(
-        report.top5_recall_pct() < 90.0,
-        "top-5 recall ({:.1}%) has reached the plan's 90% target — update this \
-         assertion and docs/ACCEPTANCE.md to record the passing state",
+        report.top5_recall_pct() >= 90.0,
+        "top-5 recall ({:.1}%) has dropped below the plan's 90% target — the \n         quality gate of issue #173 is no longer met; fix the ranking or the \n         corpus rather than lowering the gate",
         report.top5_recall_pct()
     );
 }
