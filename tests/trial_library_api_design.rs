@@ -38,7 +38,7 @@
 //! 6. `get_api_checklist { category: "Naming" }` → the checklist entry for the
 //!    conversion guideline: `C-CONV` "Ad-hoc conversions should use as_ / to_ /
 //!    into_", explaining the naming section.
-//! 7. `get_api_checklist { }` (all categories) → the full 545-section checklist
+//! 7. `get_api_checklist { }` (all categories) → the full 877-section checklist
 //!    walk, paginated; the `C-CONV` entry is reached exactly once on the first
 //!    page, proving the walk is whole.
 //! 8. `get_section` the naming section → the original section the agent
@@ -571,7 +571,7 @@ async fn the_library_api_design_trial_retrieves_and_cites_the_conversion_guideli
     );
 
     // ---- (6) get_api_checklist {} (all): the full checklist walk is paginated
-    //         over the 545-section corpus, but the `C-CONV` entry is reached
+    //         over the 877-section corpus, but the `C-CONV` entry is reached
     //         exactly once on the first page.
     let all = client.call_tool("get_api_checklist", json!({})).await;
     assert_eq!(

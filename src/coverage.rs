@@ -85,6 +85,15 @@ pub enum CoverageGap {
     /// A command entry has no syntax template, so its invocation form was not
     /// retained by extraction.
     CommandMissingSyntax { key: CommandKey },
+    /// A collection carries content but fewer sections than its required-topic
+    /// minimum ([`crate::corpus::required_topic_minimum`]) — the bare "nonempty
+    /// collection" check the #151 bug shape slips past. The collection is not
+    /// empty, yet its required chapters/families are missing (issue #170).
+    MissingRequiredTopics {
+        source: SourceCollection,
+        required: usize,
+        found: usize,
+    },
 }
 
 /// The corpus coverage report.
@@ -178,6 +187,17 @@ pub fn record_coverage(manifest: &SnapshotManifest) -> CoverageReport {
             gaps.push(CoverageGap::MissingSource { source: coll });
         } else if section_count == 0 {
             gaps.push(CoverageGap::SourceHasNoSections { source: coll });
+        } else {
+            // A present, nonempty collection must still carry its required-topic
+            // inventory (issue #170): the bare nonempty check is too weak.
+            let required = crate::corpus::required_topic_minimum(coll);
+            if section_count < required {
+                gaps.push(CoverageGap::MissingRequiredTopics {
+                    source: coll,
+                    required,
+                    found: section_count,
+                });
+            }
         }
     }
 
@@ -210,6 +230,17 @@ impl fmt::Display for CoverageGap {
             }
             CoverageGap::CommandMissingSyntax { key } => {
                 write!(f, "command without syntax template: {key}")
+            }
+            CoverageGap::MissingRequiredTopics {
+                source,
+                required,
+                found,
+            } => {
+                write!(
+                    f,
+                    "required topics: {} carries only {found} section(s); the inventory needs at least {required}",
+                    source.title()
+                )
             }
         }
     }
@@ -715,17 +746,17 @@ mod tests {
 
         assert_eq!(report.source_count, 8, "seed has all eight sources");
         assert_eq!(
-            report.section_count, 545,
+            report.section_count, 877,
             "seed captures the full upstream corpus"
         );
         assert_eq!(
-            report.checklist_entries, 15,
-            "seed carries the upstream checklist"
+            report.checklist_entries, 54,
+            "seed carries the complete upstream checklist (all 54 codes)"
         );
         assert_eq!(
-            report.command_entries, 11,
-            "seed carries the routine command families: the eight cargo subcommands \n\
-             (build/test/check/fmt/clippy/doc/add/new) plus rustup show, rustc, and rustfmt"
+            report.command_entries, 29,
+            "seed carries every command family: the cargo subcommands, rustup subcommands, \n\
+             and rustc/rustfmt/rustdoc"
         );
         assert_eq!(
             report.per_collection.len(),
@@ -920,7 +951,7 @@ mod tests {
         // The fidelity report records all of them present, with no recorded gap.
         let report = inspect_fidelity(&seed_manifest().body.sections);
 
-        assert_eq!(report.sections_inspected, 545);
+        assert_eq!(report.sections_inspected, 877);
         assert!(
             report.all_types_present(),
             "the faithful seed covers every content type: {}",
@@ -1128,10 +1159,10 @@ mod tests {
         let report = inspect_corpus(&seed_manifest());
 
         assert_eq!(
-            report.sections_inspected, 545,
+            report.sections_inspected, 877,
             "the inspection reports the loaded corpus count"
         );
-        assert_eq!(report.coverage.section_count, 545);
+        assert_eq!(report.coverage.section_count, 877);
         assert!(
             report.is_complete(),
             "the faithful seed is complete: {}",

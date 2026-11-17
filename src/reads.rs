@@ -628,8 +628,8 @@ mod tests {
         assert_eq!(read.category, None);
         assert_eq!(
             read.entries.len(),
-            16,
-            "omitted category returns the 15 seed entries plus the added one"
+            55,
+            "omitted category returns the 54 seed entries plus the added one"
         );
         assert!(read.entries.iter().any(|e| e.category == "Error Handling"));
         assert!(

@@ -31,9 +31,9 @@ Plan sources: `plan.md` §10/M5 exit, §11 (validation and acceptance criteria),
 | --- | --- |
 | Snapshot id | `rust-docs-bundled-seed` |
 | Parser version | `rust-docs-mcp/seed-2` |
-| Sections | **545** |
+| Sections | **877** |
 | Sources | **8** (the full `registry`: api-guidelines, style-guide, cargo, rustc, rustup, rustfmt, clippy, rustdoc) |
-| Content fingerprint | `154a1f248b149160` |
+| Content fingerprint | `6c4b9cd87aa68f82` |
 
 The fingerprint is a deterministic FNV-1a digest over the snapshot id, parser
 version, and sorted section-id list, so it pins *which* corpus the numbers below
@@ -43,7 +43,7 @@ were produced over; a corpus change re-pins it.
 
 | Metric | Measured | §11 target | Met? |
 | --- | --- | --- | --- |
-| Source-level top-5 recall | **35 / 45 = 78.0%** | ≥ 90% | **No** |
+| Source-level top-5 recall | **34 / 45 = 75.6%** | ≥ 90% | **No** |
 | Canonical-first (exact-match) | **10 / 10 = 100%** | — | **Yes** |
 | Cases measured (criterion 5) | **45 / 45** | all | **Yes** |
 
@@ -56,13 +56,13 @@ expected source?) and, for the exact-match cases (guideline code, command name,
 lint id), **canonical-first** (does the top-1 carry the literal token the query
 names, in the field its category designates?).
 
-**Top-5 recall is 78.0%, below the 90% target — the gap is real, not a
-harness artifact.** The 10 misses are cross-source queries whose top-5 results
-land in the wrong source (for example, a style-guide `indexing` query that
-ranks a Clippy section first, or a rustdoc query that ranks a
-`rustc`/`cargo`/`rustfmt` section first): E-007, E-009, E-026, E-028, E-029,
-E-031, E-038, E-041, E-043, E-044. The miss breakdown by source is
-**style-guide 2, rustup 3, rustfmt 1, clippy 1, rustdoc 3**, with the
+**Top-5 recall is 75.6%, below the 90% target — the gap is real, not a
+harness artifact.** The 11 misses are cross-source queries whose top-5 results
+land in the wrong source (for example, a rustfmt query that ranks a `cargo`
+section first, or a rustdoc query that ranks a `rustc`/`cargo` section first):
+E-007, E-028, E-030, E-031, E-032, E-034, E-038, E-040, E-041, E-043, E-044.
+The miss breakdown by source is
+**rustfmt 4, rustdoc 3, clippy 2, style-guide 1, rustup 1**, with the
 cargo/rustc/api-guidelines cases fully passing. The gap is concentrated in the
 cross-source queries (natural-language `Ordinary`/`Workflow` cases and a few
 exact-match cases whose canonical section is not top-5 for their query). **This
@@ -90,8 +90,12 @@ also covers.
 | Peak RSS (approximation) | **≈ 17 MiB** | not fixed by §11 | — |
 
 Captured on **macOS arm64**, **release** profile, `rustc 1.100.0`, over the
-545-section shipped corpus, with the harness asserting a **graceful self-exit**
-(no orphaned process) after each measurement. The numbers are
+prior **545-section** shipped corpus (`content_fingerprint` `154a1f248b149160`),
+with the harness asserting a **graceful self-exit**
+(no orphaned process) after each measurement. The shipped corpus has since grown
+to **877 sections** (`content_fingerprint` `6c4b9cd87aa68f82`, issue #170); the
+figures above are the prior corpus's measurement and a re-measurement over the
+current corpus is pending. The numbers are
 machine-/corpus-dependent; the corpus identity above pins the corpus, and the
 harness records the toolchain/host/profile so a number is never attributed to the
 wrong machine. See [`docs/PERFORMANCE.md`](./PERFORMANCE.md) for the full
@@ -108,7 +112,7 @@ RUST_DOCS_MCP_PERF=1 cargo test --release --test perf -- --ignored --nocapture
 ```
 
 The fast retrieval test (`acceptance_recall_measured_over_shipped_corpus`) pins
-the measured 35/45 top-5 recall and the 10/10 canonical-first as of this corpus
+the measured 34/45 top-5 recall and the 10/10 canonical-first as of this corpus
 fingerprint, so a corpus or retrieval change that moves the numbers fails the
 pin and must be re-recorded here.
 
@@ -206,8 +210,10 @@ stdio by `tests/stdio_mcp.rs` ([057], PR #130):
 - **Measured over the shipped corpus + harness, tied to corpus identity, compared
 to the targets, with a graceful-exit assertion + the full-corpus caveat**:
   `docs/PERFORMANCE.md` + `tests/perf.rs` ([071], PR #143, re-measured by issue
-  #156). On the 545-section shipped corpus (`content_fingerprint`
-  `154a1f248b149160`), a documented macOS/arm64 machine, release profile, `rustc
+  #156). On the prior 545-section shipped corpus (`content_fingerprint`
+  `154a1f248b149160`; the current shipped corpus is 877 sections, fingerprint
+  `6c4b9cd87aa68f82`, per issue #170, with a perf re-measurement pending), a
+  documented macOS/arm64 machine, release profile, `rustc
   1.100.0`: startup p95 **≈ 10 ms** (target ≤ 2000 ms), `search_docs` p95
   **≈ 11.5 ms** and `get_section` p95 **≈ 11.5 ms** (target < 100 ms), peak RSS
   ≈ **17 MiB**. The harness asserts a **graceful self-exit** (no orphaned
@@ -240,7 +246,7 @@ to the targets, with a graceful-exit assertion + the full-corpus caveat**:
   meets ([046] PR #119, "Meet retrieval quality targets"). **Since issue #156 the
   eval set is run over the shipped corpus** ([`src/acceptance.rs`](../src/acceptance.rs),
   [`tests/acceptance.rs`](../tests/acceptance.rs)): source-level top-5 recall is
-  **35/45 = 78.0%** (below the 90% target — reported honestly, not faked) and
+  **34/45 = 75.6%** (below the 90% target — reported honestly, not faked) and
   canonical-first is **10/10**; see the
   [measured-over-the-shipped-corpus section](#measured-over-the-shipped-corpus-issue-156)
   for the numbers, the miss breakdown, and the corpus identity.
@@ -284,7 +290,10 @@ Stated explicitly, so no requirement is marked complete from an unverified claim
   identity** (snapshot id, parser version, 545 sections, content fingerprint
   `154a1f248b149160`), recording the **environment** (toolchain, host, build
   profile) and asserting a **graceful self-exit** (no orphaned process) after
-  each measurement. That shipped corpus is a representative **offline subset** of
+  each measurement. The figures are from that prior corpus; the shipped corpus is
+  now 877 sections (`content_fingerprint` `6c4b9cd87aa68f82`, issue #170) and a
+  perf re-measurement over it is pending. That shipped corpus is a representative
+  **offline subset** of
   the live-synced full corpus the product serves in production, so the figures are
   a **lower bound**; the harness is corpus-agnostic (an operator points it at a
   live-synced corpus via `RUST_DOCS_MCP_PERF_DATA_DIR`) and re-measures the same
@@ -292,9 +301,10 @@ Stated explicitly, so no requirement is marked complete from an unverified claim
 corpus"; the shipped corpus comfortably meets them, and the full-corpus figures
   remain to be recorded. See [`docs/PERFORMANCE.md`](./PERFORMANCE.md).
 - **Top-5 recall gap (retrieval quality).** Source-level top-5 recall over the
-  shipped corpus is **78.0%** (35/45), below the §11 90% target. The 10 misses
-  are cross-source queries (style-guide, rustup, rustdoc, and a few rustfmt/
-  clippy cases) whose top-5 results land in the wrong source; canonical-first is
+  shipped corpus is **75.6%** (34/45), below the §11 90% target. The 11 misses
+  are cross-source queries (rustfmt, rustdoc, clippy, and one each of
+  style-guide and rustup) whose top-5 results land in the wrong source;
+  canonical-first is
   **10/10**. This layer **reports the gap honestly** rather than claiming the
   target on curated fixtures; closing it is a retrieval-quality follow-up
   (better cross-source ranking / query expansion), recorded as unresolved, not a

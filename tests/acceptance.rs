@@ -60,7 +60,7 @@ const PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// The number of sections the shipped corpus carries. Pinned so a corpus change
 /// is a visible, deliberate re-pin rather than a silent drift.
-const SHIPPED_SECTION_COUNT: usize = 545;
+const SHIPPED_SECTION_COUNT: usize = 877;
 
 // ---------------------------------------------------------------------------
 // Seam 1: the index-level measurement over the shipped corpus.
@@ -117,8 +117,8 @@ fn acceptance_recall_measured_over_shipped_corpus() {
     let (recall_pass, recall_total) = report.top5_recall();
     assert_eq!(
         (recall_pass, recall_total),
-        (35, 45),
-        "the measured top-5 recall baseline is 35/45; re-pin this if the corpus \
+        (34, 45),
+        "the measured top-5 recall baseline is 34/45; re-pin this if the corpus \
          is intentionally changed, and record the new number in docs/ACCEPTANCE.md"
     );
     // The gap is asserted explicitly so this can never read as a 90%-met pass.

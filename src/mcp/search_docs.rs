@@ -745,11 +745,28 @@ mod tests {
         );
         // The response echoes the snapshot id it was read from.
         assert_eq!(resp.snapshot_id, m.body.snapshot_id.as_str());
-        // Every cargo-build match fits the generous limit, so the page is not
-        // truncated and carries no next cursor.
-        assert!(!resp.truncated);
-        assert!(resp.next_cursor.is_none());
-        assert!(resp.next_steps.is_empty());
+        // The richer corpus (issue #170) now carries more than one limit-20 page
+        // of `cargo build` matches, so this first page is truncated and resumes
+        // through a next cursor — the command-key hit located above is retained
+        // regardless. Either way the pagination contract holds: a truncated page
+        // carries a next cursor, a non-truncated one carries neither. `next_steps`
+        // is empty here because the query matched (it is populated only on an
+        // empty result).
+        if resp.truncated {
+            assert!(
+                resp.next_cursor.is_some(),
+                "a truncated page carries a next cursor: {resp:?}"
+            );
+        } else {
+            assert!(
+                resp.next_cursor.is_none(),
+                "a non-truncated page carries no next cursor"
+            );
+        }
+        assert!(
+            resp.next_steps.is_empty(),
+            "a query that matched carries no next steps: {resp:?}"
+        );
     }
 
     /// AC2: a truncated page carries a `next_cursor` (the [037] pagination
