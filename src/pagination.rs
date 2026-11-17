@@ -1144,6 +1144,263 @@ mod tests {
         }
     }
 
+    // --- #[171]: the cursor binds the exact validated query ---------------
+    //
+    // A cursor minted for one query must not resume a call whose query changed:
+    // the new query's top results would otherwise be silently skipped. The query
+    // is bound as its exact string (not a digest, which could collide on a
+    // normalization-equivalent pair) and the mismatch report never echoes the
+    // query text.
+
+    #[test]
+    fn query_binding_a_changed_query_is_a_mismatch() {
+        // AC1: a cursor minted for "cargo" cannot resume a "rustup" call.
+        let c = Cursor::mint(
+            Operation::Search,
+            &FilterKey::all(),
+            Some("cargo"),
+            &snap("snap"),
+            1,
+        );
+        let err = c
+            .verify(
+                Operation::Search,
+                &FilterKey::all(),
+                Some("rustup"),
+                &snap("snap"),
+            )
+            .expect_err("a cursor from a different query cannot resume this call");
+        assert_eq!(
+            err,
+            CursorError::query_mismatch(),
+            "a changed query is a typed query mismatch"
+        );
+    }
+
+    #[test]
+    fn query_binding_an_identical_query_resumes_losslessly() {
+        // AC2: the same op/filter/query/snapshot resumes at its bound offset.
+        let c = Cursor::mint(
+            Operation::Search,
+            &FilterKey::all(),
+            Some("cargo"),
+            &snap("snap"),
+            4,
+        );
+        let offset = c
+            .verify(
+                Operation::Search,
+                &FilterKey::all(),
+                Some("cargo"),
+                &snap("snap"),
+            )
+            .expect("an identical call resumes its bound cursor");
+        assert_eq!(offset, 4, "the resume returns the minted offset");
+    }
+
+    #[test]
+    fn query_binding_mismatch_does_not_echo_the_query_text() {
+        // AC1/AC4: the mismatch is actionable but never carries the
+        // caller-controlled query text (which may be large or sensitive).
+        let c = Cursor::mint(
+            Operation::Search,
+            &FilterKey::all(),
+            Some("the-caller-controlled-secret-query-xyz"),
+            &snap("snap"),
+            1,
+        );
+        let err = c
+            .verify(
+                Operation::Search,
+                &FilterKey::all(),
+                Some("another-distinct-query"),
+                &snap("snap"),
+            )
+            .expect_err("a changed query is a mismatch");
+        let rendered = format!("{err:?}");
+        assert!(
+            !rendered.contains("the-caller-controlled-secret-query-xyz"),
+            "the bound query text must not leak into the mismatch: {rendered}"
+        );
+        assert!(
+            !rendered.contains("another-distinct-query"),
+            "the current query text must not leak into the mismatch: {rendered}"
+        );
+    }
+
+    #[test]
+    fn query_binding_a_none_query_is_distinct_from_a_some_query() {
+        // A query-less cursor (a section/catalog/checklist continuation) must not
+        // be resumed against a call that carries a query, and vice versa.
+        let queryless = Cursor::mint(Operation::Search, &FilterKey::all(), None, &snap("snap"), 1);
+        let err = queryless
+            .verify(
+                Operation::Search,
+                &FilterKey::all(),
+                Some("cargo"),
+                &snap("snap"),
+            )
+            .expect_err("a query-less cursor cannot resume a query-bearing call");
+        assert_eq!(
+            err,
+            CursorError::query_mismatch(),
+            "a None-vs-Some query difference is a query mismatch"
+        );
+    }
+
+    #[test]
+    fn query_binding_source_operation_and_snapshot_still_enforced() {
+        // AC3: adding the query binding must not weaken the existing bindings.
+        // With an identical query, a source/operation/snapshot difference is
+        // still rejected on its own field (before the query check).
+        let c = Cursor::mint(
+            Operation::Search,
+            &FilterKey::source("cargo"),
+            Some("q"),
+            &snap("snap-a"),
+            1,
+        );
+        // Source differs (same query) -> a filter mismatch.
+        let filter_err = c
+            .verify(
+                Operation::Search,
+                &FilterKey::source("clippy"),
+                Some("q"),
+                &snap("snap-a"),
+            )
+            .expect_err("a source change is a filter mismatch");
+        match filter_err {
+            CursorError::Mismatch { field, .. } => assert_eq!(field, MismatchField::Filter),
+            other => panic!("expected a filter mismatch, got {other:?}"),
+        }
+        // Operation differs (same query, same source) -> an operation mismatch.
+        let op_err = c
+            .verify(
+                Operation::Checklist,
+                &FilterKey::source("cargo"),
+                Some("q"),
+                &snap("snap-a"),
+            )
+            .expect_err("an operation change is an operation mismatch");
+        match op_err {
+            CursorError::Mismatch { field, .. } => assert_eq!(field, MismatchField::Operation),
+            other => panic!("expected an operation mismatch, got {other:?}"),
+        }
+        // Snapshot differs (same query, same source, same op) -> a snapshot mismatch.
+        let snap_err = c
+            .verify(
+                Operation::Search,
+                &FilterKey::source("cargo"),
+                Some("q"),
+                &snap("snap-b"),
+            )
+            .expect_err("a snapshot change is a snapshot mismatch");
+        match snap_err {
+            CursorError::Mismatch { field, .. } => assert_eq!(field, MismatchField::Snapshot),
+            other => panic!("expected a snapshot mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn query_binding_a_unicode_query_is_bound_exactly() {
+        // AC4: a Unicode query binds by its exact string; an identical Unicode
+        // query resumes, a differently-encoded one is a mismatch.
+        let c = Cursor::mint(
+            Operation::Search,
+            &FilterKey::all(),
+            Some("caf\u{00e9}"),
+            &snap("snap"),
+            2,
+        );
+        assert_eq!(
+            c.verify(
+                Operation::Search,
+                &FilterKey::all(),
+                Some("caf\u{00e9}"),
+                &snap("snap")
+            )
+            .expect("an identical Unicode query resumes"),
+            2
+        );
+        let err = c
+            .verify(
+                Operation::Search,
+                &FilterKey::all(),
+                Some("cafe"),
+                &snap("snap"),
+            )
+            .expect_err("a differently-encoded Unicode query is a mismatch");
+        assert_eq!(err, CursorError::query_mismatch());
+    }
+
+    #[test]
+    fn query_binding_treats_normalization_forms_as_distinct() {
+        // AC4: the binding is an exact string compare (no NFC/NFD normalization,
+        // no trimming), so two byte-different but visually similar queries are
+        // distinct cursors. This is deliberate: a digest could collide on a
+        // normalization-equivalent pair and silently reintroduce the skip.
+        //
+        // Composed `e-acute` (U+00E9) vs decomposed `e` + combining acute
+        // (U+0301) are normalization-equivalent but byte-different, so a mismatch.
+        let composed = "caf\u{00e9}";
+        let decomposed = "caf\u{0065}\u{0301}";
+        assert_ne!(
+            composed, decomposed,
+            "precondition: the two forms differ in bytes"
+        );
+        let c = Cursor::mint(
+            Operation::Search,
+            &FilterKey::all(),
+            Some(composed),
+            &snap("snap"),
+            1,
+        );
+        let err = c
+            .verify(
+                Operation::Search,
+                &FilterKey::all(),
+                Some(decomposed),
+                &snap("snap"),
+            )
+            .expect_err("normalization-equivalent-but-distinct bytes are a mismatch");
+        assert_eq!(err, CursorError::query_mismatch());
+
+        // A trailing space is also significant (no whitespace normalization).
+        let space = Cursor::mint(
+            Operation::Search,
+            &FilterKey::all(),
+            Some("cargo"),
+            &snap("snap"),
+            1,
+        );
+        let space_err = space
+            .verify(
+                Operation::Search,
+                &FilterKey::all(),
+                Some("cargo "),
+                &snap("snap"),
+            )
+            .expect_err("a trailing space changes the bound query");
+        assert_eq!(space_err, CursorError::query_mismatch());
+    }
+
+    #[test]
+    fn query_binding_a_malformed_cursor_is_rejected_with_a_query() {
+        // AC4: a malformed token is still rejected even when a query is supplied
+        // (the malformed check runs first, in `from_token`, before verify).
+        let err = Cursor::from_token("not-a-cursor")
+            .map(|c| {
+                c.verify(
+                    Operation::Search,
+                    &FilterKey::all(),
+                    Some("cargo"),
+                    &snap("snap"),
+                )
+            })
+            .expect_err("a malformed token never parses");
+        assert!(matches!(err, CursorError::Malformed(_)));
+    }
+
     #[test]
     fn a_section_continuation_cursor_binds_its_section() {
         // A continuation for section A cannot be resumed against section B.
