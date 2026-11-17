@@ -68,7 +68,9 @@
 //! # How it is wired
 //!
 //! Mirroring the five tools, this exposes the [`catalog_resource()`] /
-//! [`section_resource()`] builders (delegated to [`crate::mcp::schema`]) for
+//! [`section_resource_from_uri()`] builders (the catalog delegated to
+//! [`crate::mcp::schema`], the section built from a canonical snapshot-bound URI
+//! so a discovered resource is always readable — issue #172) for
 //! [`rmcp::ServerHandler::list_resources`], the [`catalog_resource_view`] core
 //! read, a [`render_catalog`] text summary, and the cap-bounded
 //! [`catalog_resource_result`] assembly. The [048] `ServerHandler` seam wires
@@ -122,6 +124,32 @@ pub const CATALOG_URI: &str = "rust-docs://catalog";
 /// drift.
 pub fn catalog_resource() -> Resource {
     crate::mcp::schema::catalog_resource()
+}
+
+/// Build the concrete, readable [`Resource`] descriptor for a canonical section
+/// resource URI — the identity [`list_resources`](crate::mcp::DocsServer) advertises
+/// on discovery.
+///
+/// This is the concrete counterpart of the [054] catalog resource. The bug fixed
+/// by issue #172 was that discovery advertised an *unbound template*
+/// (`rust-docs://section/{id}`) that no [`read_section_resource`] could satisfy —
+/// the template string is not a section id the snapshot carries. Every URI this
+/// builder is handed is already a canonical, concrete
+/// `rust-docs://snapshots/{snapshot_id}/sections/{section_id}` (the producer
+/// [`section_uri`] and the consumer [`parse_section_resource_uri`] share the one
+/// [`SECTION_RESOURCE_PREFIX`]), so the URI the server *advertises* is exactly the
+/// URI it *reads*: a client that discovers it can read it. The `application/json`
+/// MIME type and the fixed name/title/description mirror the catalog resource so
+/// the discovery surface is uniform. No caller-supplied string is ever joined into
+/// a path — the URI is produced from the snapshot's validated ids.
+pub fn section_resource_from_uri(uri: &str) -> Resource {
+    Resource::new(uri.to_string(), "section")
+        .with_title("Documentation section")
+        .with_description(
+            "One documentation section by id, with its body, heading breadcrumb, \
+             and provenance. Served as JSON from the active snapshot.",
+        )
+        .with_mime_type("application/json")
 }
 
 /// Build the concrete command-catalog page URI for `snapshot_id`,
@@ -882,7 +910,7 @@ pub fn catalog_resource_result(view: &CatalogResourceView) -> Result<serde_json:
 mod tests {
     use super::*;
 
-    use crate::mcp::schema::{SectionResourceView, all_resources, catalog_resource};
+    use crate::mcp::schema::{SectionResourceView, catalog_resource};
     use crate::model::SectionId;
     use crate::pagination::{CursorError, MismatchField, Operation};
     use crate::registry::SourceCollection;
@@ -912,10 +940,17 @@ mod tests {
     // ----- the resource builders (AC1) -----------------------------------
 
     #[test]
-    fn the_two_resources_advertise_json_and_stable_uris() {
-        let resources = all_resources();
-        assert_eq!(resources.len(), 2, "the two advertised resources");
-        for r in &resources {
+    fn the_catalog_and_section_resources_advertise_json_and_stable_uris() {
+        // The catalog resource and a concrete section resource are both served as
+        // `application/json`. Issue #172: the section resource is now a concrete,
+        // readable URI (never the obsolete unbound `rust-docs://section/{id}`
+        // template), built by [`section_resource_from_uri`].
+        let catalog = catalog_resource();
+        let section = section_resource_from_uri(&section_uri(
+            snapshot().body.snapshot_id.as_str(),
+            "cargo/01-build#build",
+        ));
+        for r in [&catalog, &section] {
             assert_eq!(
                 r.mime_type.as_deref(),
                 Some("application/json"),
@@ -924,17 +959,50 @@ mod tests {
         }
         // The catalog builder delegates to the [048] schema and carries the
         // stable catalog URI.
-        assert_eq!(catalog_resource().uri, CATALOG_URI);
+        assert_eq!(catalog.uri, CATALOG_URI);
         assert_eq!(CATALOG_URI, "rust-docs://catalog");
+        // The section resource is a concrete, snapshot-scoped URI — never an
+        // unbound template (no `{id}` placeholder, always under `snapshots/`).
+        assert!(
+            section.uri.starts_with(SECTION_RESOURCE_PREFIX),
+            "the section resource is snapshot-scoped: {}",
+            section.uri
+        );
+        assert!(
+            !section.uri.contains("{"),
+            "the section resource is concrete, not a template: {}",
+            section.uri
+        );
     }
 
     #[test]
     fn the_section_resource_is_advertised_and_json() {
-        let section = catalog_resource();
+        let m = snapshot();
+        let section = section_resource_from_uri(&section_uri(
+            m.body.snapshot_id.as_str(),
+            "cargo/01-build#build",
+        ));
         assert_eq!(section.mime_type.as_deref(), Some("application/json"));
         // The `SectionResourceView` is the section resource's payload schema.
         let view = SectionResourceView::default();
         assert_eq!(view.section.snapshot_id, "");
+    }
+
+    // #172: a section resource advertised by discovery is one the server actually
+    // reads — the descriptor's URI round-trips through the parser and resolves.
+    #[test]
+    fn an_advertised_section_resource_uri_round_trips_to_a_read() {
+        let m = snapshot();
+        // A section the snapshot actually carries.
+        let section_id = "api-guidelines/about#rust-api-guidelines";
+        let uri = section_uri(m.body.snapshot_id.as_str(), section_id);
+        let descriptor = section_resource_from_uri(&uri);
+        // The advertised URI is exactly the readable one: it parses through the
+        // canonical parser and reads the section the snapshot serves.
+        let (parsed_snapshot, parsed_section) =
+            parse_section_resource_uri(&descriptor.uri).expect("the advertised URI is canonical");
+        assert_eq!(parsed_snapshot.as_str(), m.body.snapshot_id.as_str());
+        assert_eq!(parsed_section.as_str(), section_id);
     }
 
     // ----- AC1: concrete, URI-safe resource identities -------------------
