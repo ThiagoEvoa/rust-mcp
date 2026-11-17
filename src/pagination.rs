@@ -1402,6 +1402,42 @@ mod tests {
     }
 
     #[test]
+    fn query_binding_a_token_omitting_the_query_field_still_parses() {
+        // F-1 (#[171]): the `query` field carries `#[serde(default)]`, so a token
+        // minted *before* the field existed -- one that omits the key entirely --
+        // must still parse, with the absent field deserializing to `None`. This is
+        // the backward-compat property the field's doc comment claims, and no other
+        // test constructs a token without the key (the others mint a full binding,
+        // whose serialization emits `"query":null`). A hand-written token is the
+        // only way to exercise the omitted-key path.
+        let token = r#"{"kind":"rmcp-cursor","version":1,"op":"search","filter":"all","snapshot":"snap","offset":0}"#;
+        // The omitted field defaults to `None`, so the token parses as a
+        // query-less cursor of this build's kind/version.
+        let c = Cursor::from_token(token)
+            .expect("a token omitting the query key still parses via #[serde(default)]");
+        // It is a query-less cursor, so it resumes a query-less op at its offset.
+        let offset = c
+            .verify(Operation::Search, &FilterKey::all(), None, &snap("snap"))
+            .expect("a query-less token resumes a query-less call losslessly");
+        assert_eq!(offset, 0, "the omitted-field token keeps its bound offset");
+        // And it is still a *query-less* cursor: a call carrying a query must
+        // mismatch, proving the absent field became `None` (not a spurious match).
+        let err = c
+            .verify(
+                Operation::Search,
+                &FilterKey::all(),
+                Some("cargo"),
+                &snap("snap"),
+            )
+            .expect_err("a query-less cursor cannot resume a query-bearing call");
+        assert_eq!(
+            err,
+            CursorError::query_mismatch(),
+            "the defaulted `None` query mismatches a `Some` query"
+        );
+    }
+
+    #[test]
     fn a_section_continuation_cursor_binds_its_section() {
         // A continuation for section A cannot be resumed against section B.
         let c = Cursor::mint(
