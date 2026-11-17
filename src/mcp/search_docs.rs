@@ -45,6 +45,20 @@
 //! client never sees an internal path, stack-trace, or a message that does not
 //! name the problem. The response text is a compact, structured summary, not a
 //! stack trace.
+//!
+//! ## The per-call / shared-index split (issue #175)
+//!
+//! As every sibling read surface, this module keeps **two** entry points:
+//! [`search_indexed`] reuses a caller-supplied [`SectionIndex`] (the one a
+//! server builds once at snapshot activation and shares across every request —
+//! the fix for the per-request rebuild the issue reports), while the per-call
+//! [`search`] builds the index per call so the contract stays self-contained
+//! for the tests. The `#[cfg(test)]` tests exercise the per-call seam, so the
+//! module — mirroring `list_sources` / `get_section` / `get_api_checklist` /
+//! `get_command_guidance` / `resources` / `reads` / `commands` — is marked
+//! `#![allow(dead_code)]` while the per-call entry is transitional.
+
+#![allow(dead_code)]
 
 use rmcp::model::{CallToolResult, ContentBlock};
 
@@ -162,7 +176,15 @@ impl ProtocolError for SearchDocsError {
 /// Returns [`SearchDocsError::Query`] for a blank/oversized query or an unknown
 /// source, and [`SearchDocsError::Cursor`] for a malformed or mismatched
 /// continuation cursor.
-pub fn search(
+/// Serve the ranked, source-filtered `search_docs` result set **reusing a
+/// pre-built [`SectionIndex`]** (issue #175). This is the shared-index
+/// counterpart of [`search`]: the server passes the index it built once at
+/// snapshot activation, so a request pays no O(corpus) rebuild — the regression
+/// the issue reports. Ranking, source filtering, cursor pagination, and the
+/// useful-empty guidance are identical to the per-call path; only the redundant
+/// build is avoided.
+pub fn search_indexed(
+    index: &SectionIndex,
     manifest: &SnapshotManifest,
     request: &SearchDocsRequest,
 ) -> Result<SearchDocsResponse, SearchDocsError> {
@@ -183,10 +205,6 @@ pub fn search(
         // source. `FilterKey::source` is infallible, so it carries no `?`.
         Some(source) => (SourceFilter::source(source)?, FilterKey::source(source)),
     };
-
-    // [034] Build the in-memory inverted index over the active snapshot's
-    // sections. Indexing is pure and deterministic.
-    let index = SectionIndex::build(manifest);
 
     // [034]/[035] The full ranked, source-filtered result set — used both for the
     // zero-hit decision and as the cursor-paginated stream ([037]).
@@ -218,7 +236,7 @@ pub fn search(
         .items
         .iter()
         .filter_map(|item| match item {
-            Item::Hit(hit) => hit_view(&index, hit, req.query()),
+            Item::Hit(hit) => hit_view(index, hit, req.query()),
             _ => None,
         })
         .collect();
@@ -247,6 +265,19 @@ pub fn search(
         next_cursor: page.next_cursor,
         next_steps,
     })
+}
+
+/// Serve the ranked, source-filtered `search_docs` result set, building the
+/// in-memory index per call so the contract stays self-contained. A long-running
+/// server reuses one index through [`search_indexed`] instead (issue #175).
+pub fn search(
+    manifest: &SnapshotManifest,
+    request: &SearchDocsRequest,
+) -> Result<SearchDocsResponse, SearchDocsError> {
+    // The self-contained contract builds the index per call; a long-running
+    // server reuses its own index via `search_indexed` (issue #175).
+    let index = SectionIndex::build(manifest);
+    search_indexed(&index, manifest, request)
 }
 
 /// Assemble the `CallToolResult` for a `search_docs` response.

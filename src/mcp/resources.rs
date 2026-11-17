@@ -103,6 +103,7 @@ use crate::model::{SectionId, SnapshotId, SnapshotManifest};
 use crate::pagination::{CursorError, MAX_RESPONSE_BYTES};
 use crate::provenance::{Instant, StaleThreshold};
 use crate::reads::ReadError;
+use crate::search::SectionIndex;
 use crate::status::{SourceStatus, build_report};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -335,6 +336,24 @@ pub fn read_section_resource(
     as_of: Instant,
     threshold: StaleThreshold,
 ) -> Result<SectionView, SectionResourceError> {
+    // issue #175: build the index per call so this self-contained contract holds;
+    // a long-running server reuses its own index via `read_section_resource_indexed`.
+    let index = SectionIndex::build(manifest);
+    read_section_resource_indexed(&index, manifest, uri, as_of, threshold)
+}
+
+/// The shared-index counterpart of [`read_section_resource`]: resolve the URI,
+/// then read the section **through a pre-built [`SectionIndex`]** instead of
+/// building it per request (issue #175). The URI parse, the foreign-snapshot
+/// guard, and the [`SectionResourceError`] mapping are identical to the per-call
+/// path; only the section resolution reuses the caller's index.
+pub fn read_section_resource_indexed(
+    index: &SectionIndex,
+    manifest: &SnapshotManifest,
+    uri: &str,
+    as_of: Instant,
+    threshold: StaleThreshold,
+) -> Result<SectionView, SectionResourceError> {
     let (snapshot_id, section_id) = parse_section_resource_uri(uri)?;
 
     // A section resource is named under the snapshot the manifest serves; a URI
@@ -350,22 +369,23 @@ pub fn read_section_resource(
     // the [051] `view_from` seam, so the resource serves the identical `SectionView`
     // the tool does (AC1). A not-found / not-well-formed id maps to the same
     // not-found the tool maps — never a fabricated section.
-    let read = match crate::reads::get_section(manifest, &section_id, as_of, threshold) {
-        Ok(read) => read,
-        Err(ReadError::UnknownSection(id)) => {
-            return Err(SectionResourceError::UnknownSection {
-                section_id: id.as_str().to_string(),
-            });
-        }
-        // `UnknownCategory` and `DanglingExplanation` are checklist-read errors
-        // only; a section read yields `UnknownSection` on a miss. Keep the read
-        // total and panic-free by mapping any other variant to the same not-found.
-        Err(_) => {
-            return Err(SectionResourceError::UnknownSection {
-                section_id: section_id.as_str().to_string(),
-            });
-        }
-    };
+    let read =
+        match crate::reads::get_section_indexed(index, manifest, &section_id, as_of, threshold) {
+            Ok(read) => read,
+            Err(ReadError::UnknownSection(id)) => {
+                return Err(SectionResourceError::UnknownSection {
+                    section_id: id.as_str().to_string(),
+                });
+            }
+            // `UnknownCategory` and `DanglingExplanation` are checklist-read errors
+            // only; a section read yields `UnknownSection` on a miss. Keep the read
+            // total and panic-free by mapping any other variant to the same not-found.
+            Err(_) => {
+                return Err(SectionResourceError::UnknownSection {
+                    section_id: section_id.as_str().to_string(),
+                });
+            }
+        };
 
     Ok(crate::mcp::get_section::view_from(&read))
 }

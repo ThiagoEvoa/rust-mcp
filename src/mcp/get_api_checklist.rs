@@ -97,6 +97,7 @@ use crate::pagination::{
     CursorError, FilterKey, Item, MAX_RESPONSE_BYTES, Operation, clamp_query_limit, paginate_items,
 };
 use crate::reads::ReadError;
+use crate::search::SectionIndex;
 use serde_json::{Value, json};
 
 /// The [048] `rmcp` tool name for `get_api_checklist`.
@@ -237,7 +238,15 @@ impl ProtocolError for GetApiChecklistError {
 /// [`GetApiChecklistError::Cursor`] for a malformed or mismatched continuation
 /// cursor, and [`GetApiChecklistError::Dangling`] for an entry whose explanation
 /// does not resolve.
-pub fn checklist(
+/// Resolve a `get_api_checklist` request to its [048] response **reusing a
+/// pre-built [`SectionIndex`]** (issue #175). This is the shared-index
+/// counterpart of [`checklist`]: the server passes the index it built once at
+/// snapshot activation, so a request pays no rebuild. The matching entries are
+/// read through [`crate::reads::get_api_checklist_indexed`]; everything else —
+/// the pagination, the projection, and the error mapping — is identical to the
+/// per-call path.
+pub fn checklist_indexed(
+    index: &SectionIndex,
     manifest: &SnapshotManifest,
     request: &GetApiChecklistRequest,
 ) -> Result<GetApiChecklistResponse, GetApiChecklistError> {
@@ -248,33 +257,36 @@ pub fn checklist(
         Some(category) => FilterKey::category(category),
     };
 
-    // 2. Read the matching entries (or all) through the [036] checklist read,
-    //    which verifies every entry's explanations resolve. An unknown category
-    //    or a dangling citation is a typed error — no entry is fabricated.
-    let read = match crate::reads::get_api_checklist(manifest, request.category.as_deref()) {
-        Ok(read) => read,
-        Err(ReadError::UnknownCategory(requested)) => {
-            return Err(GetApiChecklistError::UnknownCategory {
-                requested,
-                supported: available_categories(manifest),
-            });
-        }
-        Err(ReadError::DanglingExplanation { code, missing }) => {
-            return Err(GetApiChecklistError::Dangling {
-                code,
-                missing: missing.to_string(),
-            });
-        }
-        // `UnknownSection` is only produced by the section read, never the
-        // checklist read; keep the read total and panic-free by mapping it to
-        // the same not-found family (the checklist-scoped `UnknownCategory`).
-        Err(_) => {
-            return Err(GetApiChecklistError::UnknownCategory {
-                requested: String::new(),
-                supported: available_categories(manifest),
-            });
-        }
-    };
+    // 2. Read the matching entries (or all) through the [036] checklist read
+    //    (reusing the shared index), which verifies every entry's explanations
+    //    resolve. An unknown category or a dangling citation is a typed error —
+    //    no entry is fabricated.
+    let read =
+        match crate::reads::get_api_checklist_indexed(index, manifest, request.category.as_deref())
+        {
+            Ok(read) => read,
+            Err(ReadError::UnknownCategory(requested)) => {
+                return Err(GetApiChecklistError::UnknownCategory {
+                    requested,
+                    supported: available_categories(manifest),
+                });
+            }
+            Err(ReadError::DanglingExplanation { code, missing }) => {
+                return Err(GetApiChecklistError::Dangling {
+                    code,
+                    missing: missing.to_string(),
+                });
+            }
+            // `UnknownSection` is only produced by the section read, never the
+            // checklist read; keep the read total and panic-free by mapping it to
+            // the same not-found family (the checklist-scoped `UnknownCategory`).
+            Err(_) => {
+                return Err(GetApiChecklistError::UnknownCategory {
+                    requested: String::new(),
+                    supported: available_categories(manifest),
+                });
+            }
+        };
 
     // 3. Paginate the matching entries through the [037] cap-bounded, cursor-
     //    bound page. AC1: an omitted category walks every entry across pages.
@@ -318,6 +330,19 @@ pub fn checklist(
         truncated: page.truncated,
         next_cursor: page.next_cursor,
     })
+}
+
+/// Resolve a `get_api_checklist` request to its [048] response, building the
+/// in-memory index per call so the contract stays self-contained. A long-running
+/// server reuses one index through [`checklist_indexed`] instead (issue #175).
+pub fn checklist(
+    manifest: &SnapshotManifest,
+    request: &GetApiChecklistRequest,
+) -> Result<GetApiChecklistResponse, GetApiChecklistError> {
+    // The self-contained contract builds the index per call; a long-running
+    // server reuses its own index via `checklist_indexed` (issue #175).
+    let index = SectionIndex::build(manifest);
+    checklist_indexed(&index, manifest, request)
 }
 
 /// The snapshot's distinct checklist categories, sorted — the discoverable

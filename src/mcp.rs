@@ -61,6 +61,7 @@
 
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
@@ -76,6 +77,7 @@ use crate::commands::CommandCatalog;
 use crate::error::{AppError, AppResult};
 use crate::model::SnapshotManifest;
 use crate::provenance::{Instant, StaleThreshold};
+use crate::search::SectionIndex;
 
 /// Protocol / tool error mapping for task `[048][M4]` (AC2): maps the crate's
 /// internal retrieval errors to version-aware `rmcp` [`rmcp::model::ErrorData`]
@@ -176,6 +178,13 @@ pub struct DocsServer {
     as_of: Instant,
     /// The staleness threshold the per-source freshness verdict is judged against.
     threshold: StaleThreshold,
+    /// The in-memory section index, built **once** over the served snapshot and
+    /// shared across every request (issue #175). A request resolves section ids
+    /// and ranks queries through this one index instead of rebuilding it per
+    /// request — the regression that made `command_guidance` and `search_docs`
+    /// O(corpus) on every call. `Arc` keeps a handler `Clone` cheap: a clone
+    /// shares the same index rather than rebuilding it.
+    index: Arc<SectionIndex>,
 }
 
 impl DocsServer {
@@ -220,9 +229,28 @@ impl DocsServer {
         // the (small) command list keeps the owned `manifest` intact for the
         // section index the lookups resolve against.
         let catalog = CommandCatalog::from_entries(manifest.body.commands.clone());
+
+        // issue #175: build the in-memory section index exactly once, over the
+        // snapshot the handler will serve, and share it across every request. A
+        // request resolves section ids and ranks queries through this one index
+        // instead of rebuilding it per request — the fix for the O(corpus)
+        // per-request rebuild regression. `Arc` keeps a handler `Clone` cheap: a
+        // clone shares the index, it does not rebuild it.
+        let index = Arc::new(SectionIndex::build(&manifest));
+
+        // issue #175: validate that every catalog entry's cited sections resolve
+        // in this snapshot, reusing the just-built index, at activation (not per
+        // request). A well-formed snapshot always passes; a hand-built or drifted
+        // one is reported on stderr but never aborts serving — the per-request
+        // lookup still refuses a dangling citation with a typed error.
+        if let Err(err) = catalog.validate_citations_indexed(index.as_ref()) {
+            tracing::warn!("rust-docs-mcp: snapshot citation validation reported an issue: {err}");
+        }
+
         Self {
             manifest,
             catalog,
+            index,
             as_of: Instant::from_system_time(std::time::SystemTime::now()),
             threshold: StaleThreshold::default(),
         }
@@ -440,8 +468,9 @@ impl DocsServer {
                 if let Some(cursor) = &req.cursor {
                     cap_identifier("cursor", cursor, version)?;
                 }
-                let resp = crate::mcp::search_docs::search(&self.manifest, &req)
-                    .map_err(|e| bounded_map(e, version))?;
+                let resp =
+                    crate::mcp::search_docs::search_indexed(&self.index, &self.manifest, &req)
+                        .map_err(|e| bounded_map(e, version))?;
                 crate::mcp::search_docs::result(&resp).map_err(|e| bounded_map(e, version))?
             }
             crate::mcp::get_section::TOOL_NAME => {
@@ -451,7 +480,8 @@ impl DocsServer {
                 if let Some(cursor) = &req.cursor {
                     cap_identifier("cursor", cursor, version)?;
                 }
-                let resp = crate::mcp::get_section::get_section(
+                let resp = crate::mcp::get_section::get_section_indexed(
+                    &self.index,
                     &self.manifest,
                     &req,
                     self.as_of,
@@ -471,8 +501,12 @@ impl DocsServer {
                 if let Some(cursor) = &req.cursor {
                     cap_identifier("cursor", cursor, version)?;
                 }
-                let resp = crate::mcp::get_api_checklist::checklist(&self.manifest, &req)
-                    .map_err(|e| bounded_map(e, version))?;
+                let resp = crate::mcp::get_api_checklist::checklist_indexed(
+                    &self.index,
+                    &self.manifest,
+                    &req,
+                )
+                .map_err(|e| bounded_map(e, version))?;
                 crate::mcp::get_api_checklist::result(&resp).map_err(|e| bounded_map(e, version))?
             }
             crate::mcp::get_command_guidance::TOOL_NAME => {
@@ -484,7 +518,8 @@ impl DocsServer {
                 if let Some(cursor) = &req.cursor {
                     cap_identifier("cursor", cursor, version)?;
                 }
-                let resp = crate::mcp::get_command_guidance::get_command_guidance(
+                let resp = crate::mcp::get_command_guidance::get_command_guidance_indexed(
+                    &self.index,
                     &self.catalog,
                     &self.manifest,
                     &req,
@@ -545,7 +580,8 @@ impl DocsServer {
             crate::mcp::resources::catalog_resource_result(&view)
                 .map_err(|e| bounded_map(e, version))?
         } else {
-            let view = crate::mcp::resources::read_section_resource(
+            let view = crate::mcp::resources::read_section_resource_indexed(
+                &self.index,
                 &self.manifest,
                 &uri,
                 self.as_of,
@@ -1003,6 +1039,155 @@ mod tests {
         );
         assert_send(call);
         assert_send(read);
+    }
+
+    /// issue #175: the section index is built **once**, at snapshot activation
+    /// (`DocsServer::with_snapshot`), and shared across every request — no
+    /// request, no cited section, and no continuation page rebuilds it. This is
+    /// the regression the issue reports: `get_command_guidance` and `search_docs`
+    /// used to call `SectionIndex::build(manifest)` per request (and the catalog
+    /// resolver rebuilt it once *per cited section*), so a single multi-section
+    /// guidance call was O(corpus) many times over.
+    ///
+    /// The `#[cfg(test)]` build counter records every index construction on the
+    /// current thread. Activation moves it by exactly one; the assertions below
+    /// prove that driving ordinary requests, a multi-section guidance path, a
+    /// continuation page, and the two resource reads through the shared index
+    /// moves it by **zero** — the index is built once per snapshot, not per
+    /// request or section. A current-thread runtime keeps every dispatch on the
+    /// building thread, so the `thread_local` counter is read back consistently.
+    #[tokio::test]
+    async fn index_is_built_once_per_snapshot_and_shared_across_requests() {
+        use crate::search::SectionIndex;
+
+        SectionIndex::test_reset_build_count();
+
+        // (0) Snapshot activation builds the index exactly once. This is the
+        //     single build a long-running server performs for its lifetime.
+        let server = DocsServer::new();
+        let after_activation = SectionIndex::test_build_count();
+        assert_eq!(
+            after_activation, 1,
+            "snapshot activation must build the section index exactly once"
+        );
+
+        let version = ProtocolVersion::V_2025_11_25;
+
+        // (a) An ordinary request through each of the four index-using tools. None
+        //     may rebuild the index — each resolves through the shared one.
+        let ordinary = [
+            CallToolRequestParams::new("list_sources"),
+            CallToolRequestParams::new("search_docs")
+                .with_arguments(call_args(&[("query", json!("C-CONV"))])),
+            CallToolRequestParams::new("get_section").with_arguments(call_args(&[(
+                "section_id",
+                json!("api-guidelines/about#rust-api-guidelines"),
+            )])),
+            CallToolRequestParams::new("get_api_checklist")
+                .with_arguments(call_args(&[("category", json!("Naming"))])),
+        ];
+        for req in &ordinary {
+            let _ = complete_tool_result(
+                server
+                    .dispatch_call(req.clone(), Some(&version))
+                    .await
+                    .expect("the ordinary request succeeds"),
+                "ordinary",
+            );
+            assert_eq!(
+                SectionIndex::test_build_count(),
+                after_activation,
+                "an ordinary request must not rebuild the index"
+            );
+        }
+
+        // (b) The multi-section guidance path: `cargo build` cites more sub-sections
+        //     than one page, so a single lookup resolves several cited sections —
+        //     each through the *same* shared index. Repeated lookups still add no
+        //     build: the regression was a rebuild per cited section.
+        let guidance = CallToolRequestParams::new("get_command_guidance")
+            .with_arguments(call_args(&[("command", json!("cargo build"))]));
+        for _ in 0..3 {
+            let _ = complete_tool_result(
+                server
+                    .dispatch_call(guidance.clone(), Some(&version))
+                    .await
+                    .expect("the guidance lookup succeeds"),
+                "guidance",
+            );
+            assert_eq!(
+                SectionIndex::test_build_count(),
+                after_activation,
+                "a multi-section guidance lookup must not rebuild the index per section"
+            );
+        }
+
+        // (c) A continuation page: page one of a bounded guidance request, then
+        //     resume its cursor. Both pages resolve through the shared index, so
+        //     neither adds a build. The first page is truncated (the command cites
+        //     more sections than the limit), so it carries a real next cursor.
+        let page1 = complete_tool_result(
+            server
+                .dispatch_call(
+                    CallToolRequestParams::new("get_command_guidance").with_arguments(call_args(
+                        &[("command", json!("cargo build")), ("limit", json!(1))],
+                    )),
+                    Some(&version),
+                )
+                .await
+                .expect("the guidance first page succeeds"),
+            "guidance page one",
+        );
+        let next_cursor = page1
+            .structured_content
+            .as_ref()
+            .and_then(|v| v.get("next_cursor"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        assert!(
+            next_cursor.is_some(),
+            "a bounded `cargo build` guidance page is truncated and carries a next cursor"
+        );
+        let continuation =
+            CallToolRequestParams::new("get_command_guidance").with_arguments(call_args(&[
+                ("command", json!("cargo build")),
+                ("limit", json!(1)),
+                ("cursor", json!(next_cursor.as_deref().unwrap())),
+            ]));
+        let _ = complete_tool_result(
+            server
+                .dispatch_call(continuation, Some(&version))
+                .await
+                .expect("the guidance continuation succeeds"),
+            "guidance continuation",
+        );
+        assert_eq!(
+            SectionIndex::test_build_count(),
+            after_activation,
+            "a continuation page must not rebuild the index"
+        );
+
+        // (d) The two resource reads share the index too: the catalog view and a
+        //     concrete section resource, each resolving through the shared index
+        //     (or, for the catalog, no index at all) — neither rebuilds it.
+        let section_uri = format!(
+            "rust-docs://snapshots/{}/sections/api-guidelines/about#rust-api-guidelines",
+            server.manifest.body.snapshot_id,
+        );
+        for uri in ["rust-docs://catalog", section_uri.as_str()] {
+            let _ = resource_text(
+                server
+                    .dispatch_read(ReadResourceRequestParams::new(uri), Some(&version))
+                    .await
+                    .expect("the resource read succeeds"),
+                "resource",
+            );
+        }
+        assert_eq!(
+            SectionIndex::test_build_count(),
+            after_activation,
+            "a resource read must not rebuild the index"
+        );
     }
 
     /// Build a tool-call `arguments` object (`serde_json::Map`) from string to

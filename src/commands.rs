@@ -80,7 +80,7 @@ use crate::pagination::{
     clamp_query_limit, paginate_items,
 };
 use crate::provenance::{Instant, StaleThreshold};
-use crate::reads::{ReadError, SectionRead, get_section};
+use crate::reads::{ReadError, SectionRead, get_section_indexed};
 use crate::search::SectionIndex;
 use serde::Serialize;
 
@@ -494,7 +494,19 @@ impl CommandCatalog {
     /// published or served — never surfaced to a client as a JSON-RPC `-32603`
     /// from `get_command_guidance`.
     pub fn validate_citations(&self, manifest: &SnapshotManifest) -> Result<(), LookupError> {
+        // The self-contained contract builds the index per call; a long-running
+        // server validates once, at activation, through `validate_citations_indexed`
+        // (issue #175).
         let index = SectionIndex::build(manifest);
+        self.validate_citations_indexed(&index)
+    }
+
+    /// Prove that every entry's cited upstream sections resolve, **reusing a
+    /// pre-built [`SectionIndex`]** instead of building one per call (issue
+    /// #175). This is the shared-index counterpart of [`validate_citations`]; a
+    /// server runs it once at snapshot activation against the index it built
+    /// for serving, so a per-request request pays no build.
+    pub fn validate_citations_indexed(&self, index: &SectionIndex) -> Result<(), LookupError> {
         for entry in &self.entries {
             for reference in &entry.upstream_sections {
                 if index.get(reference).is_none() {
@@ -549,22 +561,17 @@ impl CommandCatalog {
     }
 
     /// Resolve an entry by key **and** prove that every upstream section it cites
-    /// resolves against `manifest`'s [`SectionIndex`].
-    ///
-    /// This is the AC1 guard at the catalog boundary: a well-formed key whose
-    /// citations do not all resolve in the active snapshot is
-    /// [`LookupError::UnresolvedSection`] naming the first unresolvable id — the
-    /// catalog never hands a caller a guidance entry whose citations dangle. The
-    /// resolution reuses the tested in-memory [`SectionIndex`] (the same seam
-    /// `crate::reads::get_section` resolves through), so "resolves" means "the
-    /// snapshot carries a section with that exact id".
-    pub fn resolve(
+    /// resolves, **reusing a pre-built [`SectionIndex`]** instead of building one
+    /// per call (issue #175). This is the shared-index counterpart of
+    /// [`resolve`]: a server resolves each cited section through the index it
+    /// built once, so a command with N cited sections pays no N+1 rebuilds.
+    pub fn resolve_indexed(
         &self,
+        index: &SectionIndex,
         manifest: &SnapshotManifest,
         key: &str,
     ) -> Result<ResolvedCommand, LookupError> {
         let entry = self.get(key)?;
-        let index = SectionIndex::build(manifest);
         // Resolve every cited section; the first that is absent is the error.
         let mut sections = Vec::with_capacity(entry.upstream_sections.len());
         for reference in &entry.upstream_sections {
@@ -583,6 +590,28 @@ impl CommandCatalog {
             sections,
             snapshot_id: manifest.body.snapshot_id.clone(),
         })
+    }
+
+    /// Resolve an entry by key **and** prove that every upstream section it cites
+    /// resolves against `manifest`'s [`SectionIndex`].
+    ///
+    /// This is the AC1 guard at the catalog boundary: a well-formed key whose
+    /// citations do not all resolve in the active snapshot is
+    /// [`LookupError::UnresolvedSection`] naming the first unresolvable id — the
+    /// catalog never hands a caller a guidance entry whose citations dangle. The
+    /// resolution reuses the tested in-memory [`SectionIndex`] (the same seam
+    /// `crate::reads::get_section` resolves through), so "resolves" means "the
+    /// snapshot carries a section with that exact id".
+    pub fn resolve(
+        &self,
+        manifest: &SnapshotManifest,
+        key: &str,
+    ) -> Result<ResolvedCommand, LookupError> {
+        // The self-contained contract builds the index per call; a long-running
+        // server resolves through its shared index via `resolve_indexed` (issue
+        // #175).
+        let index = SectionIndex::build(manifest);
+        self.resolve_indexed(&index, manifest, key)
     }
 }
 
@@ -2577,8 +2606,25 @@ impl CommandGuidance {
 /// process — it returns guidance only. `as_of` / `threshold` feed the `[036]`
 /// section-read freshness; the entry metadata and effect notes are returned whole
 /// on every page, and only the section *content* is clipped across continuations.
-pub fn command_guidance(
+/// Serve the bounded, source-backed guidance for an exact command `key`,
+/// **reusing a pre-built [`SectionIndex`]** (issue #175).
+///
+/// This is the shared-index counterpart of [`command_guidance`]: a server passes
+/// the index it built once at snapshot activation, and the command's cited
+/// sections resolve through that same index — `resolve_indexed` for the key and
+/// `get_section_indexed` for each cited section — so a command with N cited
+/// sections pays no N+1 index rebuilds. The entry, provenance, and pagination are
+/// identical to the per-call path; only the redundant builds are avoided.
+///
+/// The per-call [`command_guidance`] already sits at clippy's 7-argument limit;
+/// this shared-index counterpart adds exactly one parameter — the caller-supplied
+/// `index` (issue #175) — so the count is scoped-allowed rather than the
+/// signature reshaped into an options struct that the per-call twin would not
+/// share.
+#[allow(clippy::too_many_arguments)]
+pub fn command_guidance_indexed(
     catalog: &CommandCatalog,
+    index: &SectionIndex,
     manifest: &SnapshotManifest,
     as_of: Instant,
     threshold: StaleThreshold,
@@ -2587,18 +2633,19 @@ pub fn command_guidance(
     cursor: Option<&str>,
 ) -> Result<CommandGuidance, CommandGuidanceError> {
     // AC1/AC2 at the catalog boundary: resolve the exact key and prove every
-    // cited section resolves in this snapshot. A shell operator / empty / padded
-    // key, an unsupported key, or a dangling citation is refused here — never
-    // executed, never fabricated.
-    let resolved = catalog.resolve(manifest, key)?;
+    // cited section resolves in this snapshot, through the shared index. A shell
+    // operator / empty / padded key, an unsupported key, or a dangling citation
+    // is refused here — never executed, never fabricated.
+    let resolved = catalog.resolve_indexed(index, manifest, key)?;
     let snapshot_id = resolved.snapshot_id.clone();
 
-    // Compose each resolved section into a complete [036] SectionRead. `resolve`
-    // already proved every cited section resolves, so each read succeeds; the
-    // `Read` arm is defensive only.
+    // Compose each resolved section into a complete [036] SectionRead through the
+    // *same* index. `resolve_indexed` already proved every cited section
+    // resolves, so each read succeeds; the `Read` arm is defensive only. No
+    // per-section index rebuild (issue #175).
     let mut items = Vec::with_capacity(resolved.sections.len());
     for section in &resolved.sections {
-        let read = get_section(manifest, &section.id, as_of, threshold)?;
+        let read = get_section_indexed(index, manifest, &section.id, as_of, threshold)?;
         items.push(Item::Section(Box::new(read)));
     }
 
@@ -2621,6 +2668,25 @@ pub fn command_guidance(
         snapshot_id,
         page,
     })
+}
+
+pub fn command_guidance(
+    catalog: &CommandCatalog,
+    manifest: &SnapshotManifest,
+    as_of: Instant,
+    threshold: StaleThreshold,
+    key: &str,
+    limit: Option<usize>,
+    cursor: Option<&str>,
+) -> Result<CommandGuidance, CommandGuidanceError> {
+    // The self-contained contract builds the index once and reuses it for the
+    // whole call (the command's cited sections no longer trigger N+1 rebuilds);
+    // a long-running server reuses its own index via `command_guidance_indexed`
+    // (issue #175).
+    let index = SectionIndex::build(manifest);
+    command_guidance_indexed(
+        catalog, &index, manifest, as_of, threshold, key, limit, cursor,
+    )
 }
 
 // ---------------------------------------------------------------------------

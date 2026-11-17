@@ -97,7 +97,7 @@
 
 use rmcp::model::{CallToolResult, ContentBlock, Tool};
 
-use crate::commands::{CommandCatalog, CommandGuidanceError, command_guidance};
+use crate::commands::{CommandCatalog, CommandGuidanceError, command_guidance_indexed};
 use crate::error::AppError;
 use crate::mcp::schema::{
     CitationView, CommandEntryView, EffectNoteView, GetCommandGuidanceRequest,
@@ -107,6 +107,7 @@ use crate::model::{EffectKind, EffectNote, Section, SnapshotManifest};
 use crate::pagination::{MAX_RESPONSE_BYTES, clamp_query_limit};
 use crate::provenance::{Instant, StaleThreshold};
 use crate::reads::SectionRead;
+use crate::search::SectionIndex;
 
 // ---------------------------------------------------------------------------
 // Tool name + builder
@@ -291,7 +292,7 @@ fn note_citation(section_id: &str, source: &str, note: String) -> CitationView {
 ///
 /// This composes the completed seams in dependency order:
 ///
-/// 1. **Resolve + page** the command through the [039]–[043] [`command_guidance`]
+/// 1. **Resolve + page** the command through the [039]–[043] [`crate::commands::command_guidance`]
 ///    seam, which validates the key at the [007] boundary (a shell operator is
 ///    `InvalidKey`, an unsupported key is `UnknownKey` — AC2), proves every
 ///    cited section resolves in `manifest` (a dangling citation is
@@ -315,7 +316,15 @@ fn note_citation(section_id: &str, source: &str, note: String) -> CitationView {
 /// (`RESOURCE_NOT_FOUND` / `INVALID_PARAMS` with the supported keys), a
 /// dangling citation (`INTERNAL_ERROR`), or a malformed / mismatched
 /// continuation cursor (`INVALID_PARAMS`).
-pub fn get_command_guidance(
+/// Serve the bounded, source-backed `get_command_guidance` response **reusing a
+/// pre-built [`SectionIndex`]** (issue #175). This is the shared-index
+/// counterpart of [`get_command_guidance`]: the server passes the index it built
+/// once at snapshot activation, so a request resolves its cited sections through
+/// that one index instead of rebuilding it per request and per cited section —
+/// the regression the issue reports. The entry, provenance, pagination, and
+/// error mapping are identical to the per-call path.
+pub fn get_command_guidance_indexed(
+    index: &SectionIndex,
     catalog: &CommandCatalog,
     manifest: &SnapshotManifest,
     request: &GetCommandGuidanceRequest,
@@ -327,11 +336,12 @@ pub fn get_command_guidance(
     // same clamp internally, so the echoed limit matches the page used.
     let limit = request.limit.map(|limit| limit as usize);
 
-    // 1. Resolve + page through the [039]–[043] seam. The `?` propagates the
-    //    typed error, which the caller maps through the [048] `ProtocolError`
-    //    contract.
-    let guidance = command_guidance(
+    // 1. Resolve + page through the [039]–[043] seam, reusing the shared index
+    //    (issue #175). The `?` propagates the typed error, which the caller maps
+    //    through the [048] `ProtocolError` contract.
+    let guidance = command_guidance_indexed(
         catalog,
+        index,
         manifest,
         as_of,
         threshold,
@@ -355,6 +365,23 @@ pub fn get_command_guidance(
         truncated: guidance.page.truncated,
         next_cursor: guidance.page.next_cursor,
     })
+}
+
+/// Serve the bounded, source-backed `get_command_guidance` response, building the
+/// in-memory index per call so the contract stays self-contained. A long-running
+/// server reuses one index through [`get_command_guidance_indexed`] instead
+/// (issue #175).
+pub fn get_command_guidance(
+    catalog: &CommandCatalog,
+    manifest: &SnapshotManifest,
+    request: &GetCommandGuidanceRequest,
+    as_of: Instant,
+    threshold: StaleThreshold,
+) -> Result<GetCommandGuidanceResponse, CommandGuidanceError> {
+    // The self-contained contract builds the index per call; a long-running
+    // server reuses its own index via `get_command_guidance_indexed` (issue #175).
+    let index = SectionIndex::build(manifest);
+    get_command_guidance_indexed(&index, catalog, manifest, request, as_of, threshold)
 }
 
 // ---------------------------------------------------------------------------
