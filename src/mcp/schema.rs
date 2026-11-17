@@ -381,8 +381,8 @@ pub struct CatalogResourceView {
     pub truncated: bool,
 }
 
-/// The `rust-docs://section/<id>` resource: one section's content and
-/// provenance.
+/// The `rust-docs://snapshots/{snapshot_id}/sections/{section_id}` resource
+/// payload: one section's content and provenance.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SectionResourceView {
     /// The section, with its body, heading breadcrumb, and provenance.
@@ -508,17 +508,6 @@ pub fn catalog_resource() -> Resource {
     )
 }
 
-/// The `rust-docs://section/<id>` resource template.
-pub fn section_resource() -> Resource {
-    resource(
-        "rust-docs://section/{id}",
-        "section",
-        "Documentation section",
-        "One documentation section by id, with its body, heading breadcrumb, \
-         and provenance.",
-    )
-}
-
 /// All five tools, in a stable order, for [`rmcp::ServerHandler::list_tools`].
 pub fn all_tools() -> Vec<Tool> {
     vec![
@@ -528,11 +517,6 @@ pub fn all_tools() -> Vec<Tool> {
         get_api_checklist_tool(),
         get_command_guidance_tool(),
     ]
-}
-
-/// The two resources, for [`rmcp::ServerHandler::list_resources`].
-pub fn all_resources() -> Vec<Resource> {
-    vec![catalog_resource(), section_resource()]
 }
 
 // ===========================================================================
@@ -914,12 +898,14 @@ mod tests {
     }
 
     #[test]
-    fn two_resources_are_json() {
-        let resources = all_resources();
-        assert_eq!(resources.len(), 2);
-        for r in &resources {
-            assert_eq!(r.mime_type.as_deref(), Some("application/json"));
-        }
+    fn catalog_resource_is_json() {
+        // Issue #172: the obsolete unbound `rust-docs://section/{id}` template is
+        // gone; the catalog resource is the fixed schema-owned descriptor, and the
+        // concrete section resources are built snapshot-bound in
+        // `crate::mcp::resources`.
+        let catalog = catalog_resource();
+        assert_eq!(catalog.mime_type.as_deref(), Some("application/json"));
+        assert_eq!(catalog.uri, "rust-docs://catalog");
     }
 
     // ----- AC1: advertised schema agrees with the *internal* retrieval output.

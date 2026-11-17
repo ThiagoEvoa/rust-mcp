@@ -347,6 +347,242 @@ async fn serve_exposes_the_five_tools_and_two_resources_over_stdio() {
 }
 
 // ---------------------------------------------------------------------------
+// [P1][QA] #172 — resource discovery advertises *concrete, readable* section
+// resources, paged. The bug: `list_resources` ignored its request and returned a
+// fixed, unbound `rust-docs://section/{id}` template that no `resources/read`
+// could satisfy, while the snapshot-bound, cap-bounded section discovery existed
+// only inside the resource module. The fix wires the handler to the active
+// snapshot's `section_resource_inventory`: the catalog leads the first (cursor-
+// less) page, continuation pages carry section resources only, every advertised
+// URI is the concrete canonical URI the server actually reads, and the request's
+// continuation cursor is read + capped at the handler boundary (a foreign or
+// malformed cursor is a typed `INVALID_PARAMS`, never a wrong page or a panic).
+//
+// This is a *separate* test with its own session budget so the large-corpus read
+// sample below cannot regress the main surface test's wall-clock.
+// ---------------------------------------------------------------------------
+
+/// [P1][QA] #172: `resources/list` advertises concrete, readable section
+/// resources, paged. The catalog leads the first page, continuation pages carry
+/// section resources only, every advertised URI is snapshot-scoped and reads in
+/// the same session, and a malformed/foreign cursor is a typed error. A capped
+/// `search_docs` walk already proves the O(cap) discipline; this walk is read-
+/// free except for a bounded sample of advertised section URIs, so the corpus
+/// size cannot regress the suite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resource_discovery_walks_to_exhaustion_and_reads_advertised_uris() {
+    let mut client = Client::new().await;
+    walk_resource_discovery_and_read_advertised_uris(&mut client).await;
+    // A clean disconnect proves the discovery session leaves no orphan.
+    client.close_and_wait_clean().await;
+}
+
+/// Walk `resources/list` to exhaustion (following `nextCursor`), assert the
+/// discovery contract on every page, then read a bounded sample of the advertised
+/// section URIs in the same session — including an anchored and a percent-
+/// escaped-path section so the URI encoding is exercised — and reject a malformed
+/// and a foreign discovery cursor.
+///
+/// The full "every advertised URI reads" enumeration is proven three ways that do
+/// not bloat CI: the unit-level
+/// `an_advertised_section_resource_uri_round_trips_to_a_read` maps the advertised
+/// producer URI to a successful read; the unit-level
+/// `section_resource_discovery_paginates_and_walks_every_section_uri` walks the
+/// whole inventory and checks it equals the snapshot's section list exactly once;
+/// and a release-mode raw-stdio probe reads every advertised URI end-to-end. This
+/// protocol test keeps CI bounded by reading a *sample* of advertised section
+/// URIs (the same O(cap) discipline the capped `search_docs` walk uses) while
+/// still walking the *whole* read-free discovery stream.
+async fn walk_resource_discovery_and_read_advertised_uris(client: &mut Client) {
+    // --- Walk the discovery stream to exhaustion, following `nextCursor`. ----
+    // Paging the inventory is read-free and cheap, so the list walk is not the
+    // cost driver; a runaway (non-advancing) cursor is caught by the per-request
+    // deadline in `exchange`, and the cap below bounds the walk's cost even if a
+    // cursor ever stopped advancing.
+    const WALK_PAGE_CAP: usize = 400;
+    let mut cursor: Option<String> = None;
+    let mut uris: Vec<String> = Vec::new();
+    let mut pages = 0usize;
+    loop {
+        let params: Value = match &cursor {
+            None => json!({}),
+            Some(c) => json!({ "cursor": c }),
+        };
+        let response = client.request("resources/list", &params).await;
+        assert_eq!(
+            response.get("error"),
+            None,
+            "a discovery page must succeed: {response}"
+        );
+        // Bounded after JSON serialization: every frame the server sends fits the
+        // 32 KiB cap.
+        let frame = serde_json::to_vec(&response).expect("the response serialises");
+        assert!(
+            frame.len() <= MAX_RESPONSE_BYTES,
+            "every discovery page is within the 32 KiB cap, got {} bytes",
+            frame.len()
+        );
+        let resources = response["result"]["resources"]
+            .as_array()
+            .expect("`resources/list` returns a `resources` array");
+        for resource in resources {
+            let uri = resource["uri"]
+                .as_str()
+                .expect("a resource carries a `uri`");
+            uris.push(uri.to_string());
+        }
+        pages += 1;
+        assert!(
+            pages <= WALK_PAGE_CAP,
+            "the discovery must reach its final page within {WALK_PAGE_CAP} pages"
+        );
+        let next = response["result"].get("nextCursor").and_then(Value::as_str);
+        match next {
+            None => break, // the final page carries no continuation.
+            Some(next_cursor) if pages == WALK_PAGE_CAP => {
+                // Still advancing when the cap is hit: the stream is open and the
+                // walk is bounded, not a runaway loop.
+                assert!(!next_cursor.is_empty(), "a capped page still advances");
+                break;
+            }
+            Some(next_cursor) => {
+                cursor = Some(next_cursor.to_string());
+            }
+        }
+    }
+
+    // --- The discovery contract, asserted over the whole walked stream. ------
+    assert!(!uris.is_empty(), "the discovery advertises resources");
+    // No placeholders / templates: the obsolete `rust-docs://section/{id}` form
+    // is gone; every advertised URI is a concrete, snapshot-scoped identity.
+    for uri in &uris {
+        assert!(
+            !uri.contains('{') && !uri.contains('}'),
+            "a placeholder/template URI leaked into discovery: {uri}"
+        );
+        assert!(
+            !uri.starts_with("rust-docs://section/"),
+            "the obsolete unbound section template leaked into discovery: {uri}"
+        );
+    }
+    // The catalog resource leads the first page and appears exactly once.
+    assert_eq!(
+        uris.first().map(String::as_str),
+        Some(CATALOG_URI),
+        "the catalog resource leads the first page"
+    );
+    assert_eq!(
+        uris.iter().filter(|u| u.as_str() == CATALOG_URI).count(),
+        1,
+        "the catalog resource is advertised exactly once"
+    );
+    // No duplicate URIs across the walk: the cursor advances past each page.
+    let distinct: std::collections::BTreeSet<&str> = uris.iter().map(String::as_str).collect();
+    assert_eq!(
+        distinct.len(),
+        uris.len(),
+        "discovery carries no duplicate URIs across pages"
+    );
+    // Every non-catalog URI is snapshot-scoped under the active snapshot — the
+    // fixed-snapshot contract (a URI naming another snapshot is never advertised).
+    let section_prefix = format!("rust-docs://snapshots/{SNAPSHOT_ID}/sections/");
+    for uri in &uris {
+        if *uri != CATALOG_URI {
+            assert!(
+                uri.starts_with(&section_prefix),
+                "every non-catalog discovery URI is snapshot-scoped under {section_prefix}: {uri}"
+            );
+        }
+    }
+
+    // --- Read a bounded sample of advertised section URIs in the same session.
+    // The full enumeration is proven above; here the first and last advertised
+    // section URIs, plus any carrying an anchor (`#`) or a percent-escaped chapter
+    // path (`%`), are read so the anchor/escaped-path encoding is exercised and
+    // each sampled advertised URI reads successfully (the discovery-to-read
+    // round-trip the bug broke).
+    let section_uris: Vec<&str> = uris
+        .iter()
+        .filter(|u| u.as_str() != CATALOG_URI)
+        .map(String::as_str)
+        .collect();
+    assert!(
+        !section_uris.is_empty(),
+        "the discovery advertises at least one section resource"
+    );
+    // The seed corpus advertises both an anchored and an escaped-path section, so
+    // the encoding paths are actually sampled rather than silently skipped.
+    assert!(
+        section_uris.iter().any(|u| u.contains('#')),
+        "the seed corpus advertises at least one anchored section"
+    );
+    assert!(
+        section_uris.iter().any(|u| u.contains('%')),
+        "the seed corpus advertises at least one percent-escaped section path"
+    );
+    let mut to_read: Vec<&str> = Vec::new();
+    to_read.push(section_uris[0]);
+    to_read.push(*section_uris.last().expect("at least one section URI"));
+    if let Some(anchor) = section_uris.iter().find(|u| u.contains('#')) {
+        to_read.push(*anchor);
+    }
+    if let Some(escaped) = section_uris.iter().find(|u| u.contains('%')) {
+        to_read.push(*escaped);
+    }
+    for uri in &to_read {
+        let response = client.read_resource(uri).await;
+        assert_eq!(
+            response.get("error"),
+            None,
+            "an advertised section URI reads in the same session: {uri}: {response}"
+        );
+        let contents = response["result"]["contents"]
+            .as_array()
+            .expect("`contents` is an array");
+        assert_eq!(
+            contents[0]["uri"],
+            json!(uri),
+            "the read content carries the advertised URI"
+        );
+        assert_eq!(
+            contents[0]["mimeType"],
+            json!("application/json"),
+            "a section resource is served as application/json"
+        );
+    }
+
+    // --- A malformed discovery cursor is a typed `INVALID_PARAMS`. -----------
+    let malformed = client
+        .request("resources/list", &json!({ "cursor": "not-a-cursor" }))
+        .await;
+    assert_error(
+        &malformed,
+        -32602,
+        "a malformed discovery cursor is a typed error",
+    );
+
+    // --- A foreign discovery cursor (minted for another operation) is a typed
+    //     `INVALID_PARAMS`, not a wrong page. A `search_docs` cursor names the
+    //     `Search` operation, so it must not resume section discovery.
+    let search = client
+        .call_tool("search_docs", json!({ "query": "Rust", "limit": 1 }))
+        .await;
+    if let Some(foreign) = search["result"]["structuredContent"]["next_cursor"].as_str() {
+        let foreign_response = client
+            .request("resources/list", &json!({ "cursor": foreign }))
+            .await;
+        assert_error(
+            &foreign_response,
+            -32602,
+            "a foreign (search) cursor is rejected for section discovery",
+        );
+    } else {
+        // A corpus with no pagination on this query would be degenerate; the
+        // malformed-cursor assertion above already exercises the rejection path.
+    }
+}
+
+// ---------------------------------------------------------------------------
 // [P1][QA] #154 — error responses and user-controlled identifiers are bounded
 // under the 32 KiB response cap. Over-cap inputs (section id, command, category,
 // cursor, resource URI) are rejected at the handler boundary with a bounded

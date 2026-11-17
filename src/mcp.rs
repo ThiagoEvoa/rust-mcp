@@ -279,16 +279,63 @@ impl ServerHandler for DocsServer {
         ))
     }
 
-    /// List the two resource identities (`rust-docs://catalog` and
-    /// `rust-docs://sections/<source>/<path>`).
+    /// List the active snapshot's resources, paginated.
+    ///
+    /// [057][M4] / [055]: discovery is snapshot-bound and bounded. [055]
+    /// introduced the section resource; [057] wired `list_resources`. Issue #172
+    /// fixed the bug where this handler *ignored its request* and returned a fixed,
+    /// unbound `rust-docs://section/{id}` template that no read could satisfy
+    /// (`read_resource` parses `rust-docs://snapshots/{snapshot}/sections/{id}`).
+    /// Now every advertised URI is a *concrete, readable* section URI derived from
+    /// the active snapshot — paged by the [055]
+    /// [`section_resource_inventory`](crate::mcp::resources::section_resource_inventory)
+    /// under the [037] continuation cursor (a foreign or malformed cursor is a typed
+    /// `INVALID_PARAMS`, never a wrong page or a panic), with the `rust-docs://catalog`
+    /// resource leading the first page. The request's continuation cursor is read
+    /// from the paginated request and capped at the handler boundary (#154) before
+    /// it is decoded, so an over-long cursor is a bounded `INVALID_PARAMS`, not an
+    /// echo into a cursor error. Continuation pages carry only section resources;
+    /// the catalog leads only the first (cursor-less) page.
     async fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        Ok(ListResourcesResult::with_all_items(
-            crate::mcp::schema::all_resources(),
-        ))
+        let version = context.protocol_version();
+        // #172: read the request's continuation cursor and cap it at the handler
+        // boundary — an over-long cursor is a bounded `INVALID_PARAMS` before it is
+        // decoded (mirrors the tool-call cursor cap in `dispatch_call`).
+        let cursor = request.as_ref().and_then(|request| request.cursor.clone());
+        if let Some(cursor) = &cursor {
+            cap_identifier("cursor", cursor, version.as_ref())?;
+        }
+        // Page the active snapshot's section resources. A malformed or foreign
+        // cursor is a typed `INVALID_PARAMS` through the [048] `ProtocolError`
+        // contract, never a wrong page or a panic.
+        let inventory = crate::mcp::resources::section_resource_inventory(
+            &self.manifest,
+            None,
+            cursor.as_deref(),
+        )
+        .map_err(|error| bounded_map(error, version.as_ref()))?;
+
+        // The catalog resource leads the first page only (a fresh discovery, no
+        // cursor); a continuation page carries section resources alone. Every
+        // section resource is a concrete URI the active snapshot actually serves,
+        // built from the inventory's own URIs so the advertised identity and the
+        // readable identity are one and the same.
+        let mut resources: Vec<_> =
+            Vec::with_capacity(inventory.uris.len() + usize::from(cursor.is_none()));
+        if cursor.is_none() {
+            resources.push(crate::mcp::schema::catalog_resource());
+        }
+        for uri in &inventory.uris {
+            resources.push(crate::mcp::resources::section_resource_from_uri(uri));
+        }
+        let mut result = ListResourcesResult::with_all_items(resources);
+        // The continuation cursor is the inventory's; a final page carries `None`.
+        result.next_cursor = inventory.next_cursor;
+        Ok(result)
     }
 
     /// Route a tool call to its module and lift its typed error into a
