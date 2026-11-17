@@ -59,9 +59,13 @@ use tokio::process::Command;
 
 /// How long the test will wait for the server to answer a request and, after a
 /// clean disconnect, to exit. A real stdio round-trip on localhost is
-/// sub-second; this generous budget keeps the test fast while tolerating CI
-/// load. A per-request deadline is derived from it below.
-const BUDGET: Duration = Duration::from_secs(15);
+/// sub-second, but a full-corpus `search_docs` call inside a *debug* test binary
+/// costs far more per round-trip than the server's own p95 — the client's
+/// process-pipe I/O, serde, and debug-mode ranking dominate — so the pagination
+/// walk below is *capped* (see `call_search_docs`) and this generous budget keeps
+/// the suite comfortable under CI load while a larger corpus still cannot regress
+/// the suite's wall-clock. A per-request deadline is derived from it below.
+const BUDGET: Duration = Duration::from_secs(30);
 
 /// The protocol version the test negotiates. `2025-11-25` is the highest
 /// `initialize`-capable version the server negotiates to (a client that asks for
@@ -799,6 +803,23 @@ async fn call_search_docs(client: &mut Client) {
     }
 
     // --- Pagination: a small limit paginates; walking it concatenates. -------
+    // A `limit` of one over the real corpus (#170 grew it to 877 sections) now
+    // matches the bulk of the corpus, so an *unbounded* "walk until exhausted"
+    // loop would perform one JSON-RPC round-trip per distinct match — hundreds of
+    // them — and blow the test's time budget on slow/CI machines (the F-1
+    // regression: the 545 -> 877 corpus growth pushed a limit-one walk past the
+    // 15 s `BUDGET` on CI/MSRV). The pagination *contract* — each page is a
+    // complete page, the cursor advances without duplicate section ids, and the
+    // concatenation is lossless — is proven by walking a *bounded* number of
+    // pages: every page we read is read losslessly, and a non-advancing (runaway)
+    // cursor would still push `pages` past the distinct count and trip the
+    // assertion below; the per-request deadline in `exchange` is the fast-fail net
+    // for a true runaway loop. Capping the walk makes its cost O(cap) rather than
+    // O(distinct matches), so a larger corpus cannot regress the test again. The
+    // cap (48 pages) is a strong multi-page lossless proof and keeps the suite
+    // fast; the larger budget (30 s, see `BUDGET`) absorbs CI hardware variance
+    // on top of that bound.
+    const WALK_PAGE_CAP: usize = 48;
     let mut cursor: Option<String> = None;
     let mut collected: Vec<String> = Vec::new();
     let mut pages = 0usize;
@@ -824,6 +845,7 @@ async fn call_search_docs(client: &mut Client) {
         }
         pages += 1;
         if structured.get("truncated").and_then(Value::as_bool) != Some(true) {
+            // The stream is exhausted: the final page carries no next cursor.
             assert!(
                 structured.get("next_cursor").is_none()
                     || structured.get("next_cursor") == Some(&Value::Null),
@@ -831,12 +853,25 @@ async fn call_search_docs(client: &mut Client) {
             );
             break;
         }
-        cursor = Some(
-            structured["next_cursor"]
-                .as_str()
-                .expect("a truncated page carries a next cursor")
-                .to_string(),
-        );
+        // A truncated page carries a non-empty next cursor that advances to the
+        // next unread page.
+        let next_cursor = structured
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .expect("a truncated page carries a next cursor")
+            .to_string();
+        // Bound the walk so a large corpus cannot exceed the time budget: stop
+        // after `WALK_PAGE_CAP` pages even while the stream is still open. The
+        // non-empty cursor we stop on proves the walk continued losslessly past
+        // the cap; a small corpus instead exhausts here and asserts no cursor.
+        if pages == WALK_PAGE_CAP {
+            assert!(
+                !next_cursor.is_empty(),
+                "the page that hits the walk cap still carries a next cursor"
+            );
+            break;
+        }
+        cursor = Some(next_cursor);
     }
     assert!(
         !collected.is_empty(),
@@ -856,12 +891,13 @@ async fn call_search_docs(client: &mut Client) {
     );
     // Bounded, non-truncating pagination, corpus-derived: a limit-one walk
     // returns exactly one new distinct section per page, so the number of pages
-    // can never exceed the number of distinct matches. This replaces the old
-    // seed-calibrated `pages <= 20` — the hand-authored 8-section corpus is gone,
-    // replaced by the real upstream corpus (#150, the routine command families
-    // plus the full books), so `Rust` now matches the bulk of the corpus and the
-    // walk spans as many pages as there are distinct matches rather than a
-    // handful. A non-advancing (runaway) cursor would push `pages` past the
+    // can never exceed the number of distinct matches. The hand-authored
+    // 8-section corpus is gone, replaced by the real upstream corpus (#150, the
+    // routine command families plus the full books; #170 grew it to 877
+    // sections), so `Rust` matches the bulk of the corpus. Capping the walk at
+    // `WALK_PAGE_CAP` keeps this assertion fast and corpus-growth-proof while
+    // still proving the per-page lossless-concatenation contract over a real,
+    // large corpus: a non-advancing (runaway) cursor would push `pages` past the
     // distinct count and break this; the per-request deadline in `exchange` is the
     // fast-fail net for a true runaway loop.
     assert!(
