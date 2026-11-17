@@ -286,6 +286,7 @@ pub fn checklist(
     let page = paginate_items(
         Operation::Checklist,
         &filter,
+        None,
         &manifest.body.snapshot_id,
         &items,
         request.limit.map(|limit| limit as usize),
@@ -866,6 +867,7 @@ mod tests {
         let foreign = crate::pagination::Cursor::mint(
             Operation::Search,
             &FilterKey::all(),
+            None,
             &m.body.snapshot_id,
             0,
         )

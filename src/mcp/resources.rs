@@ -545,7 +545,8 @@ pub fn section_resource_inventory(
         None => 0,
         Some(token) => {
             let cursor = Cursor::from_token(token)?;
-            cursor.verify(op, &filter, &snapshot_id)?
+            // Query-less operation (the command-catalog stream); no query binding.
+            cursor.verify(op, &filter, None, &snapshot_id)?
         }
     };
 
@@ -575,7 +576,7 @@ pub fn section_resource_inventory(
     while k < remaining.len() && chosen.len() < count_limit {
         let would_truncate = (k + 1) < remaining.len();
         let next_cursor = if would_truncate {
-            Some(Cursor::mint(op, &filter, &snapshot_id, start + k + 1).to_token())
+            Some(Cursor::mint(op, &filter, None, &snapshot_id, start + k + 1).to_token())
         } else {
             None
         };
@@ -596,7 +597,7 @@ pub fn section_resource_inventory(
 
     let truncated = k < remaining.len();
     let next_cursor = if truncated {
-        Some(Cursor::mint(op, &filter, &snapshot_id, start + k).to_token())
+        Some(Cursor::mint(op, &filter, None, &snapshot_id, start + k).to_token())
     } else {
         None
     };
@@ -1200,8 +1201,14 @@ mod tests {
         // stream.
         use crate::pagination::{Cursor, FilterKey};
         let m = snapshot();
-        let foreign =
-            Cursor::mint(Operation::Search, &FilterKey::all(), &m.body.snapshot_id, 0).to_token();
+        let foreign = Cursor::mint(
+            Operation::Search,
+            &FilterKey::all(),
+            None,
+            &m.body.snapshot_id,
+            0,
+        )
+        .to_token();
         let err = command_inventory(&catalog(), &m, None, Some(&foreign))
             .expect_err("a foreign-operation cursor is rejected");
         match err {
@@ -1219,7 +1226,8 @@ mod tests {
         let m = snapshot();
         let other = crate::model::SnapshotId::new("fixture-other-snapshot")
             .expect("a URI-safe snapshot id");
-        let foreign = Cursor::mint(Operation::Catalog, &FilterKey::all(), &other, 0).to_token();
+        let foreign =
+            Cursor::mint(Operation::Catalog, &FilterKey::all(), None, &other, 0).to_token();
         let err = command_inventory(&catalog(), &m, None, Some(&foreign))
             .expect_err("a foreign-snapshot cursor is rejected");
         match err {
@@ -1620,6 +1628,7 @@ mod tests {
         let foreign = Cursor::mint(
             Operation::Catalog,
             &FilterKey::all(),
+            None,
             &m.body.snapshot_id,
             0,
         )

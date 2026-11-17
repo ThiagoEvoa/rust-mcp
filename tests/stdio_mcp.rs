@@ -333,6 +333,7 @@ async fn serve_exposes_the_five_tools_and_two_resources_over_stdio() {
     // ---- AC1: call each tool (valid + invalid + empty + pagination). -------
     call_list_sources(&mut client).await;
     call_search_docs(&mut client).await;
+    call_search_docs_query_binding(&mut client).await;
     call_get_section(&mut client).await;
     call_get_api_checklist(&mut client).await;
     call_get_command_guidance(&mut client).await;
@@ -942,6 +943,103 @@ async fn call_search_docs(client: &mut Client) {
         .call_tool("search_docs", json!({ "query": "   " }))
         .await;
     assert_error(&response, -32602, "a blank search query is INVALID_PARAMS");
+}
+
+/// #[171] `search_docs` binds its pagination cursor to the exact query (AC1–AC4
+/// through the spawned `serve` binary over real stdio). A cursor minted for one
+/// query cannot be replayed after the query changes — a bounded `INVALID_PARAMS`
+/// that does not echo the query text — while an identical query resumes the same
+/// stream losslessly. This is the seam a client most often trips: it re-sends a
+/// stale cursor after a prompt edit.
+async fn call_search_docs_query_binding(client: &mut Client) {
+    // --- Mint a cursor from a query that truncates. -------------------------
+    let first = client
+        .call_tool("search_docs", json!({ "query": "Rust", "limit": 1 }))
+        .await;
+    assert_eq!(
+        first.get("error"),
+        None,
+        "a valid `search_docs` call must succeed, not error: {first}"
+    );
+    let first = &first["result"]["structuredContent"];
+    assert_eq!(
+        first.get("truncated").and_then(Value::as_bool),
+        Some(true),
+        "a limit-one `Rust` search truncates and carries a cursor: {first}"
+    );
+    let cursor = first
+        .get("next_cursor")
+        .and_then(Value::as_str)
+        .expect("a truncated page carries a next cursor")
+        .to_string();
+    let first_hit = first["hits"][0]["section_id"]
+        .as_str()
+        .expect("the first page returns a hit")
+        .to_string();
+
+    // --- AC1: a changed query with the old cursor is a bounded INVALID_PARAMS.
+    //
+    // The new query is the highest-ranked result of its *own* call, so absent
+    // the binding the cursor would silently skip it. With the binding, the
+    // resume is rejected before ranking, not silently advanced.
+    let mismatched = client
+        .call_tool(
+            "search_docs",
+            json!({ "query": "cargo", "limit": 1, "cursor": cursor.clone() }),
+        )
+        .await;
+    assert_error(
+        &mismatched,
+        -32602,
+        "a changed query with an old cursor is INVALID_PARAMS",
+    );
+
+    // --- AC1: the error output never echoes the query text. ----------------
+    //
+    // `MismatchField::Query` reports through fixed labels ("the current query",
+    // "the query the cursor was bound to"); the mismatched query must not leak
+    // into the error's message or structured data.
+    let error = &mismatched["error"];
+    let error_text = serde_json::to_string(error).expect("serializing an error must not fail");
+    assert!(
+        !error_text.contains("Rust") && !error_text.contains("cargo"),
+        "the query-mismatch error must not echo either query text: {error_text}"
+    );
+    assert_eq!(
+        error
+            .get("data")
+            .and_then(|d| d.get("field"))
+            .and_then(Value::as_str),
+        Some("query"),
+        "the mismatch is attributed to the query field: {error}"
+    );
+
+    // --- AC2: an identical query resumes the same stream losslessly. -------
+    let resumed = client
+        .call_tool(
+            "search_docs",
+            json!({ "query": "Rust", "limit": 1, "cursor": cursor }),
+        )
+        .await;
+    assert_eq!(
+        resumed.get("error"),
+        None,
+        "an identical-query resume must succeed, not error: {resumed}"
+    );
+    let resumed = &resumed["result"]["structuredContent"];
+    let resumed_hit = resumed["hits"][0]["section_id"]
+        .as_str()
+        .expect("the resumed page returns a hit")
+        .to_string();
+    assert_ne!(
+        resumed_hit, first_hit,
+        "the resumed page advances past the first hit"
+    );
+    assert_eq!(
+        resumed.get("snapshot_id").and_then(Value::as_str),
+        first.get("snapshot_id").and_then(Value::as_str),
+        "both pages are read from the same snapshot"
+    );
 }
 
 /// `get_section`: a valid section id yields its body + provenance + citations; a
