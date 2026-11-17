@@ -486,6 +486,15 @@ pub enum CompletenessGap {
     /// The command catalog is empty, so cargo/rustc/rustup/rustfmt commands are
     /// unretrievable.
     MissingCommandCatalog,
+    /// A collection carries content but fewer sections than its required-topic
+    /// minimum (see [`required_topic_minimum`]) — the bare "nonempty
+    /// collection" check the #151 bug shape slips past. The collection is not
+    /// empty, yet its required chapters/families are missing.
+    MissingRequiredTopics {
+        source: String,
+        required: usize,
+        found: usize,
+    },
     /// A source with content is missing its attribution record, so its license
     /// and citation cannot be served.
     SourceMissingAttribution { source: String },
@@ -509,6 +518,16 @@ impl std::fmt::Display for CompletenessGap {
                 )
             }
             Self::MissingCommandCatalog => write!(f, "the command catalog is empty"),
+            Self::MissingRequiredTopics {
+                source,
+                required,
+                found,
+            } => {
+                write!(
+                    f,
+                    "source `{source}` carries only {found} section(s); the required-topic inventory needs at least {required}"
+                )
+            }
             Self::SourceMissingAttribution { source } => {
                 write!(f, "source `{source}` has content but no attribution record")
             }
@@ -555,6 +574,44 @@ impl CompletenessReport {
     }
 }
 
+/// The required-topic inventory: the minimum number of sections each collection
+/// must carry for its *required* chapters and command families to be present.
+///
+/// This replaces the bare "the collection is nonempty" check that the #151 bug
+/// shape — one section per collection — slips past. A corpus with a single
+/// section per source is well-formed yet incomplete: the required api-guidelines
+/// chapters, style-guide chapters, and cargo/rustup command families are simply
+/// absent. Each minimum is the count of *required* chapters/families the
+/// production corpus must ship (issue #170), not an exact upstream section
+/// count, so minor upstream drift cannot spuriously fail the gate while a
+/// genuinely partial corpus is rejected.
+///
+/// The minima are keyed by [`SourceCollection`] and cover the required inventory
+/// the project ships: the eleven api-guidelines chapters, the seven
+/// style-guide chapters, the cargo command families plus reference pages, the
+/// rustup concept pages, and one section each for the single-page sources.
+pub const REQUIRED_TOPIC_MINIMA: [(SourceCollection, usize); 8] = [
+    (SourceCollection::ApiGuidelines, 11), // the eleven api-guidelines chapters
+    (SourceCollection::StyleGuide, 7),     // the seven style-guide chapters
+    (SourceCollection::Cargo, 16),         // the cargo command families + reference
+    (SourceCollection::Rustc, 1),
+    (SourceCollection::Rustup, 5), // toolchains, components, profiles, overrides, cross-compilation
+    (SourceCollection::Rustfmt, 1),
+    (SourceCollection::Clippy, 1),
+    (SourceCollection::Rustdoc, 1),
+];
+
+/// The required-topic minimum for a collection, or `0` when the collection is
+/// not part of the required inventory (every registered collection is, so this
+/// is the per-collection floor used by [`check_completeness`]).
+pub fn required_topic_minimum(collection: SourceCollection) -> usize {
+    REQUIRED_TOPIC_MINIMA
+        .iter()
+        .find(|(c, _)| *c == collection)
+        .map(|(_, n)| *n)
+        .unwrap_or(0)
+}
+
 /// Computes the completeness gaps for a *well-formed* manifest relative to the
 /// required production inventory: every registered source must carry at least
 /// one section, the checklist/lint catalog/command catalog must be nonempty, and
@@ -578,6 +635,12 @@ pub fn check_completeness(
     // Per-source content: every registered source must carry at least one
     // section. This is the heart of the #151 bug — eight source rows, one
     // collection of content.
+    //
+    // Beyond "nonempty", the corpus must carry its *required-topic inventory*
+    // (issue #170): the bare nonempty check is too weak — one section per
+    // collection passes it while the required chapters/families are still absent.
+    // A collection below its [`required_topic_minimum`] is reported as
+    // `MissingRequiredTopics` even when it is not empty.
     for source in SourceCollection::ALL {
         let id = source.id();
         let count = manifest
@@ -590,6 +653,15 @@ pub fn check_completeness(
             gaps.push(CompletenessGap::EmptySource {
                 source: id.to_string(),
             });
+        } else {
+            let required = required_topic_minimum(source);
+            if count < required {
+                gaps.push(CompletenessGap::MissingRequiredTopics {
+                    source: id.to_string(),
+                    required,
+                    found: count,
+                });
+            }
         }
     }
 
@@ -2099,23 +2171,30 @@ mod tests {
         let mut sections = Vec::new();
         for collection in SourceCollection::ALL {
             let id = collection.id();
-            let mut builder = SectionBuilder::new(
-                SourceId::new(id).unwrap(),
-                collection.title(),
-                format!("{id}/chapter"),
-                Url::new(collection.entry_url()).unwrap(),
-                format!("# {}\n\nThe {id} collection's content.", collection.title()),
-            );
-            // The clippy collection carries the lint catalog.
-            if collection == SourceCollection::Clippy {
-                builder = builder.lint_ids(["clippy::unwrap_used"]);
-            }
-            sections.push(
-                builder
-                    .anchor("top")
-                    .build()
-                    .expect("a well-formed section builds"),
-            );
+            // Build enough sections to satisfy the required-topic inventory
+            // (issue #170): one section per required chapter/family, not just one
+            // per collection. Each gets a distinct chapter path and anchor so the
+            // derived section ids do not collide.
+            let minimum = required_topic_minimum(collection);
+            (0..minimum.max(1)).for_each(|n| {
+                let mut builder = SectionBuilder::new(
+                    SourceId::new(id).unwrap(),
+                    collection.title(),
+                    format!("{id}/chapter-{n}"),
+                    Url::new(collection.entry_url()).unwrap(),
+                    format!("# {}\n\nThe {id} collection's content.", collection.title()),
+                );
+                // The clippy collection carries the lint catalog.
+                if collection == SourceCollection::Clippy {
+                    builder = builder.lint_ids(["clippy::unwrap_used"]);
+                }
+                sections.push(
+                    builder
+                        .anchor(format!("chapter-{n}"))
+                        .build()
+                        .expect("a well-formed section builds"),
+                );
+            });
         }
         let first_id = sections[0].id.clone();
         SnapshotManifest {

@@ -489,10 +489,21 @@ fn collapse_ws(s: &str) -> String {
 }
 
 /// The command-key fallback from a page URL's chapter path (e.g.
-/// `/cargo/commands/cargo-new.html` -> `cargo new`).
+/// `/cargo/commands/cargo-generate-lockfile.html` -> `cargo generate-lockfile`).
+///
+/// The stem is `cargo-<subcommand>`: the first hyphen separates the `cargo`
+/// verb from the subcommand, but a subcommand name may itself contain hyphens
+/// (`generate-lockfile`, `locate-project`). Splitting only that leading
+/// separator keeps the subcommand's own hyphens, matching the canonical catalog
+/// key (`cargo generate-lockfile`, not `cargo generate lockfile`) — issue #170
+/// AC1 requires the multi-word families to resolve to their cited sections.
 fn command_key_from_base_url(base_url: &Url) -> Option<CommandKey> {
     let stem = chapter_stem(base_url)?;
-    normalize_command_key(&stem)
+    let normalized = match stem.split_once('-') {
+        Some((verb, subcommand)) => format!("{verb} {subcommand}"),
+        None => stem,
+    };
+    CommandKey::new(normalized.trim()).ok()
 }
 
 /// The last path segment's filename stem without its extension, e.g.

@@ -114,14 +114,40 @@ pub mod provenance {
 /// summary. The fixtures are pinned by [`provenance`]; a live re-fetch rewrites
 /// them through the opt-in seam.
 mod fixtures {
-    // api-guidelines
+    // api-guidelines — every topical chapter the checklist's 54 codes resolve
+    // against (issue #170 AC2: the full upstream checklist is shipped, no code
+    // filtered out). The three original pages plus the eight topical chapters
+    // that carry the remaining codes.
     pub const ABOUT: &str = include_str!("../../tests/fixtures/upstream/about.html");
     pub const NAMING: &str = include_str!("../../tests/fixtures/upstream/naming.html");
     pub const INTEROPERABILITY: &str =
         include_str!("../../tests/fixtures/upstream/interoperability.html");
+    pub const DEBUGGABILITY: &str =
+        include_str!("../../tests/fixtures/upstream/debuggability.html");
+    pub const DEPENDABILITY: &str =
+        include_str!("../../tests/fixtures/upstream/dependability.html");
+    pub const DOCUMENTATION: &str =
+        include_str!("../../tests/fixtures/upstream/documentation.html");
+    pub const FLEXIBILITY: &str = include_str!("../../tests/fixtures/upstream/flexibility.html");
+    pub const FUTURE_PROOFING: &str =
+        include_str!("../../tests/fixtures/upstream/future-proofing.html");
+    pub const MACROS: &str = include_str!("../../tests/fixtures/upstream/macros.html");
+    pub const NECESSITIES: &str = include_str!("../../tests/fixtures/upstream/necessities.html");
+    pub const PREDICTABILITY: &str =
+        include_str!("../../tests/fixtures/upstream/predictability.html");
+    pub const TYPE_SAFETY: &str = include_str!("../../tests/fixtures/upstream/type-safety.html");
     pub const CHECKLIST: &str = include_str!("../../tests/fixtures/upstream/checklist.html");
-    // style-guide
+    // style-guide — the design/style chapters the seed ships so required design
+    // and style topics are covered (issue #170 AC3), not a single page.
     pub const EXPRESSIONS: &str = include_str!("../../tests/fixtures/upstream/expressions.html");
+    pub const STYLE_ADVICE: &str = include_str!("../../tests/fixtures/upstream/style-advice.html");
+    pub const STYLE_ITEMS: &str = include_str!("../../tests/fixtures/upstream/style-items.html");
+    pub const STYLE_PRINCIPLES: &str =
+        include_str!("../../tests/fixtures/upstream/style-principles.html");
+    pub const STYLE_STATEMENTS: &str =
+        include_str!("../../tests/fixtures/upstream/style-statements.html");
+    pub const STYLE_TYPES: &str = include_str!("../../tests/fixtures/upstream/style-types.html");
+    pub const STYLE_CARGO: &str = include_str!("../../tests/fixtures/upstream/style-cargo.html");
     // rustfmt (commit-pinned Markdown)
     pub const RUSTFMT_README: &str = include_str!("../../tests/fixtures/upstream/README.md");
     pub const RUSTFMT_CONFIGURATIONS: &str =
@@ -141,12 +167,46 @@ mod fixtures {
     pub const CARGO_DOC: &str = include_str!("../../tests/fixtures/upstream/cargo-doc.html");
     pub const CARGO_ADD: &str = include_str!("../../tests/fixtures/upstream/cargo-add.html");
     pub const CARGO_NEW: &str = include_str!("../../tests/fixtures/upstream/cargo-new.html");
+    // The remaining `plan.md` §6 cargo families (issue #170 AC1): the
+    // setup/inspection, dependency/lockfile, verification, and
+    // packaging/release families, each the real `commands/cargo-<sub>.html`
+    // page.
+    pub const CARGO_INIT: &str = include_str!("../../tests/fixtures/upstream/cargo-init.html");
+    pub const CARGO_METADATA: &str =
+        include_str!("../../tests/fixtures/upstream/cargo-metadata.html");
+    pub const CARGO_LOCATE_PROJECT: &str =
+        include_str!("../../tests/fixtures/upstream/cargo-locate-project.html");
+    pub const CARGO_TREE: &str = include_str!("../../tests/fixtures/upstream/cargo-tree.html");
+    pub const CARGO_REMOVE: &str = include_str!("../../tests/fixtures/upstream/cargo-remove.html");
+    pub const CARGO_UPDATE: &str = include_str!("../../tests/fixtures/upstream/cargo-update.html");
+    pub const CARGO_GENERATE_LOCKFILE: &str =
+        include_str!("../../tests/fixtures/upstream/cargo-generate-lockfile.html");
+    pub const CARGO_FETCH: &str = include_str!("../../tests/fixtures/upstream/cargo-fetch.html");
+    pub const CARGO_RUN: &str = include_str!("../../tests/fixtures/upstream/cargo-run.html");
+    pub const CARGO_BENCH: &str = include_str!("../../tests/fixtures/upstream/cargo-bench.html");
+    pub const CARGO_FIX: &str = include_str!("../../tests/fixtures/upstream/cargo-fix.html");
+    pub const CARGO_PACKAGE: &str =
+        include_str!("../../tests/fixtures/upstream/cargo-package.html");
+    pub const CARGO_PUBLISH: &str =
+        include_str!("../../tests/fixtures/upstream/cargo-publish.html");
     pub const RUSTC_CLI: &str =
         include_str!("../../tests/fixtures/upstream/rustc-command-line-arguments.html");
     pub const RUSTUP_INSTALL: &str =
         include_str!("../../tests/fixtures/upstream/rustup-installation.html");
     pub const RUSTUP_CONCEPTS: &str =
         include_str!("../../tests/fixtures/upstream/rustup-concepts.html");
+    // The rustup toolchain-management chapters the `rustup toolchain / override /
+    // component / target` families cite (issue #170 AC1).
+    pub const RUSTUP_TOOLCHAINS: &str =
+        include_str!("../../tests/fixtures/upstream/rustup-toolchains.html");
+    pub const RUSTUP_COMPONENTS: &str =
+        include_str!("../../tests/fixtures/upstream/rustup-components.html");
+    pub const RUSTUP_OVERRIDES: &str =
+        include_str!("../../tests/fixtures/upstream/rustup-overrides.html");
+    pub const RUSTUP_CROSS_COMPILATION: &str =
+        include_str!("../../tests/fixtures/upstream/rustup-cross-compilation.html");
+    pub const RUSTUP_PROFILES: &str =
+        include_str!("../../tests/fixtures/upstream/rustup-profiles.html");
     pub const RUSTDOC_CLI: &str =
         include_str!("../../tests/fixtures/upstream/rustdoc-command-line-arguments.html");
 }
@@ -170,14 +230,35 @@ const RUSTUP_BASE: &str = "https://rust-lang.github.io/rustup/";
 /// *is* the `cargo-<subcommand>.html` manual is the command page; the rest of a
 /// fetched book is ingested through `ingest_cargo`.
 const CARGO_COMMAND_PAGES: &[(&str, &str)] = &[
-    ("cargo-build.html", fixtures::CARGO_BUILD),
-    ("cargo-test.html", fixtures::CARGO_TEST),
+    // setup + inspection families
+    ("cargo-new.html", fixtures::CARGO_NEW),
+    ("cargo-init.html", fixtures::CARGO_INIT),
+    ("cargo-metadata.html", fixtures::CARGO_METADATA),
+    ("cargo-locate-project.html", fixtures::CARGO_LOCATE_PROJECT),
+    ("cargo-tree.html", fixtures::CARGO_TREE),
+    // dependency + lockfile families
+    ("cargo-add.html", fixtures::CARGO_ADD),
+    ("cargo-remove.html", fixtures::CARGO_REMOVE),
+    ("cargo-update.html", fixtures::CARGO_UPDATE),
+    (
+        "cargo-generate-lockfile.html",
+        fixtures::CARGO_GENERATE_LOCKFILE,
+    ),
+    ("cargo-fetch.html", fixtures::CARGO_FETCH),
+    // build + verification families
     ("cargo-check.html", fixtures::CARGO_CHECK),
+    ("cargo-build.html", fixtures::CARGO_BUILD),
+    ("cargo-run.html", fixtures::CARGO_RUN),
+    ("cargo-test.html", fixtures::CARGO_TEST),
+    ("cargo-bench.html", fixtures::CARGO_BENCH),
+    ("cargo-fix.html", fixtures::CARGO_FIX),
+    // packaging + release families
+    ("cargo-package.html", fixtures::CARGO_PACKAGE),
+    ("cargo-publish.html", fixtures::CARGO_PUBLISH),
+    // the remaining tool families (kept for the faithful corpus)
     ("cargo-fmt.html", fixtures::CARGO_FMT),
     ("cargo-clippy.html", fixtures::CARGO_CLIPPY),
     ("cargo-doc.html", fixtures::CARGO_DOC),
-    ("cargo-add.html", fixtures::CARGO_ADD),
-    ("cargo-new.html", fixtures::CARGO_NEW),
 ];
 const RUSTDOC_BASE: &str = "https://doc.rust-lang.org/rustdoc/";
 const CLIPPY_BASE: &str = "https://clippy.rust-lang.org/stable/";
@@ -366,8 +447,9 @@ fn stamp_command_key(sections: &mut [Section], key: &str) -> Result<(), SeedErro
 /// failure (a broken fixture, an empty article, an ambiguous mapping) is a
 /// [`SeedError`] — never a silent omission.
 pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
-    // -- api-guidelines: the three pages that carry C-CONV / C-CONV-TRAITS and
-    //    the source introduction. --
+    // -- api-guidelines: every topical chapter so the full 54-code checklist
+    //    resolves to a real explanation (issue #170 AC2). The three original
+    //    pages plus the eight topical chapters that carry the remaining codes.
     let mut ag_sections: Vec<Section> = Vec::new();
     ag_sections.extend(ingest_html(
         "api-guidelines",
@@ -390,15 +472,51 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
         Some(provenance::api_guidelines::INTEROPERABILITY_ETAG),
         ingest_api_chapter,
     )?);
+    // The eight topical chapters. These carry no recorded etag (consistent with
+    // the style-guide/rustc/rustup/rustdoc fixtures, which also pass `None`);
+    // the section's content hash is over the captured bytes regardless.
+    for (path, body) in [
+        ("debuggability.html", fixtures::DEBUGGABILITY),
+        ("dependability.html", fixtures::DEPENDABILITY),
+        ("documentation.html", fixtures::DOCUMENTATION),
+        ("flexibility.html", fixtures::FLEXIBILITY),
+        ("future-proofing.html", fixtures::FUTURE_PROOFING),
+        ("macros.html", fixtures::MACROS),
+        ("necessities.html", fixtures::NECESSITIES),
+        ("predictability.html", fixtures::PREDICTABILITY),
+        ("type-safety.html", fixtures::TYPE_SAFETY),
+    ] {
+        ag_sections.extend(ingest_html(
+            "api-guidelines",
+            &format!("{AG_BASE}{path}"),
+            body,
+            None,
+            ingest_api_chapter,
+        )?);
+    }
 
-    // -- style-guide: the expressions page carries the trailing-comma guidance. --
-    let style_sections = ingest_html(
-        "style-guide",
-        &format!("{STYLE_BASE}expressions.html"),
-        fixtures::EXPRESSIONS,
-        None,
-        ingest_style,
-    )?;
+    // -- style-guide: the design/style chapters (issue #170 AC3: required design
+    //    and style topics are covered, not a single page). The expressions page
+    //    carries the trailing-comma guidance; the others cover principles,
+    //    advice, items, statements, types, and Cargo.toml conventions. --
+    let mut style_sections: Vec<Section> = Vec::new();
+    for (path, body) in [
+        ("expressions.html", fixtures::EXPRESSIONS),
+        ("principles.html", fixtures::STYLE_PRINCIPLES),
+        ("advice.html", fixtures::STYLE_ADVICE),
+        ("items.html", fixtures::STYLE_ITEMS),
+        ("statements.html", fixtures::STYLE_STATEMENTS),
+        ("types.html", fixtures::STYLE_TYPES),
+        ("cargo.html", fixtures::STYLE_CARGO),
+    ] {
+        style_sections.extend(ingest_html(
+            "style-guide",
+            &format!("{STYLE_BASE}{path}"),
+            body,
+            None,
+            ingest_style,
+        )?);
+    }
 
     // -- cargo / rustc / rustup / rustdoc: the routine command families, each
     //    from its *actual* captured upstream command page. --
@@ -453,6 +571,13 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
     // covers the install flow; the concepts page covers the toolchain state
     // `rustup show` surfaces. The key is stamped on the concepts sections as a
     // separate retrieval annotation; the faithful body is intact.
+    // `rustup`: the toolchain-management families. `rustup show` reports the
+    // toolchain model the concepts page documents; the install flow and the
+    // toolchains/components/overrides/cross-compilation chapters carry the
+    // `rustup toolchain`, `rustup component`, `rustup override`, and
+    // `rustup target` usage. Each key is stamped as a *separate* retrieval
+    // annotation over the faithful upstream chapter (issue #170 AC1 / `plan.md`
+    // §6); the body stays the upstream text.
     let mut rustup_sections = ingest_html(
         "rustup",
         &format!("{RUSTUP_BASE}installation/index.html"),
@@ -470,13 +595,71 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
     stamp_command_key(&mut rustup_concepts, "rustup show")?;
     rustup_sections.extend(rustup_concepts);
 
-    let rustdoc_sections = ingest_html(
+    let mut rustup_toolchains = ingest_html(
+        "rustup",
+        &format!("{RUSTUP_BASE}concepts/toolchains.html"),
+        fixtures::RUSTUP_TOOLCHAINS,
+        None,
+        ingest_rustup,
+    )?;
+    stamp_command_key(&mut rustup_toolchains, "rustup toolchain")?;
+    rustup_sections.extend(rustup_toolchains);
+
+    let mut rustup_components = ingest_html(
+        "rustup",
+        &format!("{RUSTUP_BASE}concepts/components.html"),
+        fixtures::RUSTUP_COMPONENTS,
+        None,
+        ingest_rustup,
+    )?;
+    stamp_command_key(&mut rustup_components, "rustup component")?;
+    rustup_sections.extend(rustup_components);
+
+    let mut rustup_overrides = ingest_html(
+        "rustup",
+        &format!("{RUSTUP_BASE}overrides.html"),
+        fixtures::RUSTUP_OVERRIDES,
+        None,
+        ingest_rustup,
+    )?;
+    stamp_command_key(&mut rustup_overrides, "rustup override")?;
+    rustup_sections.extend(rustup_overrides);
+
+    // `rustup target` manages the target triples used for cross-compilation; the
+    // `cross-compilation` chapter is where rustup documents them (there is no
+    // dedicated `targets` page), so the key is stamped on that faithful chapter.
+    let mut rustup_cross = ingest_html(
+        "rustup",
+        &format!("{RUSTUP_BASE}cross-compilation.html"),
+        fixtures::RUSTUP_CROSS_COMPILATION,
+        None,
+        ingest_rustup,
+    )?;
+    stamp_command_key(&mut rustup_cross, "rustup target")?;
+    rustup_sections.extend(rustup_cross);
+
+    // The profiles chapter is ingested for its faithful content (the default
+    // toolchain profile model); it carries no command key of its own.
+    rustup_sections.extend(ingest_html(
+        "rustup",
+        &format!("{RUSTUP_BASE}concepts/profiles.html"),
+        fixtures::RUSTUP_PROFILES,
+        None,
+        ingest_rustup,
+    )?);
+
+    // `rustdoc`: the `rustdoc` command's usage is its `command-line-arguments`
+    // man page; the key is stamped as a separate retrieval annotation over the
+    // faithful page so `get_command_guidance("rustdoc")` resolves (issue #170
+    // AC1).
+    let mut rustdoc_sections = ingest_html(
         "rustdoc",
         &format!("{RUSTDOC_BASE}command-line-arguments.html"),
         fixtures::RUSTDOC_CLI,
         None,
         ingest_rustdoc,
     )?;
+    stamp_command_key(&mut rustdoc_sections, "rustdoc")?;
 
     // -- rustfmt: the two approved, commit-pinned Markdown sources. The `rustfmt`
     //    key is stamped on both sections (README.md and Configurations.md are the
@@ -569,14 +752,17 @@ fn clippy_sections() -> Result<Vec<Section>, SeedError> {
     })
 }
 
-/// Parse the recorded checklist and keep only the entries whose explanatory
-/// sections are shipped, then resolve and validate the mapping.
+/// Parse the recorded checklist and resolve every entry to its real explanation
+/// — no entry is filtered out (issue #170 AC2).
 ///
-/// The full `checklist.html` lists every guideline code (54+). The seed ships a
-/// representative subset of api-guidelines sections, so only the codes whose
-/// explanations are among those sections can resolve. Keeping to those codes
-/// makes every shipped entry resolve to a real section and keeps the checklist a
-/// *faithful subset* rather than a fabricated or empty one.
+/// The full `checklist.html` lists every guideline code (54). The seed now ships
+/// *all* of the api-guidelines topical chapters, so every code's primary
+/// explanation is among the ingested sections and every entry resolves. The
+/// entries are passed to `link_explanations` **unfiltered**: it validates that
+/// each code resolves to exactly one section and fails with an actionable
+/// [`SeedError`] on a missing or ambiguous mapping, so a code whose explanation
+/// is not shipped surfaces as a hard error rather than a silently dropped entry.
+/// That is the invariant AC2 names: no entry is filtered to make validation pass.
 fn build_checklist(api_guidelines: &[Section]) -> Result<Vec<ChecklistEntry>, SeedError> {
     let checklist_fetched = fetched(
         &format!("{AG_BASE}checklist.html"),
@@ -609,18 +795,14 @@ fn build_checklist(api_guidelines: &[Section]) -> Result<Vec<ChecklistEntry>, Se
     // inherited continuations.
     let primary: Vec<Section> = primary_explanations(api_guidelines);
 
-    // The codes the primary sections actually explain.
-    let shipped_codes: BTreeSet<String> = primary
-        .iter()
-        .flat_map(|s| s.guideline_codes.iter().cloned())
-        .collect();
-    let mut kept: Vec<ChecklistEntry> = entries
-        .into_iter()
-        .filter(|e| shipped_codes.contains(&e.code))
-        .collect();
+    // Keep *every* upstream entry. Resolving all of them against the primary
+    // sections is the real `link_explanations` the live pipeline runs: it
+    // fails on a missing or ambiguous mapping, so a code whose explanation is
+    // absent is a hard error, never a dropped entry (AC2).
+    let mut kept: Vec<ChecklistEntry> = entries;
 
-    // Resolve the kept entries' explanation sections against the primary sections
-    // and validate the mapping is neither missing nor ambiguous (the same
+    // Resolve every entry's explanation sections against the primary sections and
+    // validate the mapping is neither missing nor ambiguous (the same
     // `link_explanations` the live pipeline runs).
     link_explanations(&primary, &mut kept).map_err(|e| match e {
         super::api_guidelines::IngestError::AmbiguousExplanations { code, sections } => {
@@ -635,7 +817,7 @@ fn build_checklist(api_guidelines: &[Section]) -> Result<Vec<ChecklistEntry>, Se
         },
     })?;
 
-    // A faithful, nonempty checklist.
+    // A faithful, complete checklist: every recorded entry is preserved.
     if kept.is_empty() {
         return Err(SeedError::EmptyChecklist);
     }
@@ -712,6 +894,15 @@ fn source_specs() -> Vec<(String, String, String, Vec<String>, Release)> {
                 format!("{AG_BASE}about.html"),
                 format!("{AG_BASE}naming.html"),
                 format!("{AG_BASE}interoperability.html"),
+                format!("{AG_BASE}debuggability.html"),
+                format!("{AG_BASE}dependability.html"),
+                format!("{AG_BASE}documentation.html"),
+                format!("{AG_BASE}flexibility.html"),
+                format!("{AG_BASE}future-proofing.html"),
+                format!("{AG_BASE}macros.html"),
+                format!("{AG_BASE}necessities.html"),
+                format!("{AG_BASE}predictability.html"),
+                format!("{AG_BASE}type-safety.html"),
                 format!("{AG_BASE}checklist.html"),
             ],
             R::channel_only(crate::model::Channel::Rolling),
@@ -720,7 +911,15 @@ fn source_specs() -> Vec<(String, String, String, Vec<String>, Release)> {
             "style-guide".to_string(),
             "Rust Style Guide".to_string(),
             format!("{STYLE_BASE}index.html"),
-            vec![format!("{STYLE_BASE}expressions.html")],
+            vec![
+                format!("{STYLE_BASE}expressions.html"),
+                format!("{STYLE_BASE}principles.html"),
+                format!("{STYLE_BASE}advice.html"),
+                format!("{STYLE_BASE}items.html"),
+                format!("{STYLE_BASE}statements.html"),
+                format!("{STYLE_BASE}types.html"),
+                format!("{STYLE_BASE}cargo.html"),
+            ],
             R::channel_only(crate::model::Channel::Stable),
         ),
         (
@@ -753,6 +952,13 @@ fn source_specs() -> Vec<(String, String, String, Vec<String>, Release)> {
                 // `rustup show`'s toolchain model — the concepts page `rustup`
                 // ingests for the `rustup show` command key.
                 format!("{RUSTUP_BASE}concepts/index.html"),
+                // The toolchain-management chapters the `rustup toolchain /
+                // component / override / target` families cite (issue #170 AC1).
+                format!("{RUSTUP_BASE}concepts/toolchains.html"),
+                format!("{RUSTUP_BASE}concepts/components.html"),
+                format!("{RUSTUP_BASE}overrides.html"),
+                format!("{RUSTUP_BASE}cross-compilation.html"),
+                format!("{RUSTUP_BASE}concepts/profiles.html"),
             ],
             R::channel_only(crate::model::Channel::Rolling),
         ),

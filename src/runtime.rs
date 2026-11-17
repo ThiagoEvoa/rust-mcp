@@ -508,32 +508,35 @@ mod tests {
     /// [`crate::corpus::check_completeness`] (a complete production corpus), so
     /// it is selectable by [`load_snapshot`].
     fn valid_snapshot(snapshot_id: &str) -> SnapshotManifest {
-        // One well-formed section per registered source, built through
-        // `SectionBuilder` so each id and content hash is the consistent,
-        // recomputed value the validator requires. A complete corpus needs every
-        // source to carry content (the #151 fix rejects a corpus that omits a
-        // collection), so each of the eight sources gets a section.
+        // Enough well-formed sections per source to carry the required-topic
+        // inventory (issue #170), built through `SectionBuilder` so each id and
+        // content hash is the consistent, recomputed value the validator
+        // requires. A complete corpus needs every source above its required-topic
+        // minimum, so each of the eight sources gets its required chapters/families.
         let mut sections = Vec::new();
         for collection in SourceCollection::ALL {
             let id = collection.id();
-            let mut builder = SectionBuilder::new(
-                SourceId::new(id).unwrap(),
-                collection.title(),
-                format!("{id}/chapter"),
-                Url::new(collection.entry_url()).unwrap(),
-                format!("# {}\n\nThe {id} collection's content.", collection.title()),
-            );
-            // The clippy collection carries the lint catalog, so a complete
-            // corpus has at least one section with lint identifiers.
-            if collection == SourceCollection::Clippy {
-                builder = builder.lint_ids(["clippy::unwrap_used"]);
-            }
-            sections.push(
-                builder
-                    .anchor("top")
-                    .build()
-                    .expect("a well-formed section builds"),
-            );
+            let minimum = crate::corpus::required_topic_minimum(collection);
+            (0..minimum.max(1)).for_each(|n| {
+                let mut builder = SectionBuilder::new(
+                    SourceId::new(id).unwrap(),
+                    collection.title(),
+                    format!("{id}/chapter-{n}"),
+                    Url::new(collection.entry_url()).unwrap(),
+                    format!("# {}\n\nThe {id} collection's content.", collection.title()),
+                );
+                // The clippy collection carries the lint catalog, so a complete
+                // corpus has at least one section with lint identifiers.
+                if collection == SourceCollection::Clippy {
+                    builder = builder.lint_ids(["clippy::unwrap_used"]);
+                }
+                sections.push(
+                    builder
+                        .anchor(format!("chapter-{n}"))
+                        .build()
+                        .expect("a well-formed section builds"),
+                );
+            });
         }
         // Every source has a section, so the first is safe to use as the target
         // of the cross-references below.
