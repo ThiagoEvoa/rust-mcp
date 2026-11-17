@@ -49,9 +49,14 @@ a live-synced corpus via `RUST_DOCS_MCP_PERF_DATA_DIR` and it measures that
 corpus the same way, reporting that corpus's own identity — so the shipped
 numbers are a **lower bound**, not a full-corpus guarantee. Producing that
 live-synced larger corpus is an explicit, networked `sync` step (see
-[Larger corpus](#larger-corpus-issue-175-ac2)); this offline correction did not
-generate one, so the larger-corpus *measurement* is a documented, ready-to-run
-next step rather than a number recorded here.
+[Larger corpus](#larger-corpus-issue-175-ac2)). Correction round 2/2 ran that
+leg: the live `sync` reached the network and fetched all eight sources' content,
+but it **failed the production completeness gate** — the live ingestion pipeline
+does not yet populate per-source attribution or a command catalog (both fields
+the offline `bundled` seed builder does) — so it never published a larger snapshot
+and `serve` fell back to the embedded seed. The larger-corpus *measurement* is
+therefore a documented, ready-to-run step currently **blocked by that upstream
+ingest gap**, not by this harness, and is not a number recorded here.
 
 ## How to run the harness
 
@@ -291,16 +296,44 @@ snapshot — see the second run command in [How to run the harness](#how-to-run-
 The report then carries **two** corpora side by side, each with its own identity,
 so the larger-corpus numbers are never conflated with the shipped ones.
 
-**What this correction did and did not measure.** The shipped-corpus numbers above
-are **measured** (all five tools, worst command, continuation, RSS). The
-larger-corpus path is **implemented and corpus-agnostic**, but producing a
-live-synced larger corpus is a networked `sync` step that this offline correction
-did not perform — so the larger-corpus *measurement* is a documented, ready-to-run
-next step (point the harness at a `sync`ed data dir), not a number recorded here.
-The full-corpus figures are expected to be higher than the shipped ones (more
-content indexed at boot, more held in memory); when such a corpus is produced,
-re-run the harness and record the full-corpus numbers here, alongside these
-shipped-corpus figures.
+**What was measured, and why the larger-corpus measurement is blocked.** The
+shipped-corpus numbers above are **measured** (all five tools, the worst command,
+its continuation, and peak RSS). The larger-corpus path is **implemented and
+corpus-agnostic**, and correction round 2/2 **ran the networked `sync` leg** to
+produce one. The attempt:
+
+- **Network reached.** `rust-docs-mcp sync --data-dir <temp>` connected to the
+  four upstream hosts the registry vouches for (`doc.rust-lang.org`,
+  `rust-lang.github.io`, `raw.githubusercontent.com`, `clippy.rust-lang.org` —
+  all reachable) and fetched real content for **all eight** sources (the gate
+  reported *content* for each one).
+- **The completeness gate aborted publication.** The run failed the production
+  completeness gate with nine gaps: *the command catalog is empty*, and *every
+  source “has content but no attribution record.”* Both are fields the live
+  pipeline (`src/ingest/pipeline.rs`) does **not** populate — it hardcodes an
+  empty attribution list (`attribution: Vec::new()`) and derives its command
+  catalog from `from_sections` over the live sections, which came back empty —
+  whereas the offline `bundled` seed builder (`src/bundled.rs`) populates both.
+  A production `sync` (`require_complete = true`) therefore publishes **nothing**:
+  the data dir was left empty (no `corpus/` directory), and `serve` pointed at it
+  fell back to the embedded **877-section seed** (verified: the reported per-source
+  content hashes and `2026-10-30` fetch dates are the seed's, not a live corpus's).
+- **No larger snapshot, so no larger measurement.** Because `serve`'s runtime
+  selection runs the *same* completeness gate (`runtime::gate_completeness`), it
+  would reject any larger-but-incomplete snapshot in favor of the seed, so a
+  larger corpus the harness could point at is **not obtainable through the shipped
+  `sync`** at this point.
+
+**This is a separate ingest-pipeline gap, not a defect in the #175 index-reuse
+fix.** That fix is correct and regression-free (verified independently on the
+shipped corpus); the blocker is that the live `sync` pipeline does not yet
+populate per-source attribution or a command catalog the way the offline seed
+builder does. The full-corpus figures are expected to be higher than the shipped
+ones (more content indexed at boot, more held in memory); once the live `sync`
+populates those fields, the **same** corpus-agnostic harness (the second run
+command in [How to run the harness](#how-to-run-the-harness)) measures the larger
+corpus with no change, and the full-corpus numbers can be recorded here alongside
+the shipped figures above.
 
 ## Comparison against the §11 targets
 
