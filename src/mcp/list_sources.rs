@@ -79,6 +79,10 @@ pub fn response(
             .iter()
             .map(|entry| entry.key.as_str().to_string())
             .collect(),
+        // [174] the concrete command-catalog discovery URI a client fetches for
+        // command guidance — the same URI the catalog resource advertises, so
+        // `list_sources` and the catalog resource stay consistent.
+        command_catalog_uri: crate::mcp::resources::command_page_uri(report.snapshot_id.as_str()),
         schema_version: manifest.schema_version.as_u32().to_string(),
     })
 }
@@ -86,7 +90,13 @@ pub fn response(
 /// Map a per-source [`SourceStatus`] to its response view, keeping the
 /// freshness verdict in the human label the output contract uses
 /// (`fresh` / `stale` / `unknown`).
-fn view_from(source: &SourceStatus) -> SourceStatusView {
+///
+/// [174] also projects the snapshot-derived scope/coverage (`entry_url`,
+/// `document_count`, `section_count`) and provenance (`channel`,
+/// `documentation_release`, `revision`, `parser`). Provenance is emitted only
+/// when known; a missing `documentation_release` / `revision` stays an explicit
+/// unknown, never an inferred guarantee.
+pub(crate) fn view_from(source: &SourceStatus) -> SourceStatusView {
     SourceStatusView {
         id: source.id.as_str().to_string(),
         title: source.title.clone(),
@@ -101,6 +111,13 @@ fn view_from(source: &SourceStatus) -> SourceStatusView {
             .map(|at| at.as_str().to_string()),
         content_hash: source.content_hash.as_str().to_string(),
         freshness: verdict_label(source.freshness.is_stale()).to_string(),
+        entry_url: source.entry_url.clone(),
+        document_count: source.document_count,
+        section_count: source.section_count,
+        channel: source.channel_label().to_string(),
+        documentation_release: source.documentation_release.clone(),
+        revision: source.revision.clone(),
+        parser: source.parser.clone(),
     }
 }
 
@@ -139,7 +156,10 @@ fn corpus_hash(manifest: &SnapshotManifest) -> Result<String, AppError> {
 /// The catalog is small, so the text is well under the response cap; the
 /// [`result`] function enforces that bound on both forms.
 pub fn render_text(resp: &ListSourcesResponse) -> String {
-    let mut lines = Vec::with_capacity(resp.sources.len() + 2);
+    // [174] each source now renders two lines: its verdict line (unchanged) and a
+    // scope/provenance line; plus a command-catalog discovery line. The capacity
+    // is a hint, so the extra lines just reallocate as needed.
+    let mut lines = Vec::with_capacity(resp.sources.len() * 2 + 3);
     lines.push(format!(
         "list_sources — snapshot {}, corpus {}, schema v{}",
         resp.snapshot_id, resp.corpus_hash, resp.schema_version,
@@ -156,6 +176,20 @@ pub fn render_text(resp: &ListSourcesResponse) -> String {
                 .unwrap_or_else(|| "unknown".to_string()),
             source.content_hash,
         ));
+        // [174] scope/coverage + provenance, agreeing with the structured view.
+        // A pinned revision is shown as provenance, not a stability guarantee.
+        lines.push(format!(
+            "      entry {}; {} document(s), {} section(s); channel {}; revision {}; parser {}",
+            source.entry_url,
+            source.document_count,
+            source.section_count,
+            source.channel,
+            source
+                .revision
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            source.parser,
+        ));
     }
     let command_list = resp.commands.join(", ");
     lines.push(format!(
@@ -167,6 +201,8 @@ pub fn render_text(resp: &ListSourcesResponse) -> String {
             command_list
         },
     ));
+    // [174] the concrete command-catalog discovery URI a client fetches.
+    lines.push(format!("command catalog: {}", resp.command_catalog_uri));
     lines.join("\n")
 }
 
@@ -329,6 +365,38 @@ mod tests {
             text.contains(&command_list),
             "the text carries the full command key list"
         );
+
+        // [174] Per-source scope/provenance agrees field-by-field: each
+        // structured source's *second* rendered line — entry URL, document/section
+        // counts, channel, revision (or "unknown"), and parser — must appear in
+        // the text. A missing revision stays "unknown" (never a fabricated value).
+        for source in &resp.sources {
+            let revision = source
+                .revision
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let provenance = format!(
+                "      entry {}; {} document(s), {} section(s); channel {}; revision {}; parser {}",
+                source.entry_url,
+                source.document_count,
+                source.section_count,
+                source.channel,
+                revision,
+                source.parser,
+            );
+            assert!(
+                text.contains(&provenance),
+                "text agrees with structured scope/provenance for {}: {provenance}",
+                source.id
+            );
+        }
+
+        // [174] The concrete command-catalog discovery URI is in the text and
+        // matches the structured `command_catalog_uri`.
+        assert!(
+            text.contains(&format!("command catalog: {}", resp.command_catalog_uri)),
+            "the text carries the command-catalog discovery URI"
+        );
     }
 
     #[test]
@@ -401,6 +469,15 @@ mod tests {
                 upstream_modified: Some(wide.clone()),
                 content_hash: wide.clone(),
                 freshness: "unknown".to_string(),
+                // [174] scope/coverage + provenance; filled with the same wide
+                // value so the over-cap precondition still holds.
+                entry_url: wide.clone(),
+                document_count: 0,
+                section_count: 0,
+                channel: "unknown".to_string(),
+                documentation_release: None,
+                revision: None,
+                parser: "test/1".to_string(),
             })
             .collect();
         let resp = ListSourcesResponse {
@@ -408,6 +485,7 @@ mod tests {
             corpus_hash: "c128-over-cap".to_string(),
             sources,
             commands: vec![wide.clone()],
+            command_catalog_uri: crate::mcp::resources::command_page_uri("over-cap"),
             schema_version: "1".to_string(),
         };
         // Precondition: the complete serialised body really does exceed the cap.
@@ -420,6 +498,195 @@ mod tests {
         assert!(
             message.contains("exceeds the") && message.contains(&MAX_RESPONSE_BYTES.to_string()),
             "the rejection names the cap: {message}"
+        );
+    }
+
+    // [174] Discovery surfaces snapshot-derived scope/coverage and provenance so a
+    // client sees how broad a source is and what it was captured from, without
+    // reading the raw snapshot. The per-source counts are derived from the active
+    // manifest, not inferred.
+    #[test]
+    fn list_sources_surfaces_scope_and_provenance() {
+        let resp = response(&snapshot(), as_of(), threshold()).expect("build");
+
+        // rustfmt carries a pinned upstream revision as *provenance*, distinct
+        // from its distribution channel: the revision is never read as a
+        // stability guarantee.
+        let rustfmt = resp
+            .sources
+            .iter()
+            .find(|s| s.id == "rustfmt")
+            .expect("the rustfmt source is present");
+        assert_eq!(
+            rustfmt.entry_url,
+            "https://github.com/rust-lang/rustfmt#readme"
+        );
+        assert_eq!(rustfmt.document_count, 2);
+        assert_eq!(rustfmt.section_count, 277);
+        assert_eq!(rustfmt.channel, "stable");
+        assert_eq!(
+            rustfmt.revision.as_deref(),
+            Some("702df60b87e5047276b0d4c36c989e8095555e00"),
+            "the pinned revision is surfaced as provenance"
+        );
+        assert!(
+            rustfmt.documentation_release.is_none(),
+            "an absent release identifier stays unknown, not fabricated"
+        );
+        assert_eq!(rustfmt.parser, "rust-docs-mcp/seed-2");
+
+        // A rolling-channel source is reported as rolling, never guessed stable.
+        let api = resp
+            .sources
+            .iter()
+            .find(|s| s.id == "api-guidelines")
+            .expect("the api-guidelines source is present");
+        assert_eq!(
+            api.entry_url,
+            "https://rust-lang.github.io/api-guidelines/about.html"
+        );
+        assert_eq!(api.document_count, 13);
+        assert_eq!(api.section_count, 96);
+        assert_eq!(api.channel, "rolling");
+        assert!(
+            api.revision.is_none(),
+            "an absent revision stays unknown, not fabricated"
+        );
+
+        // Every source reports a real entry URL, a non-zero coverage figure, and a
+        // recorded parser; the per-source section counts sum to the snapshot total.
+        for s in &resp.sources {
+            assert!(
+                s.entry_url.starts_with("http"),
+                "entry URL is a real http(s) URL for {}: {}",
+                s.id,
+                s.entry_url
+            );
+            assert!(
+                s.section_count > 0,
+                "every source contributes sections: {}",
+                s.id
+            );
+            assert!(
+                s.parser.starts_with("rust-docs-mcp/"),
+                "parser is recorded for {}: {}",
+                s.id,
+                s.parser
+            );
+        }
+        let total: usize = resp.sources.iter().map(|s| s.section_count).sum();
+        // The bundled seed carries 877 sections across its eight sources.
+        assert_eq!(
+            total, 877,
+            "per-source section counts sum to the snapshot's section total"
+        );
+    }
+
+    // [174] The concrete command-catalog discovery URI is a client-fetchable
+    // `rust-docs://snapshots/{snapshot_id}/commands` URI, and it is the same URI
+    // the catalog resource advertises (list_sources and the catalog agree).
+    #[test]
+    fn list_sources_reports_the_command_catalog_uri() {
+        let resp = response(&snapshot(), as_of(), threshold()).expect("build");
+        let expected = format!("rust-docs://snapshots/{}/commands", resp.snapshot_id);
+        assert_eq!(resp.command_catalog_uri, expected);
+        assert_eq!(
+            resp.command_catalog_uri,
+            crate::mcp::resources::command_page_uri(&resp.snapshot_id),
+            "list_sources and the catalog resource advertise the same URI"
+        );
+    }
+
+    // [174] A real `list_sources` response conforms to the output schema the tool
+    // advertises (AC: schema validation), including the new scope/provenance
+    // fields and the command-catalog URI.
+    #[test]
+    fn list_sources_response_conforms_to_its_output_schema() {
+        let resp = response(&snapshot(), as_of(), threshold()).expect("build");
+        let value = serde_json::to_value(&resp).expect("serialise");
+        let schema = crate::mcp::schema::output_schema::<ListSourcesResponse>();
+        crate::mcp::schema::value_conforms(&schema, &value).unwrap_or_else(|e| {
+            panic!("a real list_sources response must conform to its output schema: {e}")
+        });
+    }
+
+    // [174] Unknown provenance stays explicit: a source with an undetermined
+    // channel and no release/revision is reported as "unknown" with the fields
+    // *absent* (never fabricated), so a missing value is a readable unknown.
+    #[test]
+    fn unknown_provenance_stays_explicit() {
+        let status = SourceStatus {
+            id: crate::model::SourceId::new("unknown-src").expect("a URI-safe source id"),
+            title: "Unknown channel".to_string(),
+            last_checked: None,
+            fetched_at: crate::model::Timestamp::new("2026-01-01T00:00:00Z").expect("valid"),
+            upstream_modified: None,
+            content_hash: crate::model::CorpusHash::compute(b"x"),
+            freshness: crate::provenance::SourceFreshness {
+                as_of: as_of(),
+                last_checked: None,
+                threshold: StaleThreshold::default(),
+                stale: None,
+            },
+            entry_url: "https://example.test/doc/".to_string(),
+            document_count: 0,
+            section_count: 0,
+            channel: crate::model::Channel::Unknown,
+            documentation_release: None,
+            revision: None,
+            parser: "test/1".to_string(),
+        };
+        let view = view_from(&status);
+        assert_eq!(
+            view.channel, "unknown",
+            "an undetermined channel is reported explicitly, never guessed"
+        );
+        assert!(view.revision.is_none(), "an absent revision stays unknown");
+        assert!(
+            view.documentation_release.is_none(),
+            "an absent release identifier stays unknown"
+        );
+        // The absence is carried into the JSON: the keys are omitted, not filled
+        // with a fabricated value.
+        let json = serde_json::to_value(&view).expect("serialise");
+        assert!(
+            json.get("revision").is_none(),
+            "an absent revision is not fabricated in the serialised JSON"
+        );
+        assert!(
+            json.get("documentation_release").is_none(),
+            "an absent release identifier is not fabricated in the serialised JSON"
+        );
+    }
+
+    // [174] A selected (non-bundled) local snapshot also surfaces scope and
+    // provenance: the loader-driven path (not just the embedded seed) carries the
+    // new fields and derives the command-catalog URI from the loaded snapshot id.
+    #[test]
+    fn a_loaded_local_snapshot_surfaces_scope_and_provenance() {
+        let manifest = SnapshotManifest::from_json_str(include_str!(
+            "../../tests/fixtures/snapshot_v1_valid.json"
+        ))
+        .expect("the loaded fixture parses");
+        let resp = response(&manifest, as_of(), threshold()).expect("build");
+        let cargo = resp
+            .sources
+            .iter()
+            .find(|s| s.id == "cargo")
+            .expect("the cargo source is present in the fixture");
+        assert_eq!(cargo.entry_url, "https://doc.rust-lang.org/cargo/");
+        assert_eq!(cargo.document_count, 1);
+        assert_eq!(cargo.section_count, 1);
+        assert_eq!(cargo.channel, "stable");
+        assert_eq!(cargo.parser, "books/2024");
+        assert!(
+            cargo.revision.is_none(),
+            "the fixture cargo source has no revision"
+        );
+        assert_eq!(
+            resp.command_catalog_uri,
+            format!("rust-docs://snapshots/{}/commands", resp.snapshot_id),
+            "the command-catalog URI is derived from the loaded snapshot id"
         );
     }
 }

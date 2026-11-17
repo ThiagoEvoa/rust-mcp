@@ -405,6 +405,63 @@ async fn first_client_configuration_lists_searches_and_retrieves_with_citations(
         );
     }
 
+    // [174] The new snapshot-derived scope/provenance fields cross the stdio
+    // boundary too: a real client sees each source's entry URL, coverage counts,
+    // distribution channel, and parser — plus the concrete command-catalog
+    // discovery URI `list_sources` advertises. This proves the fields survive end
+    // to end (AC3) and that the response conforms to the advertised output schema
+    // over a *real* client (AC4), not only in-process.
+    let sources_arr = structured["sources"]
+        .as_array()
+        .expect("list_sources returns a `sources` array");
+    // Every source carries a real entry URL, a non-zero section count, and a
+    // recorded parser — the coverage a client can now assess without the raw
+    // snapshot.
+    for source in sources_arr {
+        assert!(
+            source["entry_url"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("http"),
+            "list_sources surfaces a real entry URL for {}: {source:?}",
+            source["id"]
+        );
+        assert!(
+            source["section_count"].as_u64().unwrap_or(0) > 0,
+            "list_sources surfaces a non-zero section count for {}: {source:?}",
+            source["id"]
+        );
+        assert!(
+            source["parser"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("rust-docs-mcp/"),
+            "list_sources surfaces the parser adapter for {}: {source:?}",
+            source["id"]
+        );
+    }
+    // The pinned rustfmt revision survives end to end as *provenance* — never
+    // rewritten as a stability guarantee — alongside its known distribution
+    // channel.
+    let rustfmt = sources_arr
+        .iter()
+        .find(|s| s["id"] == "rustfmt")
+        .expect("the rustfmt source is listed");
+    assert_eq!(
+        rustfmt["channel"], "stable",
+        "a known channel survives end to end"
+    );
+    assert_eq!(
+        rustfmt["revision"], "702df60b87e5047276b0d4c36c989e8095555e00",
+        "the pinned rustfmt revision is surfaced as provenance"
+    );
+    // The concrete command-catalog discovery URI is present and client-fetchable.
+    assert_eq!(
+        structured["command_catalog_uri"],
+        format!("rust-docs://snapshots/{SNAPSHOT_ID}/commands"),
+        "list_sources advertises the concrete command-catalog URI a client fetches"
+    );
+
     // ---- AC2(2): search_docs returns ranked hits, each cited. ---------------
     let search = client
         .call_tool("search_docs", json!({ "query": SEARCH_QUERY }))
