@@ -498,7 +498,6 @@ pub fn get_command_guidance_tool() -> Tool {
 }
 
 /// The `rust-docs://catalog` resource.
-/// The `rust-docs://catalog` resource.
 pub fn catalog_resource() -> Resource {
     resource(
         "rust-docs://catalog",
