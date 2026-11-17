@@ -43,7 +43,7 @@ were produced over; a corpus change re-pins it.
 
 | Metric | Measured | §11 target | Met? |
 | --- | --- | --- | --- |
-| Source-level top-5 recall | **34 / 45 = 75.6%** | ≥ 90% | **No** |
+| Source-level top-5 recall | **41 / 45 = 91.1%** | ≥ 90% | **Yes** |
 | Canonical-first (exact-match) | **10 / 10 = 100%** | — | **Yes** |
 | Cases measured (criterion 5) | **45 / 45** | all | **Yes** |
 
@@ -56,17 +56,18 @@ expected source?) and, for the exact-match cases (guideline code, command name,
 lint id), **canonical-first** (does the top-1 carry the literal token the query
 names, in the field its category designates?).
 
-**Top-5 recall is 75.6%, below the 90% target — the gap is real, not a
-harness artifact.** The 11 misses are cross-source queries whose top-5 results
-land in the wrong source (for example, a rustfmt query that ranks a `cargo`
-section first, or a rustdoc query that ranks a `rustc`/`cargo` section first):
-E-007, E-028, E-030, E-031, E-032, E-034, E-038, E-040, E-041, E-043, E-044.
-The miss breakdown by source is
-**rustfmt 4, rustdoc 3, clippy 2, style-guide 1, rustup 1**, with the
-cargo/rustc/api-guidelines cases fully passing. The gap is concentrated in the
-cross-source queries (natural-language `Ordinary`/`Workflow` cases and a few
-exact-match cases whose canonical section is not top-5 for their query). **This
-layer reports the gap honestly rather than faking a pass.** The §11
+**Top-5 recall is 91.1%, meeting the 90% target (issue #173).** The ranking
+changes of #173 — lifting the *primary* guideline explanation above the sections
+that merely inherit its code (a `primary_code` sort key, so `C-CONV` ranks its
+own `ad-hoc-conversions…` heading first) and a named-source affinity that lets a
+query that names a tool surface that tool's own sections — raised the measured
+recall from the 75.6% baseline (34/45) to **41/45 = 91.1%**. Four misses remain,
+all cross-source natural-language queries whose top-5 results land in a different
+source than the case's expected source: **E-007, E-028, E-031, E-043** (the miss
+breakdown by source is **rustfmt 1, rustdoc 1, style-guide 1, rustup 1**, with
+the cargo/rustc/clippy/api-guidelines cases fully passing). These are genuine
+retrieval-quality limitations of the cross-source BM25 ranking — recorded
+honestly in the emitted report, not faked and not a harness artifact. The §11
 retrieval-quality targets are stated "for the full corpus"; the shipped bundled
 seed is an offline subset, and these numbers are the *measured* result over that
 shipped artifact, recorded here so the target's status is not claimed on
@@ -111,10 +112,11 @@ cargo test --test acceptance --locked
 RUST_DOCS_MCP_PERF=1 cargo test --release --test perf -- --ignored --nocapture
 ```
 
-The fast retrieval test (`acceptance_recall_measured_over_shipped_corpus`) pins
-the measured 34/45 top-5 recall and the 10/10 canonical-first as of this corpus
-fingerprint, so a corpus or retrieval change that moves the numbers fails the
-pin and must be re-recorded here.
+The fast retrieval test (`acceptance_recall_meets_quality_target`) pins the
+measured 41/45 top-5 recall and the 10/10 canonical-first as of this corpus
+fingerprint, and asserts the §11 gate (top-5 recall ≥ 90% and canonical-first
+100%), so a retrieval change that drops the numbers below the target fails the
+build and must be re-recorded here.
 
 
 ## M5 exit statement (plan §10)
@@ -246,8 +248,8 @@ to the targets, with a graceful-exit assertion + the full-corpus caveat**:
   meets ([046] PR #119, "Meet retrieval quality targets"). **Since issue #156 the
   eval set is run over the shipped corpus** ([`src/acceptance.rs`](../src/acceptance.rs),
   [`tests/acceptance.rs`](../tests/acceptance.rs)): source-level top-5 recall is
-  **34/45 = 75.6%** (below the 90% target — reported honestly, not faked) and
-  canonical-first is **10/10**; see the
+  **41/45 = 91.1%** (meets the 90% target — issue #173, reported honestly with
+  the four remaining misses named) and canonical-first is **10/10**; see the
   [measured-over-the-shipped-corpus section](#measured-over-the-shipped-corpus-issue-156)
   for the numbers, the miss breakdown, and the corpus identity.
 - **Exact `C-CONV` returns its upstream explanation first; conversion names, API
@@ -258,8 +260,10 @@ to the targets, with a graceful-exit assertion + the full-corpus caveat**:
   boundaries + version/stability qualifications; unsupported commands/flags acquire
   no fabricated guidance; shell operators in command input are rejected (a
   handler-boundary test confirms command lookup never launches a subprocess);
-  upstream examples are never executed during ingestion**: `tests/stdio_mcp.rs`,
-  `tests/cli.rs`, and the trial tests below.
+  upstream examples are never executed during ingestion**: `tests/stdio_mcp.rs`
+  (`search_docs_ranks_primary_guideline_first_over_inherited_sections` proves
+  `C-CONV` ranks its primary explanation first over the real `serve` binary, and
+  the response stays bounded and cited), `tests/cli.rs`, and the trial tests below.
 - **Freshness not presented as verified compatibility with an older caller
   toolchain; unknown / repository-only release metadata stays explicit**:
   `src/registry.rs` / freshness verdicts, [047] PR #120 (citation, identity, and
@@ -300,15 +304,16 @@ Stated explicitly, so no requirement is marked complete from an unverified claim
   way when one is available. The plan's §11 targets are stated "for the full
 corpus"; the shipped corpus comfortably meets them, and the full-corpus figures
   remain to be recorded. See [`docs/PERFORMANCE.md`](./PERFORMANCE.md).
-- **Top-5 recall gap (retrieval quality).** Source-level top-5 recall over the
-  shipped corpus is **75.6%** (34/45), below the §11 90% target. The 11 misses
-  are cross-source queries (rustfmt, rustdoc, clippy, and one each of
-  style-guide and rustup) whose top-5 results land in the wrong source;
-  canonical-first is
-  **10/10**. This layer **reports the gap honestly** rather than claiming the
-  target on curated fixtures; closing it is a retrieval-quality follow-up
-  (better cross-source ranking / query expansion), recorded as unresolved, not a
-  protocol or correctness defect. See the
+- **Top-5 recall (retrieval quality) — target met, four cross-source misses
+  remain.** Source-level top-5 recall over the shipped corpus is **91.1%**
+  (41/45), meeting the §11 90% target after the #173 ranking changes
+  (primary-guideline-explanation ranking + named-source affinity). The four
+  remaining misses are cross-source natural-language queries (E-007 style-guide,
+  E-028 rustup, E-031 rustfmt, E-043 rustdoc) whose top-5 results land in a
+  different source than the case's expected source; canonical-first is **10/10**.
+  This layer **reports the remaining misses honestly** rather than claiming the
+  target on curated fixtures; further cross-source ranking / query expansion is a
+  future-quality follow-up, not a protocol or correctness defect. See the
   [measured-over-the-shipped-corpus section](#measured-over-the-shipped-corpus-issue-156).
 - **Upstream ingestion + real-client trials are explicit opt-in jobs.** Per plan
   §11, normal tests are offline with local fixtures; upstream ingestion and

@@ -69,6 +69,13 @@ mod rustup;
 mod section;
 mod style_guide;
 
+// The C-code identity primitives the ranking and the acceptance layer reuse so a
+// single rule decides "primary guideline explanation" (the section whose own
+// heading carries the `(C-…)` marker) across ingestion, ranking, and the
+// acceptance measurement. Re-exported here so the private sub-module's primitives
+// stay the one source of truth.
+pub use api_guidelines::guideline_code_in;
+
 pub mod pipeline;
 
 #[cfg(test)]
