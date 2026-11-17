@@ -2609,6 +2609,7 @@ pub fn command_guidance(
     let page = paginate_items(
         Operation::Catalog,
         &filter,
+        None,
         &snapshot_id,
         &items,
         limit,
@@ -2737,7 +2738,8 @@ pub fn command_inventory(
         None => 0,
         Some(token) => {
             let cursor = Cursor::from_token(token)?;
-            cursor.verify(op, &filter, &snapshot_id)?
+            // Query-less operation (the command-catalog inventory); no query binding.
+            cursor.verify(op, &filter, None, &snapshot_id)?
         }
     };
 
@@ -2757,7 +2759,7 @@ pub fn command_inventory(
     while k < remaining.len() && chosen.len() < count_limit {
         let would_truncate = (k + 1) < remaining.len();
         let next_cursor = if would_truncate {
-            Some(Cursor::mint(op, &filter, &snapshot_id, start + k + 1).to_token())
+            Some(Cursor::mint(op, &filter, None, &snapshot_id, start + k + 1).to_token())
         } else {
             None
         };
@@ -2778,7 +2780,7 @@ pub fn command_inventory(
 
     let truncated = k < remaining.len();
     let next_cursor = if truncated {
-        Some(Cursor::mint(op, &filter, &snapshot_id, start + k).to_token())
+        Some(Cursor::mint(op, &filter, None, &snapshot_id, start + k).to_token())
     } else {
         None
     };

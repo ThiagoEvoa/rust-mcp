@@ -215,6 +215,18 @@ struct CursorBinding {
     op: Operation,
     /// The canonical filter key (see [`FilterKey`]).
     filter: String,
+    /// The validated query this cursor's result stream was minted for, or
+    /// `None` for operations that carry no query (checklist, section
+    /// continuation, catalog, and command-guidance continuations). Binding the
+    /// query makes a cursor that is reused after the query changes a typed
+    /// [`CursorError::Mismatch`] (`INVALID_PARAMS`) instead of silently skipping
+    /// the new query's top results (#[171]). It is stored as the exact
+    /// validated query so the comparison is collision-free (a stable digest
+    /// could, on collision, silently reintroduce the skip); the mismatch report
+    /// redacts it, so the query text is never echoed through a cursor error
+    /// (`#[serde(default)]` so a token minted without the field still parses).
+    #[serde(default)]
+    query: Option<String>,
     /// The snapshot identity the cursor was minted under.
     snapshot: String,
     /// The resume position: an item index for [`Operation::Search`] /
@@ -273,6 +285,10 @@ pub enum MismatchField {
     Filter,
     /// The snapshot identity disagreed.
     Snapshot,
+    /// The bound query disagreed: the cursor was minted for a different query
+    /// (or with/without one) than the call it is being resumed against
+    /// (#[171]). Reported without echoing the query text.
+    Query,
 }
 
 impl MismatchField {
@@ -282,6 +298,7 @@ impl MismatchField {
             MismatchField::Operation => "operation",
             MismatchField::Filter => "filter",
             MismatchField::Snapshot => "snapshot",
+            MismatchField::Query => "query",
         }
     }
 }
@@ -292,12 +309,38 @@ impl fmt::Display for MismatchField {
     }
 }
 
+impl CursorError {
+    /// A [`Mismatch`](CursorError::Mismatch) on the bound query (#[171]): the
+    /// cursor was minted for a different query (or with/without one) than the
+    /// call it is being resumed against.
+    ///
+    /// The report is deliberately **non-echoing**: the query is caller-controlled
+    /// and may be large or sensitive, so neither the token's comparison surface
+    /// nor the mismatch's `expected`/`found` carries the query text — they carry
+    /// fixed labels naming which side differs, and the actionable guidance is to
+    /// start a fresh request. The comparison itself (in [`Cursor::verify`]) uses
+    /// the exact stored query, so it is collision-free: a stable digest could,
+    /// on a collision, silently let a changed query continue.
+    fn query_mismatch() -> Self {
+        CursorError::Mismatch {
+            field: MismatchField::Query,
+            expected: "the current query".to_string(),
+            found: "the query the cursor was bound to".to_string(),
+        }
+    }
+}
+
 impl Cursor {
-    /// Mint a cursor for `op`/`filter`/`snapshot_id` resuming at `offset`. Never
-    /// fails: it only serializes a well-formed binding.
+    /// Mint a cursor for `op`/`filter`/`query`/`snapshot_id` resuming at `offset`.
+    /// Never fails: it only serializes a well-formed binding.
+    ///
+    /// `query` binds the result stream's query (#[171]) so a cursor reused after
+    /// the query changes is a typed mismatch, never a silent skip. Operations
+    /// that carry no query pass `None`.
     pub fn mint(
         op: Operation,
         filter: &FilterKey,
+        query: Option<&str>,
         snapshot_id: &SnapshotId,
         offset: usize,
     ) -> Self {
@@ -307,6 +350,7 @@ impl Cursor {
                 version: CURSOR_VERSION,
                 op,
                 filter: filter.as_str().to_string(),
+                query: query.map(str::to_string),
                 snapshot: snapshot_id.as_str().to_string(),
                 offset,
             },
@@ -343,8 +387,8 @@ impl Cursor {
         Ok(Cursor { binding })
     }
 
-    /// Resume this cursor against the call identified by `op`/`filter`/`snapshot_id`,
-    /// returning the resume offset.
+    /// Resume this cursor against the call identified by `op`/`filter`/`query`/
+    /// `snapshot_id`, returning the resume offset.
     ///
     /// The cursor must already be well-formed (call [`from_token`] first, or mint
     /// it yourself). If any bound field differs, this returns a typed
@@ -352,10 +396,17 @@ impl Cursor {
     /// returns the offset. Distinct from "no more results": a mismatch is a
     /// *foreign* cursor, while an exhausted stream is simply a call whose next
     /// cursor is `None`.
+    ///
+    /// The bound **query** (#[171]) is checked last: a cursor minted for a
+    /// different query (or with/without one) cannot continue this call. The
+    /// query is compared exactly (collision-free) and reported without echoing
+    /// its text ([`CursorError::query_mismatch`]). Operations that carry no query
+    /// pass `None`.
     pub fn verify(
         &self,
         op: Operation,
         filter: &FilterKey,
+        query: Option<&str>,
         snapshot_id: &SnapshotId,
     ) -> Result<usize, CursorError> {
         if self.binding.op != op {
@@ -378,6 +429,13 @@ impl Cursor {
                 expected: snapshot_id.as_str().to_string(),
                 found: self.binding.snapshot.clone(),
             });
+        }
+        // #[171]: a cursor reused after the query changed must be rejected, not
+        // let to continue into the old result set and skip the new query's top
+        // results. The exact stored query is compared (collision-free); the
+        // report redacts the query text.
+        if self.binding.query.as_deref() != query {
+            return Err(CursorError::query_mismatch());
         }
         Ok(self.binding.offset)
     }
@@ -633,18 +691,22 @@ fn serialized_page_bytes(
 pub fn paginate_items(
     op: Operation,
     filter: &FilterKey,
+    query: Option<&str>,
     snapshot_id: &SnapshotId,
     items: &[Item],
     limit: Option<usize>,
     cursor: Option<&str>,
 ) -> Result<ResponsePage, CursorError> {
     // AC2: resolve the resume cursor (rejecting a foreign/malformed one) to its
-    // offset. `None` is the first page (offset 0).
+    // offset. `None` is the first page (offset 0). The bound query (#[171]) is
+    // threaded through so a cursor reused after the query changed is a typed
+    // `MismatchField::Query` mismatch, not a silent skip of the new query's top
+    // results; query-less operations pass `None`.
     let start = match cursor {
         None => 0,
         Some(token) => {
             let c = Cursor::from_token(token)?;
-            c.verify(op, filter, snapshot_id)?
+            c.verify(op, filter, query, snapshot_id)?
         }
     };
 
@@ -662,7 +724,7 @@ pub fn paginate_items(
     while k < remaining.len() && chosen.len() < count_limit {
         let would_truncate = (k + 1) < remaining.len();
         let next_cursor = if would_truncate {
-            Some(Cursor::mint(op, filter, snapshot_id, start + k + 1).to_token())
+            Some(Cursor::mint(op, filter, query, snapshot_id, start + k + 1).to_token())
         } else {
             None
         };
@@ -688,7 +750,7 @@ pub fn paginate_items(
 
     let truncated = k < remaining.len();
     let next_cursor = if truncated {
-        Some(Cursor::mint(op, filter, snapshot_id, start + k).to_token())
+        Some(Cursor::mint(op, filter, query, snapshot_id, start + k).to_token())
     } else {
         None
     };
@@ -696,7 +758,8 @@ pub fn paginate_items(
     // via `clip_body` (AC1: paginate/clip, never silently truncate).
     let next_item_oversized = if truncated {
         let single = [remaining[k].clone()];
-        let single_cursor = Some(Cursor::mint(op, filter, snapshot_id, start + k + 1).to_token());
+        let single_cursor =
+            Some(Cursor::mint(op, filter, query, snapshot_id, start + k + 1).to_token());
         serialized_page_bytes(
             op,
             snapshot_id.as_str(),
@@ -853,7 +916,9 @@ pub fn clip_body(
     BodyPart {
         body: body[..cut].to_string(),
         truncated: true,
-        next: Some(Cursor::mint(op, filter, snapshot_id, cut)),
+        // A section continuation carries no query (#[171]: only the `Search`
+        // operation binds one), so the binding is `None`.
+        next: Some(Cursor::mint(op, filter, None, snapshot_id, cut)),
     }
 }
 
@@ -872,7 +937,7 @@ fn body_part_fits(
     let part = BodyPart {
         body: body[..cut].to_string(),
         truncated: true,
-        next: Some(Cursor::mint(op, filter, snapshot_id, cut)),
+        next: Some(Cursor::mint(op, filter, None, snapshot_id, cut)),
     };
     part.serialized_size() <= MAX_RESPONSE_BYTES
 }
@@ -984,7 +1049,13 @@ mod tests {
 
     #[test]
     fn a_cursor_round_trips_through_its_token() {
-        let c = Cursor::mint(Operation::Search, &FilterKey::all(), &snap("snap-a"), 7);
+        let c = Cursor::mint(
+            Operation::Search,
+            &FilterKey::all(),
+            None,
+            &snap("snap-a"),
+            7,
+        );
         let token = c.to_token();
         let back = Cursor::from_token(&token).expect("a minted token is well-formed");
         assert_eq!(back, c, "mint -> token -> parse must be identity");
@@ -1001,6 +1072,7 @@ mod tests {
         let c = Cursor::mint(
             Operation::Checklist,
             &FilterKey::category("Error Handling"),
+            None,
             &snap("snap-b"),
             3,
         );
@@ -1008,6 +1080,7 @@ mod tests {
             .verify(
                 Operation::Checklist,
                 &FilterKey::category("Error Handling"),
+                None,
                 &snap("snap-b"),
             )
             .expect("an identical binding verifies");
@@ -1016,9 +1089,9 @@ mod tests {
 
     #[test]
     fn a_cursor_from_a_different_operation_is_a_mismatch() {
-        let c = Cursor::mint(Operation::Search, &FilterKey::all(), &snap("snap"), 1);
+        let c = Cursor::mint(Operation::Search, &FilterKey::all(), None, &snap("snap"), 1);
         let err = c
-            .verify(Operation::Checklist, &FilterKey::all(), &snap("snap"))
+            .verify(Operation::Checklist, &FilterKey::all(), None, &snap("snap"))
             .expect_err("a search cursor cannot resume a checklist call");
         assert_eq!(
             err,
@@ -1035,6 +1108,7 @@ mod tests {
         let c = Cursor::mint(
             Operation::Search,
             &FilterKey::source("cargo"),
+            None,
             &snap("snap"),
             1,
         );
@@ -1042,6 +1116,7 @@ mod tests {
             .verify(
                 Operation::Search,
                 &FilterKey::source("clippy"),
+                None,
                 &snap("snap"),
             )
             .expect_err("a cargo-filtered cursor cannot resume a clippy call");
@@ -1053,9 +1128,15 @@ mod tests {
 
     #[test]
     fn a_cursor_from_a_different_snapshot_is_a_mismatch() {
-        let c = Cursor::mint(Operation::Search, &FilterKey::all(), &snap("snap-a"), 1);
+        let c = Cursor::mint(
+            Operation::Search,
+            &FilterKey::all(),
+            None,
+            &snap("snap-a"),
+            1,
+        );
         let err = c
-            .verify(Operation::Search, &FilterKey::all(), &snap("snap-b"))
+            .verify(Operation::Search, &FilterKey::all(), None, &snap("snap-b"))
             .expect_err("a cursor from another snapshot cannot resume this one");
         match err {
             CursorError::Mismatch { field, .. } => assert_eq!(field, MismatchField::Snapshot),
@@ -1069,6 +1150,7 @@ mod tests {
         let c = Cursor::mint(
             Operation::SectionContinuation,
             &FilterKey::section(&section("guides-book")),
+            None,
             &snap("snap"),
             100,
         );
@@ -1076,6 +1158,7 @@ mod tests {
             .verify(
                 Operation::SectionContinuation,
                 &FilterKey::section(&section("reference")),
+                None,
                 &snap("snap"),
             )
             .expect_err("a continuation for one section cannot resume another");
@@ -1110,6 +1193,7 @@ mod tests {
             version: 99,
             op: Operation::Search,
             filter: "all".to_string(),
+            query: None,
             snapshot: "snap".to_string(),
             offset: 0,
         };
@@ -1123,12 +1207,14 @@ mod tests {
         let a = Cursor::mint(
             Operation::Search,
             &FilterKey::sources(["cargo", "clippy"]),
+            None,
             &snap("s"),
             2,
         );
         let b = Cursor::mint(
             Operation::Search,
             &FilterKey::sources(["clippy", "cargo"]),
+            None,
             &snap("s"),
             2,
         );
@@ -1143,11 +1229,18 @@ mod tests {
     #[test]
     fn paginate_items_rejects_a_foreign_cursor() {
         let items = vec![Item::Hit(hit("ch1", 1.0))];
-        let other =
-            Cursor::mint(Operation::Checklist, &FilterKey::all(), &snap("snap"), 0).to_token();
+        let other = Cursor::mint(
+            Operation::Checklist,
+            &FilterKey::all(),
+            None,
+            &snap("snap"),
+            0,
+        )
+        .to_token();
         let err = paginate_items(
             Operation::Search,
             &FilterKey::all(),
+            None,
             &snap("snap"),
             &items,
             None,
@@ -1169,6 +1262,7 @@ mod tests {
         let err = paginate_items(
             Operation::Search,
             &FilterKey::all(),
+            None,
             &snap("snap"),
             &items,
             None,
@@ -1188,6 +1282,7 @@ mod tests {
         let page = paginate_items(
             Operation::Search,
             &FilterKey::all(),
+            None,
             &snap("snap"),
             &items,
             None,
@@ -1209,6 +1304,7 @@ mod tests {
         let page = paginate_items(
             Operation::Search,
             &FilterKey::all(),
+            None,
             &snap("snap"),
             &items,
             Some(100),
@@ -1228,6 +1324,7 @@ mod tests {
         let page = paginate_items(
             Operation::Search,
             &FilterKey::all(),
+            None,
             &snap("snap"),
             &items,
             Some(0),
@@ -1249,6 +1346,7 @@ mod tests {
         let page = paginate_items(
             Operation::Search,
             &FilterKey::all(),
+            None,
             &snap("snap"),
             &items,
             None,
@@ -1304,6 +1402,7 @@ mod tests {
         let page = paginate_items(
             Operation::Search,
             &FilterKey::all(),
+            None,
             &snap("snap"),
             &items,
             Some(100),
@@ -1343,6 +1442,7 @@ mod tests {
             let page = paginate_items(
                 Operation::Search,
                 &FilterKey::all(),
+                None,
                 &snap("snap"),
                 &items,
                 None,
@@ -1386,6 +1486,7 @@ mod tests {
         let page = paginate_items(
             Operation::Search,
             &FilterKey::all(),
+            None,
             &snap("snap"),
             &items,
             None,
@@ -1437,6 +1538,7 @@ mod tests {
                     next.verify(
                         Operation::SectionContinuation,
                         &FilterKey::section(&section("big")),
+                        None,
                         &snap("snap")
                     )
                     .is_ok()
@@ -1533,6 +1635,7 @@ mod tests {
                     next.verify(
                         Operation::SectionContinuation,
                         &FilterKey::section(&section("backslashes")),
+                        None,
                         &snap("snap")
                     )
                     .is_ok()
@@ -1648,6 +1751,7 @@ mod tests {
             .verify(
                 Operation::SectionContinuation,
                 &FilterKey::section(&section("big")),
+                None,
                 &snap("snap-b"),
             )
             .expect_err("a continuation from snapshot A cannot resume under B");
@@ -1675,6 +1779,7 @@ mod tests {
             let page = paginate_items(
                 Operation::Search,
                 &FilterKey::all(),
+                None,
                 &snap("snap"),
                 &items,
                 None,
@@ -1726,6 +1831,7 @@ mod tests {
             let page = paginate_items(
                 Operation::Checklist,
                 &filter,
+                None,
                 &snap("snap"),
                 &entries,
                 None,

@@ -199,6 +199,12 @@ pub fn search(
     let page = crate::pagination::paginate_items(
         Operation::Search,
         &filter_key,
+        // #[171]: bind the cursor to the exact validated query so a cursor reused
+        // after the query changed is a typed `MismatchField::Query` mismatch, not
+        // a silent skip of the new query's top results. The validated query is
+        // `req.query()` — the same value the result set was built from — so an
+        // identical call resumes and a changed query is rejected.
+        Some(req.query()),
         &manifest.body.snapshot_id,
         &items,
         Some(req.limit()),
@@ -844,6 +850,7 @@ mod tests {
         let foreign = Cursor::mint(
             Operation::Checklist,
             &FilterKey::all(),
+            None,
             &m.body.snapshot_id,
             5,
         );

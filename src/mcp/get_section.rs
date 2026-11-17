@@ -191,6 +191,7 @@ pub fn get_section(
                 .verify(
                     Operation::SectionContinuation,
                     &filter,
+                    None,
                     &manifest.body.snapshot_id,
                 )
                 .map_err(GetSectionError::Cursor)?
@@ -217,6 +218,7 @@ pub fn get_section(
         Cursor::mint(
             Operation::SectionContinuation,
             &filter,
+            None,
             &manifest.body.snapshot_id,
             start + cursor.offset(),
         )
