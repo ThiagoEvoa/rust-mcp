@@ -174,8 +174,6 @@ pub struct DocsServer {
     manifest: SnapshotManifest,
     /// The command catalog the `get_command_guidance` tool and catalog resource read over.
     catalog: CommandCatalog,
-    /// The "now" the per-source freshness verdict is judged against.
-    as_of: Instant,
     /// The staleness threshold the per-source freshness verdict is judged against.
     threshold: StaleThreshold,
     /// The in-memory section index, built **once** over the served snapshot and
@@ -189,7 +187,7 @@ pub struct DocsServer {
 
 impl DocsServer {
     /// Build the handler over the shipped, in-memory bundled snapshot with a
-    /// "now" read from the wall clock and the default staleness threshold.
+    /// default staleness threshold. Freshness uses the wall clock per request.
     ///
     /// The bundled snapshot is always present (it is a compile-time-embedded,
     /// validated corpus), so this is the server's always-valid offline fallback:
@@ -251,7 +249,6 @@ impl DocsServer {
             manifest,
             catalog,
             index,
-            as_of: Instant::from_system_time(std::time::SystemTime::now()),
             threshold: StaleThreshold::default(),
         }
     }
@@ -445,13 +442,14 @@ impl DocsServer {
         request: CallToolRequestParams,
         version: Option<&rmcp::model::ProtocolVersion>,
     ) -> Result<CallToolResponse, ErrorData> {
+        let as_of = Instant::from_system_time(std::time::SystemTime::now());
         let args = request.arguments.unwrap_or_default();
         let result = match request.name.as_ref() {
             crate::mcp::list_sources::TOOL_NAME => {
                 // No request fields; the response is derived purely from the
                 // manifest snapshot, so there is no user-controlled string to cap.
                 let resp =
-                    crate::mcp::list_sources::response(&self.manifest, self.as_of, self.threshold)
+                    crate::mcp::list_sources::response(&self.manifest, as_of, self.threshold)
                         .map_err(|e| bounded_map(e, version))?;
                 crate::mcp::list_sources::result(&resp).map_err(|e| bounded_map(e, version))?
             }
@@ -484,7 +482,7 @@ impl DocsServer {
                     &self.index,
                     &self.manifest,
                     &req,
-                    self.as_of,
+                    as_of,
                     self.threshold,
                 )
                 .map_err(|e| bounded_map(e, version))?;
@@ -523,7 +521,7 @@ impl DocsServer {
                     &self.catalog,
                     &self.manifest,
                     &req,
-                    self.as_of,
+                    as_of,
                     self.threshold,
                 )
                 .map_err(|e| bounded_map(e, version))?;
@@ -560,6 +558,7 @@ impl DocsServer {
         request: ReadResourceRequestParams,
         version: Option<&rmcp::model::ProtocolVersion>,
     ) -> Result<ReadResourceResponse, ErrorData> {
+        let as_of = Instant::from_system_time(std::time::SystemTime::now());
         let uri = request.uri;
         // #154: cap the user-controlled resource URI at the boundary so an
         // over-long URI (e.g. a 40,000-character section id embedded in a
@@ -573,7 +572,7 @@ impl DocsServer {
                 &self.catalog,
                 None,
                 None,
-                self.as_of,
+                as_of,
                 self.threshold,
             )
             .map_err(|e| bounded_map(e, version))?;
@@ -584,7 +583,7 @@ impl DocsServer {
                 &self.index,
                 &self.manifest,
                 &uri,
-                self.as_of,
+                as_of,
                 self.threshold,
             )
             .map_err(|e| bounded_map(e, version))?;
@@ -1188,6 +1187,36 @@ mod tests {
             after_activation,
             "a resource read must not rebuild the index"
         );
+    }
+
+    #[tokio::test]
+    async fn source_freshness_advances_on_a_running_server() {
+        use crate::provenance::Instant;
+        use std::time::{Duration, SystemTime};
+
+        let mut manifest = crate::bundled::manifest();
+        let cutoff = SystemTime::now() + Duration::from_secs(3);
+        let last_checked = Instant::from_system_time(cutoff - Duration::from_secs(7 * 86_400));
+        manifest.body.sources[0].last_checked =
+            Some(crate::model::Timestamp::new(last_checked.to_rfc3339()).unwrap());
+        let server = DocsServer::with_snapshot(manifest);
+
+        for expected in ["fresh", "stale"] {
+            if expected == "stale" {
+                // The threshold is strict and the clock has second precision.
+                let wait = (cutoff + Duration::from_secs(1))
+                    .duration_since(SystemTime::now())
+                    .unwrap_or_default();
+                tokio::time::sleep(wait).await;
+            }
+            let response = server
+                .dispatch_call(CallToolRequestParams::new("list_sources"), None)
+                .await
+                .expect("list sources");
+            let result = complete_tool_result(response, "freshness");
+            let content = result.structured_content.expect("source catalog");
+            assert_eq!(content["sources"][0]["freshness"], expected);
+        }
     }
 
     /// Build a tool-call `arguments` object (`serde_json::Map`) from string to

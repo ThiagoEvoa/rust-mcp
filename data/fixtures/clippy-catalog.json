@@ -4,7 +4,9 @@
   "lint_ids": [
     "clippy::clone_on_copy",
     "clippy::expect_used",
+    "clippy::manual_let_else",
     "clippy::missing_panics_doc",
+    "clippy::needless_borrow",
     "clippy::needless_return",
     "clippy::new_without_default",
     "clippy::panic",

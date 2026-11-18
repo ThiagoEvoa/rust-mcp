@@ -28,6 +28,7 @@
 
 use crate::ingest::fetch::BoundClient;
 use crate::ingest::resolve::{ResolveError, ResolvedDocument, resolve_document};
+use crate::registry::Parser;
 use reqwest::Url;
 use std::collections::HashSet;
 
@@ -63,6 +64,10 @@ pub enum Exclusion {
     /// crawled" rather than silently dropped (criterion: "external references are
     /// excluded … reported").
     Excluded(String),
+    /// A citation to another registered collection is kept as a link, not crawled.
+    DifferentCollection(&'static str),
+    /// A registered document handled by a dedicated adapter, such as the lint catalog.
+    SeparateAdapter,
 }
 
 /// Classify a resolved reference into "book it" or "exclude it" by the URL shape
@@ -451,7 +456,15 @@ pub fn build_inventory(html: &str, base_url: &Url, collection: &str) -> Document
             Ok(doc) => {
                 // Classify the resolved URL: an exclusion means "report it but
                 // don't book it"; `None` means it is a document to (dedup-)book.
-                if let Some(reason) = classify(&reference, &doc) {
+                let owner = doc.entry.collection.id();
+                let exclusion = if owner != collection {
+                    Some(Exclusion::DifferentCollection(owner))
+                } else if doc.entry.boundary.parser != Parser::Book {
+                    Some(Exclusion::SeparateAdapter)
+                } else {
+                    classify(&reference, &doc)
+                };
+                if let Some(reason) = exclusion {
                     inventory.excluded.push(ExcludedReference {
                         requested: reference,
                         reason,
@@ -521,7 +534,7 @@ pub async fn discover_inventory(
     // 1–4: read the links from the page's *structure* (criterion 1 — no TOC
     // filename is ever named), then resolve, re-gate through the registry,
     // classify, and deduplicate.
-    let inventory = build_inventory(&html, base_url, collection);
+    let inventory = build_inventory(&html, &page.final_url, collection);
 
     // 5. Diff against the expected set (when given): name removed / added /
     //    unavailable documents so nothing missing or broken is silent.
@@ -686,6 +699,26 @@ mod tests {
         BoundClient::with_gate(fast_policy(), Arc::new(LoopbackGate))
     }
 
+    #[test]
+    fn inventory_keeps_cross_collection_links_out_of_the_current_source() {
+        let base = Url::parse("https://doc.rust-lang.org/clippy/index.html").unwrap();
+        let html = r#"<a href="installation.html">Installation</a>
+                      <a href="../rustc/lints/levels.html">Lint levels</a>
+                      <a href="https://clippy.rust-lang.org/stable/index.html">Lint catalog</a>"#;
+        let inventory = build_inventory(html, &base, "clippy");
+        assert_eq!(inventory.urls.len(), 1);
+        assert!(
+            inventory.urls[0]
+                .path()
+                .ends_with("clippy/installation.html")
+        );
+        assert_eq!(
+            inventory.excluded[0].reason,
+            Exclusion::DifferentCollection("rustc")
+        );
+        assert_eq!(inventory.excluded[1].reason, Exclusion::SeparateAdapter);
+    }
+
     // -- Criterion 1: chapters discovered without a hardcoded TOC filename ------
 
     #[test]
@@ -778,6 +811,8 @@ mod tests {
                 Exclusion::Asset => "Asset".into(),
                 Exclusion::Excluded(_) => "Excluded".into(),
                 Exclusion::SameDocumentFragment => "SameDocumentFragment".into(),
+                Exclusion::DifferentCollection(source) => format!("DifferentCollection({source})"),
+                Exclusion::SeparateAdapter => "SeparateAdapter".into(),
             })
             .collect();
         assert!(

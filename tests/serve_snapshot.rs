@@ -459,6 +459,56 @@ async fn spawned_serve_resolves_the_three_named_clippy_lints() {
     server.close_and_read_stderr().await;
 }
 
+#[tokio::test]
+async fn bundled_search_finds_workspace_doctest_and_lint_documentation() {
+    let data_dir = fresh_data_dir();
+    let mut server = Server::spawn(&data_dir).await;
+    server.initialize().await;
+
+    for (source, query, chapter) in [
+        (
+            "cargo",
+            "workspace dependency inheritance",
+            "/cargo/reference/workspaces.html",
+        ),
+        (
+            "rustdoc",
+            "How to write doctests?",
+            "/rustdoc/write-documentation/documentation-tests.html",
+        ),
+        (
+            "clippy",
+            "clippy::needless_borrow",
+            "/stable/index.html#needless_borrow",
+        ),
+        (
+            "clippy",
+            "manual_let_else",
+            "/stable/index.html#manual_let_else",
+        ),
+    ] {
+        let response = server
+            .call_tool(
+                "search_docs",
+                json!({ "source": source, "query": query, "limit": 5 }),
+            )
+            .await;
+        let hits = response["result"]["structuredContent"]["hits"]
+            .as_array()
+            .expect("search hits");
+        assert!(
+            hits.iter().any(|hit| {
+                hit["citations"][0]["url"]
+                    .as_str()
+                    .is_some_and(|url| url.contains(chapter))
+            }),
+            "{query} should surface {chapter} in the first page: {response}"
+        );
+    }
+    server.close_and_read_stderr().await;
+    std::fs::remove_dir_all(data_dir).expect("remove scratch corpus");
+}
+
 // ---------------------------------------------------------------------------
 // Acceptance 2: a missing or invalid local corpus falls back to the embedded
 // seed and reports why.

@@ -9,7 +9,7 @@
 //! **manifest claims** — the source / section / checklist / command counts, the
 //! parser marker, the per-source content hashes, and the `corpus_hash` that
 //! `list_sources` advertises. When the bundled corpus evolved (the seed grew
-//! into a hierarchical **877-section** snapshot on parser **`seed-2`**, with
+//! into a hierarchical **910-section** snapshot on parser **`seed-2`**, with
 //! **source-specific** content hashes), those literals went stale: the docs had
 //! still quoted 8 sections / parser `seed-1` / a single shared hash / a bare
 //! `api-guidelines/about` id the corpus no longer carries. That is exactly the
@@ -29,7 +29,7 @@
 //!
 //! # What it asserts (all against the committed corpus, no live upstream)
 //!
-//! * the **manifest counts** the guides quote — 8 sources, 877 sections, 54
+//! * the **manifest counts** the guides quote — 8 sources, 910 sections, 54
 //!   checklist entries, 29 command keys, parser `rust-docs-mcp/seed-2`, schema
 //!   version `1` — match the corpus;
 //! * every **concrete section id** the guides show as copy-pastable resolves in
@@ -64,13 +64,13 @@ const EXPECTED_SCHEMA_VERSION: u64 = 1;
 const EXPECTED_PARSER_VERSION: &str = "rust-docs-mcp/seed-2";
 const EXPECTED_SNAPSHOT_ID: &str = "rust-docs-bundled-seed";
 const EXPECTED_SOURCES: usize = 8;
-const EXPECTED_SECTIONS: usize = 877;
+const EXPECTED_SECTIONS: usize = 910;
 const EXPECTED_CHECKLIST: usize = 54;
 const EXPECTED_COMMANDS: usize = 29;
 
 /// The `corpus_hash` `list_sources` / the catalog resource advertise — the
 /// `c128-` hash over the compact serialization of the committed manifest.
-const EXPECTED_CORPUS_HASH: &str = "c128-ffaf654d6d447eb40b9e9629be845a92";
+const EXPECTED_CORPUS_HASH: &str = "c128-ffaff79b0718435fce66cf3b4b4719eb";
 
 /// The concrete section ids the guides present as copy-pastable. Each must
 /// resolve in the corpus. The first two are the two ids `docs/CLIENTS.md` shows
@@ -99,12 +99,12 @@ const DOCUMENTED_SECTION_IDS: [&str; 9] = [
 const DOCUMENTED_SOURCE_HASHES: [(&str, &str); 8] = [
     ("api-guidelines", "c128-ffa6caa702a86473fe801b0bcb02d958"),
     ("style-guide", "c128-ffa596f39b95d538268ea3a933acba9d"),
-    ("cargo", "c128-ffa6d93dcb18fde78b2ef7926b4861b6"),
+    ("cargo", "c128-ffaa2376401ac2d8420dbc472e05d093"),
     ("rustc", "c128-ffa55d2e9ca927751cfbcc7794137903"),
     ("rustup", "c128-ffa5ff983cff5cbc92f95a7ce7f3c250"),
     ("rustfmt", "c128-ffa5483e8818922ce73e4a6f383a9380"),
-    ("clippy", "c128-ffa5067277597fa1db7e098805bd3ead"),
-    ("rustdoc", "c128-ffa64cec68c7765563660336e199955c"),
+    ("clippy", "c128-ffa5be4679eb256eb4704303e1c09cd2"),
+    ("rustdoc", "c128-ffa5bfadb13fbae357d6e8ef2514caae"),
 ];
 
 /// The C-CONV checklist entry the guides reference: its code, category, location,
@@ -174,7 +174,7 @@ fn documented_examples_match_the_committed_corpus() {
     let commands = corpus["commands"].as_array().expect("a `commands` array");
 
     // The four counts the guides quote — the exact numbers #176 found stale
-    // (the guides had 8 / 544 / 1 / 3; the corpus is 8 / 877 / 54 / 29).
+    // (the guides had 8 / 544 / 1 / 3; the corpus is 8 / 910 / 54 / 29).
     assert_eq!(
         sources.len(),
         EXPECTED_SOURCES,

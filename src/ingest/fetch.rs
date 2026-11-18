@@ -136,6 +136,10 @@ impl FetchPolicy {
 pub(crate) trait UrlGate: Send + Sync {
     /// Classify `url`, returning the registry's reason when it is refused.
     fn allow(&self, url: &Url) -> Result<(), RegistryError>;
+
+    fn allow_redirect(&self, _start: &Url, target: &Url) -> Result<(), RegistryError> {
+        self.allow(target)
+    }
 }
 
 /// The production gate: a URL is fetchable only if
@@ -151,6 +155,18 @@ impl UrlGate for RegistryGate {
         // `resolve_url` is strict about host shape and the http(s) scheme and
         // cannot panic on a real URL.
         resolve_url(url.as_str())?;
+        Ok(())
+    }
+
+    fn allow_redirect(&self, start: &Url, target: &Url) -> Result<(), RegistryError> {
+        let expected = resolve_url(start.as_str())?.collection;
+        let actual = resolve_url(target.as_str())?.collection;
+        if actual != expected {
+            return Err(RegistryError::DifferentCollection {
+                expected: expected.id(),
+                actual: actual.id(),
+            });
+        }
         Ok(())
     }
 }
@@ -559,9 +575,11 @@ impl BoundClient {
                         // A redirected location must stay inside the source
                         // boundary (the "reject a redirect that escapes the
                         // source's boundary" criterion), so it is gated too.
-                        self.gate.allow(&target).map_err(|why| FetchError::Bound {
-                            url: target.clone(),
-                            why,
+                        self.gate.allow_redirect(&start, &target).map_err(|why| {
+                            FetchError::Bound {
+                                url: target.clone(),
+                                why,
+                            }
                         })?;
                         current = target;
                         continue;
@@ -837,6 +855,23 @@ mod tests {
         ));
         let good = Url::parse("https://doc.rust-lang.org/cargo/").unwrap();
         assert!(gate.allow(&good).is_ok());
+    }
+
+    #[test]
+    fn registry_gate_keeps_redirects_within_the_source_and_allows_catalog_alias() {
+        let gate = RegistryGate;
+        let cargo = Url::parse("https://doc.rust-lang.org/cargo/").unwrap();
+        let rustc = Url::parse("https://doc.rust-lang.org/rustc/").unwrap();
+        assert!(matches!(
+            gate.allow_redirect(&cargo, &rustc),
+            Err(RegistryError::DifferentCollection {
+                expected: "cargo",
+                actual: "rustc"
+            })
+        ));
+        let alias = Url::parse("https://rust-lang.github.io/rust-clippy/stable/").unwrap();
+        let catalog = Url::parse("https://clippy.rust-lang.org/stable/index.html").unwrap();
+        assert!(gate.allow_redirect(&alias, &catalog).is_ok());
     }
 
     #[test]

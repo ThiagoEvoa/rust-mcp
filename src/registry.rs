@@ -86,6 +86,13 @@ pub enum RegistryError {
         /// The path that fell outside every boundary prefix for that host.
         path: String,
     },
+    /// A redirect leaves the source collection that owned the initial URL.
+    DifferentCollection {
+        /// Registry id of the requested source.
+        expected: &'static str,
+        /// Registry id of the redirect target's source.
+        actual: &'static str,
+    },
     /// A source id is not one of the eight approved collections.
     UnregisteredSource {
         /// The source id that was not registered.
@@ -104,6 +111,10 @@ impl std::fmt::Display for RegistryError {
                 f,
                 "`{path}` on host `{host}` is outside every registered path boundary \
                  (arbitrary source rejected)"
+            ),
+            Self::DifferentCollection { expected, actual } => write!(
+                f,
+                "redirect from source `{expected}` to source `{actual}` is outside the source boundary"
             ),
             Self::UnregisteredSource { id } => write!(
                 f,

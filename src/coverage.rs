@@ -695,17 +695,21 @@ fn body_mentions_known(body: &str) -> bool {
 /// must prevent.
 fn body_has_chrome(body: &str) -> bool {
     let lower = body.to_lowercase();
-    [
-        "<nav",
-        "<script",
-        "<style",
-        "<aside",
-        "<footer",
-        "class=\"sidebar\"",
-        "class=\"toc\"",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    // Require a tag-name boundary so prose such as `<script-name>_OUT_DIR`
+    // or type names such as `<StyleRule>` do not look like HTML elements.
+    ["nav", "script", "style", "aside", "footer"]
+        .into_iter()
+        .any(|name| {
+            lower.split('<').skip(1).any(|tail| {
+                tail.strip_prefix(name).is_some_and(|rest| {
+                    rest.bytes()
+                        .next()
+                        .is_some_and(|b| b.is_ascii_whitespace() || matches!(b, b'>' | b'/'))
+                })
+            })
+        })
+        || lower.contains("class=\"sidebar\"")
+        || lower.contains("class=\"toc\"")
 }
 
 // --- Tests -----------------------------------------------------------------
@@ -746,7 +750,7 @@ mod tests {
 
         assert_eq!(report.source_count, 8, "seed has all eight sources");
         assert_eq!(
-            report.section_count, 877,
+            report.section_count, 910,
             "seed captures the full upstream corpus"
         );
         assert_eq!(
@@ -929,6 +933,13 @@ mod tests {
     }
 
     #[test]
+    fn fidelity_allows_documented_placeholders_and_type_names() {
+        let body = "Access build script output through <script-name>_OUT_DIR and `<StyleRule>`.";
+        assert!(!body_has_chrome(body));
+        assert!(body_has_chrome("<SCRIPT type=\"module\">"));
+    }
+
+    #[test]
     fn fidelity_detects_navigation_chrome_as_a_defect() {
         // A body that leaks navigation/scripts must flip the invariant to absent —
         // a recorded defect, never a silent pass.
@@ -951,7 +962,7 @@ mod tests {
         // The fidelity report records all of them present, with no recorded gap.
         let report = inspect_fidelity(&seed_manifest().body.sections);
 
-        assert_eq!(report.sections_inspected, 877);
+        assert_eq!(report.sections_inspected, 910);
         assert!(
             report.all_types_present(),
             "the faithful seed covers every content type: {}",
@@ -1159,10 +1170,10 @@ mod tests {
         let report = inspect_corpus(&seed_manifest());
 
         assert_eq!(
-            report.sections_inspected, 877,
+            report.sections_inspected, 910,
             "the inspection reports the loaded corpus count"
         );
-        assert_eq!(report.coverage.section_count, 877);
+        assert_eq!(report.coverage.section_count, 910);
         assert!(
             report.is_complete(),
             "the faithful seed is complete: {}",

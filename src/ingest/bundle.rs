@@ -71,11 +71,9 @@ use reqwest::Url as RqUrl;
 /// distinguishable in a `snapshot_id` or a `parser` field.
 pub const SEED_PARSER_VERSION: &str = "rust-docs-mcp/seed-2";
 
-/// The fixed capture timestamp the seed records for every source. The seed is a
-/// *representative* corpus pinned to recorded fixtures, so a single fixed
-/// `fetched_at` is truthful ("captured on this date from these fixtures") and
-/// keeps the emitted JSON deterministic.
-pub const CAPTURED_AT: &str = "2026-10-30T00:00:00Z";
+/// Capture dates remain fixed so the generated snapshot is reproducible.
+const CAPTURED_AT: &str = "2026-10-30T00:00:00Z";
+const EXPANDED_CAPTURE_AT: &str = "2026-11-18T00:00:00Z";
 
 /// The recorded provenance for each upstream fixture the seed ingests: the
 /// upstream `ETag` (a cheap cache identity / freshness hint) and, where the
@@ -100,8 +98,6 @@ pub mod provenance {
         /// The commit the `README.md` and `Configurations.md` fixtures were captured from.
         pub const REVISION: &str = "702df60b87e5047276b0d4c36c989e8095555e00";
     }
-    /// The upstream `ETag` for the Clippy lint catalog (`clippy.rust-lang.org/stable/`).
-    pub const CLIPPY_INDEX_ETAG: &str = "\"6af8ef1c-1971f8\"";
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +203,10 @@ mod fixtures {
         include_str!("../../tests/fixtures/upstream/rustup-cross-compilation.html");
     pub const RUSTUP_PROFILES: &str =
         include_str!("../../tests/fixtures/upstream/rustup-profiles.html");
+    pub const CARGO_WORKSPACES: &str =
+        include_str!("../../tests/fixtures/upstream/cargo-workspaces.html");
+    pub const RUSTDOC_DOCTESTS: &str =
+        include_str!("../../tests/fixtures/upstream/rustdoc-documentation-tests.html");
     pub const RUSTDOC_CLI: &str =
         include_str!("../../tests/fixtures/upstream/rustdoc-command-line-arguments.html");
 }
@@ -277,6 +277,9 @@ const RUSTUP_CONCEPT_PAGES: &[&str] = &[
     "cross-compilation.html",
 ];
 const RUSTDOC_BASE: &str = "https://doc.rust-lang.org/rustdoc/";
+const CARGO_WORKSPACES_URL: &str = "https://doc.rust-lang.org/cargo/reference/workspaces.html";
+const RUSTDOC_DOCTESTS_URL: &str =
+    "https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html";
 const CLIPPY_BASE: &str = "https://clippy.rust-lang.org/stable/";
 
 /// The commit-pinned raw URLs the rustfmt fixtures stand in for.
@@ -546,6 +549,17 @@ pub(crate) fn command_subpage_urls(source: &str) -> Vec<String> {
     }
 }
 
+/// Required pages that the landing pages' links do not reliably expose.
+pub(crate) fn required_subpage_urls(source: &str) -> Vec<String> {
+    let mut urls = command_subpage_urls(source);
+    match source {
+        "cargo" => urls.push(CARGO_WORKSPACES_URL.to_string()),
+        "rustdoc" => urls.push(RUSTDOC_DOCTESTS_URL.to_string()),
+        _ => {}
+    }
+    urls
+}
+
 // ---------------------------------------------------------------------------
 // Seed corpus generation
 // ---------------------------------------------------------------------------
@@ -663,6 +677,13 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
             },
         )?);
     }
+    cargo_sections.extend(ingest_html(
+        "cargo",
+        CARGO_WORKSPACES_URL,
+        fixtures::CARGO_WORKSPACES,
+        None,
+        ingest_cargo,
+    )?);
     // `rustc`: the `rustc-command-line-arguments.html` page *is* the `rustc`
     // usage page (it is the `rustc` man page, rendered by the rustc book), so
     // its ingested section is the `rustc` command's upstream body. The key is
@@ -800,6 +821,14 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
         &format!("{RUSTDOC_BASE}command-line-arguments.html"),
     )?;
 
+    rustdoc_sections.extend(ingest_html(
+        "rustdoc",
+        RUSTDOC_DOCTESTS_URL,
+        fixtures::RUSTDOC_DOCTESTS,
+        None,
+        ingest_rustdoc,
+    )?);
+
     // -- rustfmt: the two approved, commit-pinned Markdown sources. The `rustfmt`
     //    key is stamped on both sections (README.md and Configurations.md are the
     //    `rustfmt` usage + reference `rustfmt_usage` cites) as a separate
@@ -884,11 +913,7 @@ fn rustfmt_sections() -> Result<Vec<Section>, SeedError> {
 /// same per-lint sections it would for those lints in the full catalog.
 fn clippy_sections() -> Result<Vec<Section>, SeedError> {
     let url = format!("{CLIPPY_BASE}index.html");
-    let fetched = fetched(
-        &url,
-        fixtures::CLIPPY_LINTS,
-        Some(provenance::CLIPPY_INDEX_ETAG),
-    )?;
+    let fetched = fetched(&url, fixtures::CLIPPY_LINTS, None)?;
     ingest_lint_catalog(&fetched).map_err(|e| SeedError::Ingest {
         source: "clippy".to_string(),
         detail: e.to_string(),
@@ -999,6 +1024,10 @@ fn build_sources(sections: &[Section]) -> Vec<Source> {
     for (id, title, entry_url, docs, release) in source_specs() {
         // Compute the captured-content hash before moving `id`.
         let content_hash = CorpusHash::compute(captured(&id));
+        let capture_date = match id.as_str() {
+            "cargo" | "clippy" | "rustdoc" => EXPANDED_CAPTURE_AT,
+            _ => CAPTURED_AT,
+        };
         let source_id = SourceId::new(id).expect("a registry source id is URI-safe");
         let entry = Url::new(entry_url).expect("a registry entry URL is well-formed");
         let document_urls = docs
@@ -1011,7 +1040,7 @@ fn build_sources(sections: &[Section]) -> Vec<Source> {
             entry_url: entry,
             document_urls,
             last_checked: None,
-            fetched_at: Timestamp::new(CAPTURED_AT).expect("the capture timestamp is valid"),
+            fetched_at: Timestamp::new(capture_date).expect("the capture timestamp is valid"),
             upstream_modified: None,
             etag: None,
             content_hash,
@@ -1073,10 +1102,7 @@ fn source_specs() -> Vec<(String, String, String, Vec<String>, Release)> {
             // through `ingest_command_page` — is a documented URL for the source,
             // derived from the same table the corpus ingests so the two never
             // drift.
-            CARGO_COMMAND_PAGES
-                .iter()
-                .map(|(file, _)| format!("{CARGO_BASE}commands/{file}"))
-                .collect(),
+            required_subpage_urls("cargo"),
             R::channel_only(crate::model::Channel::Stable),
         ),
         (
@@ -1130,7 +1156,10 @@ fn source_specs() -> Vec<(String, String, String, Vec<String>, Release)> {
             "rustdoc".to_string(),
             "The Rustdoc Book".to_string(),
             "https://doc.rust-lang.org/rustdoc/".to_string(),
-            vec![format!("{RUSTDOC_BASE}command-line-arguments.html")],
+            vec![
+                format!("{RUSTDOC_BASE}command-line-arguments.html"),
+                RUSTDOC_DOCTESTS_URL.to_string(),
+            ],
             R::channel_only(crate::model::Channel::Stable),
         ),
     ]
