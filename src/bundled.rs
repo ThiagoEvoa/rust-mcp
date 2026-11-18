@@ -229,7 +229,7 @@ pub fn manifest_with_exclusions(excluded: &[&str]) -> SnapshotManifest {
 /// The attribution record for a collection. All eight sources are MIT OR
 /// Apache-2.0 (`docs/LICENSING.md` §4); the notice points at the section of
 /// `THIRD_PARTY_NOTICES.md` that carries the licence and origin.
-fn attribution_for(collection: SourceCollection) -> AttributionRef {
+pub(crate) fn attribution_for(collection: SourceCollection) -> AttributionRef {
     let short = collection
         .title()
         .split_whitespace()
