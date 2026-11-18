@@ -79,6 +79,7 @@ use crate::model::{Section, SectionId, SnapshotManifest};
 use crate::pagination::{Cursor, CursorError, FilterKey, MAX_RESPONSE_BYTES, Operation, clip_body};
 use crate::provenance::{Instant, StaleThreshold};
 use crate::reads::{ReadError, SectionRead};
+use crate::search::SectionIndex;
 use serde_json::{Value, json};
 use std::str::FromStr;
 
@@ -136,13 +137,20 @@ impl ProtocolError for GetSectionError {
     }
 }
 
-/// Resolve a `get_section` request to its [048] response, paginating the body
-/// through the [037] continuation cursor.
+/// Resolve a `get_section` request to its [048] response **reusing a pre-built
+/// [`SectionIndex`]**, paginating the body through the [037] continuation cursor
+/// (issue #175). This is the shared-index counterpart of [`get_section`]: the
+/// server passes the index it built once at snapshot activation, so a request
+/// pays no rebuild. The read is composed through
+/// [`crate::reads::get_section_indexed`]; everything else — the section-id
+/// resolution, the freshness verdict, the cap-bounded continuation, and the [048]
+/// projection — is identical to the per-call path.
 ///
 /// `as_of` and `threshold` supply the source-freshness computation (the caller
 /// passes "now" and the configured staleness threshold); the [036] read uses
 /// them to produce the section's freshness verdict.
-pub fn get_section(
+pub fn get_section_indexed(
+    index: &SectionIndex,
     manifest: &SnapshotManifest,
     request: &GetSectionRequest,
     as_of: Instant,
@@ -157,25 +165,27 @@ pub fn get_section(
         }
     })?;
 
-    // 2. Read the full record through the [036] section read: the Markdown body,
-    //    the heading breadcrumb (context), the citations, the snapshot identity,
-    //    and the source's freshness — all preserved verbatim (AC2).
-    let read = match crate::reads::get_section(manifest, &section_id, as_of, threshold) {
-        Ok(read) => read,
-        Err(ReadError::UnknownSection(id)) => {
-            return Err(GetSectionError::UnknownSection {
-                id: id.as_str().to_string(),
-            });
-        }
-        // `UnknownCategory` and `DanglingExplanation` are only produced by the
-        // checklist read, never by a section read; keep the read total and
-        // panic-free by mapping them to the same not-found.
-        Err(_) => {
-            return Err(GetSectionError::UnknownSection {
-                id: request.section_id.clone(),
-            });
-        }
-    };
+    // 2. Read the full record through the [036] section read (reusing the shared
+    //    index): the Markdown body, the heading breadcrumb (context), the
+    //    citations, the snapshot identity, and the source's freshness — all
+    //    preserved verbatim (AC2).
+    let read =
+        match crate::reads::get_section_indexed(index, manifest, &section_id, as_of, threshold) {
+            Ok(read) => read,
+            Err(ReadError::UnknownSection(id)) => {
+                return Err(GetSectionError::UnknownSection {
+                    id: id.as_str().to_string(),
+                });
+            }
+            // `UnknownCategory` and `DanglingExplanation` are only produced by the
+            // checklist read, never by a section read; keep the read total and
+            // panic-free by mapping them to the same not-found.
+            Err(_) => {
+                return Err(GetSectionError::UnknownSection {
+                    id: request.section_id.clone(),
+                });
+            }
+        };
 
     // 3. Resolve the continuation offset, if any, through the [037] cursor
     //    contract. The offset is an absolute byte offset into the section's full
@@ -236,6 +246,21 @@ pub fn get_section(
         truncated: part.truncated,
         schema_version: read.schema_version.as_u32().to_string(),
     })
+}
+
+/// Resolve a `get_section` request to its [048] response, building the in-memory
+/// index per call so the contract stays self-contained. A long-running server
+/// reuses one index through [`get_section_indexed`] instead (issue #175).
+pub fn get_section(
+    manifest: &SnapshotManifest,
+    request: &GetSectionRequest,
+    as_of: Instant,
+    threshold: StaleThreshold,
+) -> Result<GetSectionResponse, GetSectionError> {
+    // The self-contained contract builds the index per call; a long-running
+    // server reuses its own index via `get_section_indexed` (issue #175).
+    let index = SectionIndex::build(manifest);
+    get_section_indexed(&index, manifest, request, as_of, threshold)
 }
 
 /// Assemble the final `rmcp` `CallToolResult` for a `get_section` response.

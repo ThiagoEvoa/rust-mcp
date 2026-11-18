@@ -662,6 +662,7 @@ fn empty_result_next_steps() -> Vec<&'static str> {
 /// `#[allow(dead_code)]` remains for the BM25 ranking path, which stays unwired
 /// until `search_docs` lands ([037]); it is lifted as each consumer is wired in.
 #[allow(dead_code)] // transitional: ranking unwired until [037]; `get` wired by [036]
+#[derive(Debug)]
 pub struct SectionIndex {
     sections: Vec<Section>,
     postings: BTreeMap<String, BTreeMap<usize, usize>>,
@@ -670,6 +671,50 @@ pub struct SectionIndex {
     doc_lens: Vec<usize>,
     k1: f64,
     b: f64,
+}
+
+// ---------------------------------------------------------------------------
+// issue #175: the "built once" instrumentation
+//
+// A long-running server builds the section index a **single time**, at snapshot
+// activation ([`DocsServer::with_snapshot`](crate::mcp::DocsServer::with_snapshot)),
+// and shares it across every request — so a request pays no O(corpus) rebuild
+// (the regression the issue reports: `command_guidance` and `search_docs` rebuilt
+// the index per request, and the catalog resolver rebuilt it once *per cited
+// section*). To make that property *testable and auditable* with zero cost in the
+// shipped build, the single construction site below
+// ([`SectionIndex::with_params`], through which **every** builder funnels) records
+// one build on the *current thread* under `#[cfg(test)]`. A build counter
+// therefore counts exactly the indexes this thread constructed: a server build
+// moves it by exactly one, and serving many requests through the shared index
+// moves it by zero. It is `#[cfg(test)]` so the released binary pays nothing and
+// stays free of the thread-local bookkeeping.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+thread_local! {
+    /// The number of [`SectionIndex`]s the *current thread* has constructed — the
+    /// audit point for issue #175's "the index is built once per snapshot, not
+    /// per request or per section" acceptance check.
+    static BUILD_COUNT: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+impl SectionIndex {
+    /// The number of [`SectionIndex`]s the *current thread* has constructed — the
+    /// "built once" counter for issue #175. A server build moves it by exactly
+    /// one; reusing the shared index moves it by zero.
+    pub fn test_build_count() -> u64 {
+        BUILD_COUNT.with(|c| c.get())
+    }
+
+    /// Reset the current thread's "built once" counter to zero. A test that
+    /// resets, builds a server, and then drives many requests asserts the counter
+    /// never moves — the per-request / per-section rebuild is gone.
+    pub fn test_reset_build_count() {
+        BUILD_COUNT.with(|c| c.set(0));
+    }
 }
 
 #[allow(dead_code)] // transitional: unwired until [036]/[037]
@@ -701,6 +746,10 @@ impl SectionIndex {
     /// order), so an index built twice from the same input is byte-for-byte
     /// identical — the basis of AC2's "identical inputs → identical ordering".
     pub fn with_params(sections: &[Section], k1: f64, b: f64) -> SectionIndex {
+        // issue #175: every builder funnels through this one construction site, so
+        // this is the single point that records a build for the "built once" audit.
+        #[cfg(test)]
+        BUILD_COUNT.with(|c| c.set(c.get() + 1));
         // One pass over the sections: per-document term frequencies feed the
         // inverted `postings` and the per-document token counts feed length
         // normalization. `BTreeMap` throughout keeps every iteration ordered,

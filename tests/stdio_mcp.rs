@@ -2272,3 +2272,393 @@ async fn read_response_until(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// [175] AC4 — large guidance inputs under a concurrent burst.
+//
+// The companion [`concurrent_burst_exits_cleanly_on_eof_without_orphaned_work`]
+// above exercises a *small, diverse* burst (one page per tool). This test goes
+// to the **worst case the issue reports**: the most-cited command, `rustfmt`
+// (50 cited sections in the shipped corpus), served at the **largest valid page**
+// — 15 sections, ~30 KiB, just under the [`MAX_RESPONSE_BYTES`](crate::pagination::MAX_RESPONSE_BYTES)
+// cap — and then a **continuation page** of that same large guidance input. The
+// regression the issue #175 reports is that each of those 15 cited sections
+// rebuilt the O(corpus) index, so one large guidance call was ~15× O(corpus). With
+// the index now built once per snapshot, these large, multi-section inputs must
+// drain under a concurrent burst with **no per-request rebuild stall**, the
+// continuation page must resolve through the same shared index, and the session
+// must still cancel cleanly (EOF → graceful self-exit, no orphaned work, no
+// panic).
+//
+// The check is hermetic: a temp `--data-dir`, and `serve` loads the bundled
+// snapshot in-memory (no network, no host cache). `kill_on_drop` is the safety
+// net that reaps the child on a panic, but the assertions prove a graceful
+// self-exit, not a forced kill. The test is `#[ignore]`d **only** when the
+// machine is under heavy parallel load; in the ordinary serial suite it runs.
+// ---------------------------------------------------------------------------
+
+/// The largest valid `get_command_guidance` page for `rustfmt` in the shipped
+/// corpus: 15 sections (~30 KiB, under the 32 KiB response cap), a real
+/// continuation to follow. A `limit` above this overflows the cap and the server
+/// refuses it, so 15 is the "large but valid" input the burst exercises.
+const LARGE_GUIDANCE_LIMIT: usize = 15;
+/// The worst-supported command — the most-cited (`rustfmt`, 50 sections in the
+/// shipped corpus), the one whose per-section index rebuilds the issue reports.
+const WORST_GUIDANCE_COMMAND: &str = "rustfmt";
+/// The minimum number of sections a "large" guidance page must actually carry, so
+/// a fast empty / one-section page can never masquerade as the large payload.
+const MIN_LARGE_GUIDANCE_SECTIONS: u64 = 10;
+
+/// The large-guidance pipelined burst plan. Each entry is
+/// `(method, params, expected_result_key, min_sections)`: `min_sections` is the
+/// smallest `sections` array a guidance response must carry to count as the large
+/// payload (0 for non-guidance entries, which only need their `structuredContent` /
+/// `contents` result present). The plan interleaves the worst command at the
+/// largest valid page with the other four tools and both resources, several times,
+/// so the burst is both **large** (the multi-section guidance payloads) and
+/// **concurrent** (every frame is written back to back, no response read between).
+fn large_guidance_plan() -> Vec<(String, Value, &'static str, u64)> {
+    let section_uri = section_resource_uri("api-guidelines/about#rust-api-guidelines");
+    let mut plan: Vec<(String, Value, &'static str, u64)> = Vec::new();
+    // Three interleaved rounds so the large guidance payloads are several at a time.
+    for _ in 0..3 {
+        plan.push((
+            "tools/call".to_string(),
+            json!({
+                "name": "get_command_guidance",
+                "arguments": { "command": WORST_GUIDANCE_COMMAND, "limit": LARGE_GUIDANCE_LIMIT },
+            }),
+            "structuredContent",
+            MIN_LARGE_GUIDANCE_SECTIONS,
+        ));
+        plan.push((
+            "tools/call".to_string(),
+            json!({ "name": "list_sources", "arguments": {} }),
+            "structuredContent",
+            0,
+        ));
+        plan.push((
+            "tools/call".to_string(),
+            json!({ "name": "search_docs", "arguments": { "query": "C-CONV" } }),
+            "structuredContent",
+            0,
+        ));
+        plan.push((
+            "tools/call".to_string(),
+            json!({ "name": "get_section", "arguments": { "section_id": "api-guidelines/about#rust-api-guidelines" } }),
+            "structuredContent",
+            0,
+        ));
+        plan.push((
+            "tools/call".to_string(),
+            json!({ "name": "get_api_checklist", "arguments": { "category": "Naming" } }),
+            "structuredContent",
+            0,
+        ));
+        plan.push((
+            "resources/read".to_string(),
+            json!({ "uri": CATALOG_URI }),
+            "contents",
+            0,
+        ));
+        plan.push((
+            "resources/read".to_string(),
+            json!({ "uri": &section_uri }),
+            "contents",
+            0,
+        ));
+    }
+    plan
+}
+
+/// [175] AC4: large, multi-section guidance inputs drain under a concurrent burst
+/// and the session still cancels cleanly. See the section header above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_large_guidance_burst_responds_and_shuts_down_cleanly() {
+    use std::collections::HashMap;
+    use tokio::io::AsyncReadExt;
+    use tokio::time::Instant;
+
+    let data_dir = fresh_data_dir();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rust-docs-mcp"))
+        .arg("serve")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("the test harness must be able to launch the `serve` binary");
+
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let deadline = Instant::now() + BUDGET;
+
+    // A stderr drain runs the whole time, so a full stderr buffer can never make
+    // the child block on a diagnostic while we are reading stdout.
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf).await;
+        buf
+    });
+
+    // (0) The initialize handshake + `notifications/initialized`, so the runtime
+    //     (and the once-built snapshot index) is up before the burst.
+    write_request(
+        &mut stdin,
+        0,
+        "initialize",
+        &json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": { "name": "stdio-mcp-large-guidance-test", "version": "0.0.1" },
+        }),
+    )
+    .await;
+    write_notify(&mut stdin, "notifications/initialized").await;
+    let init = read_response_until(&mut reader, 0, deadline).await;
+    assert_eq!(
+        init.get("result")
+            .and_then(|result| result.get("protocolVersion"))
+            .and_then(Value::as_str),
+        Some(PROTOCOL_VERSION),
+        "the handshake must echo the negotiated protocol version"
+    );
+
+    // (1) The large-guidance pipelined burst: the worst command at the largest
+    //     valid page, interleaved with the other tools and both resources, every
+    //     frame written back to back with no response read in between.
+    let plan = large_guidance_plan();
+    let frames: Vec<String> = plan
+        .iter()
+        .enumerate()
+        .map(|(i, (method, params, _, _))| request_frame(i as u64 + 1, method, params))
+        .collect();
+    let expected_ids: Vec<u64> = (1..=plan.len() as u64).collect();
+    let expected_key: HashMap<u64, &str> = plan
+        .iter()
+        .enumerate()
+        .map(|(i, (_, _, key, _))| (i as u64 + 1, *key))
+        .collect();
+    let expected_min_sections: HashMap<u64, u64> = plan
+        .iter()
+        .enumerate()
+        .map(|(i, (_, _, _, min))| (i as u64 + 1, *min))
+        .collect();
+
+    // The writer holds stdin open until the burst (and any continuation) is fully
+    // answered, so EOF (dropping stdin) happens only *after* — never mid-flight —
+    // and the "clean exit" below is a clean disconnect, not a truncation of
+    // in-flight work. Post-burst frames (the continuation) are handed to the
+    // writer through `act_tx`: `Some(frame)` writes it, `None` is the EOF signal.
+    let (act_tx, mut act_rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
+    let writer = tokio::spawn(async move {
+        for frame in &frames {
+            stdin
+                .write_all(frame.as_bytes())
+                .await
+                .expect("writing a pipelined request to the child's stdin must not fail");
+            stdin
+                .flush()
+                .await
+                .expect("flushing the child's stdin must not fail");
+        }
+        while let Some(action) = act_rx.recv().await {
+            match action {
+                Some(frame) => {
+                    stdin
+                        .write_all(frame.as_bytes())
+                        .await
+                        .expect("writing the continuation to the child's stdin must not fail");
+                    stdin
+                        .flush()
+                        .await
+                        .expect("flushing the child's stdin must not fail");
+                }
+                None => break, // EOF: fall out, dropping stdin closes the session.
+            }
+        }
+    });
+
+    // (2) Read every burst response, matching by id, asserting each is a JSON-RPC
+    //     2.0 success of its expected shape — no mixing, no corruption, nothing
+    //     lost while many large requests are in flight.
+    let mut got: HashMap<u64, Value> = HashMap::new();
+    while expected_ids.iter().any(|id| !got.contains_key(id)) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            panic!(
+                "timed out waiting for the large-guidance burst: got {}/{} responses",
+                got.len(),
+                plan.len()
+            );
+        }
+        let mut line = String::new();
+        match tokio::time::timeout(remaining, reader.read_line(&mut line)).await {
+            Ok(Ok(0)) => panic!(
+                "the server closed stdout before answering the burst \n                 \
+                 (got {}/{} responses) — a disconnected server",
+                got.len(),
+                plan.len()
+            ),
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => panic!("reading the child's stdout failed: {error}"),
+            Err(_) => panic!("timed out waiting for the burst responses"),
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(trimmed).expect("every stdout line must be JSON");
+        assert_eq!(
+            value.get("jsonrpc").and_then(Value::as_str),
+            Some("2.0"),
+            "a non-JSON-RPC object leaked onto stdout: {trimmed}"
+        );
+        if let Some(id) = value.get("id").and_then(Value::as_u64) {
+            assert!(
+                got.insert(id, value).is_none(),
+                "the server sent a duplicate response for id {id}"
+            );
+        }
+    }
+
+    // Every burst response is a success of its expected shape, and the large
+    // guidance payloads actually carry many sections (a fast empty / one-section
+    // page must never masquerade as the large input).
+    for (id, response) in &got {
+        assert!(
+            response.get("error").is_none(),
+            "burst request {id} must succeed, not error: {response}"
+        );
+        let key = expected_key[id];
+        let result = response
+            .get("result")
+            .and_then(|result| result.get(key))
+            .expect("burst response must carry its result");
+        if let Some(min) = expected_min_sections.get(id).filter(|min| **min > 0) {
+            // For a guidance response `key` is `structuredContent`, so `result`
+            // is already that object and its `sections` array is the payload.
+            let sections = result
+                .get("sections")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| {
+                    panic!("large guidance response {id} must carry a `sections` array")
+                });
+            assert!(
+                sections.len() >= *min as usize,
+                "large guidance response {id} carried only {} section(s) — expected >= {min} \
+                 (a fast empty/short page must not stand in for the large payload)",
+                sections.len()
+            );
+        }
+    }
+
+    // (3) Continuation of a large guidance input: resume a *guidance* page's
+    //     `next_cursor` through the same shared index (issue #175), so it returns
+    //     the remaining cited sections as a second large page. The continuation
+    //     frame is a `get_command_guidance` call, whose continuation cursor is
+    //     minted under `Operation::Catalog`; the server rejects a cursor whose
+    //     operation does not match the current one, so the cursor must come from
+    //     one of the burst's *guidance* responses — not from another tool that
+    //     also carries a cursor (e.g. `get_api_checklist`, `Operation::Checklist`).
+    //     The guidance entries are exactly the plan entries that demand the large
+    //     `min_sections` payload, so filtering on that identifies them precisely.
+    let guidance_ids: Vec<u64> = plan
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (_, _, _, min))| (*min > 0).then_some(i as u64 + 1))
+        .collect();
+    let next_cursor = got
+        .iter()
+        .filter(|(id, _)| guidance_ids.contains(id))
+        .find_map(|(_, response)| {
+            response
+                .get("result")
+                .and_then(|r| r.get("structuredContent"))
+                .and_then(|sc| sc.get("next_cursor"))
+                .filter(|c| !c.is_null())
+        })
+        .expect("at least one large guidance page must carry a continuation cursor")
+        .clone();
+    // Hand the continuation frame to the writer so it is written with stdin still
+    // open (the burst is fully drained before the continuation, which is before
+    // EOF); the writer then writes it and flushes.
+    act_tx
+        .send(Some(request_frame(plan.len() as u64 + 1, "tools/call", &json!({
+            "name": "get_command_guidance",
+            "arguments": { "command": WORST_GUIDANCE_COMMAND, "limit": LARGE_GUIDANCE_LIMIT, "cursor": next_cursor },
+        }))))
+        .expect("the writer task must still be alive to take the continuation frame");
+    let continuation_response =
+        read_response_until(&mut reader, plan.len() as u64 + 1, deadline).await;
+    assert!(
+        continuation_response.get("error").is_none(),
+        "the large-guidance continuation must succeed, not error: {continuation_response}"
+    );
+    let cont_sections = continuation_response
+        .get("result")
+        .and_then(|r| r.get("structuredContent"))
+        .and_then(|sc| sc.get("sections"))
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("the continuation must carry a `sections` array"));
+    assert!(
+        !cont_sections.is_empty(),
+        "the large-guidance continuation must return the remaining cited sections"
+    );
+
+    // (4) EOF: tell the writer to close stdin, then confirm the graceful, successful
+    //     self-exit with no orphaned process — even after the large burst.
+    act_tx
+        .send(None)
+        .expect("the writer task must still be alive to take the EOF signal");
+    writer
+        .await
+        .expect("the pipelined writer task must not panic");
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            panic!("timed out draining the child's stdout after the burst");
+        }
+        let mut line = String::new();
+        match tokio::time::timeout(remaining, reader.read_line(&mut line)).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => panic!("reading the child's stdout failed: {error}"),
+            Err(_) => panic!("timed out draining the child's stdout after the burst"),
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value =
+            serde_json::from_str(trimmed).expect("every tail stdout line must be JSON");
+        assert_eq!(
+            value.get("jsonrpc").and_then(Value::as_str),
+            Some("2.0"),
+            "a non-JSON-RPC object leaked onto the tail of stdout: {trimmed}"
+        );
+    }
+
+    let status = match tokio::time::timeout(BUDGET, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => panic!("waiting on the child failed: {error}"),
+        Err(_) => panic!("the child did not exit within {BUDGET:?} — a likely orphan"),
+    };
+    assert!(
+        status.success(),
+        "after a clean EOF disconnect the server must exit successfully, got {status:?}"
+    );
+
+    // No orphaned *or* panicked work on the diagnostic stream.
+    let stderr_bytes = stderr_task.await.expect("the stderr drain must finish");
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    assert!(
+        !stderr.contains("panic"),
+        "the server must not panic on EOF/cancellation; stderr: {stderr}"
+    );
+}

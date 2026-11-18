@@ -183,10 +183,36 @@ pub fn get_section(
     as_of: Instant,
     threshold: StaleThreshold,
 ) -> Result<SectionRead, ReadError> {
-    // Resolve the id through the tested in-memory index. `build` never fails on
-    // an empty corpus — it simply yields an empty index, so an absent id (the
-    // only miss) maps to `UnknownSection`, and the read never panics.
-    let section = SectionIndex::build(manifest)
+    // The self-contained contract builds the index per call; a long-running
+    // server reuses one index through `get_section_indexed` (issue #175).
+    let index = SectionIndex::build(manifest);
+    get_section_indexed(&index, manifest, section_id, as_of, threshold)
+}
+
+/// Resolve a server-issued [`SectionId`] to its full record, snapshot identity,
+/// and the owning source's freshness, **reusing a pre-built [`SectionIndex`]**
+/// instead of building one per call (issue #175).
+///
+/// This is the shared-index counterpart of [`get_section`]: it takes the index
+/// the server built once at snapshot activation and resolves the id through it
+/// (`index.get`), composes freshness from the owning source via
+/// [`find_source`], and returns the identical [`SectionRead`] [`get_section`]
+/// would. A fixed index plus manifest plus inputs yield the same result, so the
+/// content, citations, freshness, and snapshot identity are equivalent to the
+/// per-call path — only the (redundant) index build is avoided. It is total and
+/// pure: an id absent from the index is [`ReadError::UnknownSection`], never a
+/// panic.
+pub fn get_section_indexed(
+    index: &SectionIndex,
+    manifest: &SnapshotManifest,
+    section_id: &SectionId,
+    as_of: Instant,
+    threshold: StaleThreshold,
+) -> Result<SectionRead, ReadError> {
+    // Resolve the id through the shared index. It never fails on an empty corpus
+    // — it simply yields no hit, so an absent id (the only miss) maps to
+    // `UnknownSection`, and the read never panics.
+    let section = index
         .get(section_id)
         .cloned()
         .ok_or(ReadError::UnknownSection(section_id.clone()))?;
@@ -232,6 +258,26 @@ pub fn get_api_checklist(
     manifest: &SnapshotManifest,
     category: Option<&str>,
 ) -> Result<ChecklistRead, ReadError> {
+    // The self-contained contract builds the index per call; a long-running
+    // server reuses one index through `get_api_checklist_indexed` (issue #175).
+    let index = SectionIndex::build(manifest);
+    get_api_checklist_indexed(&index, manifest, category)
+}
+
+/// Resolve an upstream checklist `category` to its entries (or all when
+/// omitted), **reusing a pre-built [`SectionIndex`]** to verify every entry's
+/// explanation sections resolve, instead of building one per call (issue #175).
+///
+/// This is the shared-index counterpart of [`get_api_checklist`]: the same
+/// category filter and the same dangling-explanation guard, but the per-id
+/// lookups run through the index the server built once. A fixed index plus
+/// manifest plus `category` yield the same [`ChecklistRead`] (or the same
+/// [`ReadError`]) as the per-call path — only the redundant build is avoided.
+pub fn get_api_checklist_indexed(
+    index: &SectionIndex,
+    manifest: &SnapshotManifest,
+    category: Option<&str>,
+) -> Result<ChecklistRead, ReadError> {
     // Filter by category (exact match on the upstream category string), or take
     // every entry when the category is omitted. `&str` is `Copy`, so `category`
     // stays usable for the unknown-category check below.
@@ -256,8 +302,7 @@ pub fn get_api_checklist(
 
     // Verify every matched entry's explanations resolve. An empty corpus has no
     // resolvable section, so any entry that names an explanation is dangling.
-    // Building the index once amortizes the per-id lookups.
-    let index = SectionIndex::build(manifest);
+    // The shared index amortizes the per-id lookups without a per-call build.
     for entry in &filtered {
         for reference in &entry.explanation_sections {
             if index.get(reference).is_none() {
