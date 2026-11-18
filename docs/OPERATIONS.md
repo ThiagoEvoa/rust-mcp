@@ -155,20 +155,20 @@ not prevent offline use."*).
 ```text
 rust-docs-mcp status:
   snapshot: rust-docs-bundled-seed
-  source(s): 8, section(s): 8
+  source(s): 8, section(s): 877
   freshness threshold: 7 day(s) (default)
   as_of: <as_of> (seconds since the Unix epoch)
   [api-guidelines] Rust API Guidelines
     last checked: unknown
     fetched:      2026-10-30T00:00:00Z
     upstream:     unknown
-    content:      c128-ffa5092e1f9db0151650f6e19369b606
+    content:      c128-ffa6caa702a86473fe801b0bcb02d958
     stale:        unknown
   [style-guide] Rust Style Guide
     ...
 ```
 
-(Real output, 2026-11-13; the per-run tracing prefix
+(Real output, re-captured 2026-11-18 over the current seed; the per-run tracing prefix
 `<timestamp> <level> ... rust-docs-mcp: ` is omitted for readability, the `as_of`
 value is the per-run wall clock and varies between runs, and the report
 continues with one block per source.) Three **distinct** times travel with each
@@ -195,7 +195,7 @@ plan's seven-day default (`plan.md` §5: *"make the threshold configurable"*):
 ```text
 rust-docs-mcp status:
   snapshot: rust-docs-bundled-seed
-  source(s): 8, section(s): 8
+  source(s): 8, section(s): 877
   freshness threshold: 14 day(s) (configured)
   ...
 ```
@@ -258,7 +258,7 @@ to the embedded bundled snapshot**, so an empty `--data-dir` still serves offlin
 $ ./target/release/rust-docs-mcp status --data-dir /tmp/empty   # no local snapshot yet
 rust-docs-mcp status:
   snapshot: rust-docs-bundled-seed
-  source(s): 8, section(s): 8
+  source(s): 8, section(s): 877
   freshness threshold: 7 day(s) (default)
   ...
 # exit 0 — served from the bundled fallback

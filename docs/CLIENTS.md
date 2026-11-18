@@ -166,10 +166,15 @@ client actually writes are:
 
 // (1) AC2(1) — list the sources
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_sources","arguments":{}}}
-// (2) AC2(2) — search (a query that returns hits)
+// (2) AC2(2) — search (a query that returns hits; the top hit is the C-CONV rule)
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_docs","arguments":{"query":"C-CONV"}}}
-// (3) AC2(3) — retrieve a section (with its citation/provenance)
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_section","arguments":{"section_id":"api-guidelines/about"}}}
+// (3) AC2(3) — retrieve the section the search returns (with its citation/provenance).
+//     The id is the *top "C-CONV" hit* the search returns — the ad-hoc-conversions
+//     naming rule — not the bare `api-guidelines/about` (that bare id no longer
+//     exists in the hierarchical snapshot, so `get_section` returns the not-found
+//     error — `-32002` at the negotiated `2025-11-25` — proven by
+//     `tests/stdio_mcp.rs`; see also §3.3 (3)).
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_section","arguments":{"section_id":"api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv"}}}
 ```
 
 The client matches each response to its request by `id` (the server may answer
@@ -179,37 +184,61 @@ out of order — a real JSON-RPC client must tolerate that, as
 ### 3.3 The real captured transcript
 
 The three blocks below are the **`structuredContent` view** of each response —
-the machine-readable payload under `result.structuredContent` (verified
-2026-11-13, reproduced by `tests/first_client.rs`, §4). The `result` envelope's
-`content` (human-readable text) and `isError` fields are omitted, and the
+the machine-readable payload under `result.structuredContent` (re-captured for the
+current seed, 2026-11-18, reproduced by `tests/first_client.rs`, §4). The `result`
+envelope's `content` (human-readable text) and `isError` fields are omitted, and the
 `structuredContent` object is shown directly. For `get_section` that object nests
 the section under a `section` key, with the `schema_version` and `truncated`
-fields as its siblings.
+fields as its siblings. **Distinguishing the two kinds of material in this section:**
+the request *frames* in §3.2 and the one-liner in §4 are **stable machine
+operations** (paste them and they resolve against the current seed); the blocks
+here are a **captured example transcript** of one real session, re-captured when the
+seed corpus changed, and are not themselves a copy-paste contract.
 
 **(1) `list_sources`** — returns the **eight canonical sources** and the active
-**snapshot id** (`rust-docs-bundled-seed`), plus the command-catalog keys:
+**snapshot id** (`rust-docs-bundled-seed`), the 29-key **command catalog**, and a
+**`corpus_hash`** computed over the serialized manifest (there is no such field in
+the manifest itself — `list_sources`/`catalog` compute it; see
+[`docs/REGENERATION.md`](REGENERATION.md) §2.2). The `sources` array carries the
+per-source `content_hash` (now **source-specific**), `document_count`,
+`section_count`, `channel`, `parser`, and `entry_url`:
 
 ```json
 {
-  "snapshot_id": "rust-docs-bundled-seed",
-  "corpus_hash": "c128-ffa5bd3f0f1f20f58aa06f48bb8e42c7",
+  "command_catalog_uri": "rust-docs://snapshots/rust-docs-bundled-seed/commands",
+  "corpus_hash": "c128-ffaf654d6d447eb40b9e9629be845a92",
   "schema_version": "1",
-  "commands": ["cargo build", "cargo test", "rustup show"],
+  "snapshot_id": "rust-docs-bundled-seed",
+  "commands": [
+    "cargo new", "cargo init", "cargo metadata", "cargo locate-project",
+    "cargo tree", "cargo add", "cargo remove", "cargo update",
+    "… 29 command-catalog keys in total …",
+    "cargo build", "cargo test", "rustup show", "rustup toolchain",
+    "rustc", "rustfmt", "rustdoc"
+  ],
   "sources": [
-    { "id": "api-guidelines", "title": "Rust API Guidelines", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "content_hash": "c128-ffa5092e1f9db0151650f6e19369b606" },
-    { "id": "style-guide",    "title": "Rust Style Guide",     "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "content_hash": "c128-ffa5092e1f9db0151650f6e19369b606" },
-    { "id": "cargo",          "title": "The Cargo Book",       "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "content_hash": "c128-ffa5092e1f9db0151650f6e19369b606" },
-    { "id": "rustc",          "title": "The rustc Book",       "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "content_hash": "c128-ffa5092e1f9db0151650f6e19369b606" },
-    { "id": "rustup",         "title": "The rustup Book",      "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "content_hash": "c128-ffa5092e1f9db0151650f6e19369b606" },
-    { "id": "rustfmt",        "title": "rustfmt reference",    "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "content_hash": "c128-ffa5092e1f9db0151650f6e19369b606" },
-    { "id": "clippy",         "title": "Clippy",               "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "content_hash": "c128-ffa5092e1f9db0151650f6e19369b606" },
-    { "id": "rustdoc",        "title": "The rustdoc Book",     "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "content_hash": "c128-ffa5092e1f9db0151650f6e19369b606" }
+    { "id": "api-guidelines", "title": "Rust API Guidelines", "channel": "rolling", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 13, "section_count": 96, "content_hash": "c128-ffa6caa702a86473fe801b0bcb02d958", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://rust-lang.github.io/api-guidelines/about.html" },
+    { "id": "style-guide", "title": "Rust Style Guide", "channel": "stable", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 7, "section_count": 71, "content_hash": "c128-ffa596f39b95d538268ea3a933acba9d", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://doc.rust-lang.org/style-guide/index.html" },
+    { "id": "cargo", "title": "The Cargo Book", "channel": "stable", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 21, "section_count": 315, "content_hash": "c128-ffa6d93dcb18fde78b2ef7926b4861b6", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://doc.rust-lang.org/cargo/" },
+    { "id": "rustc", "title": "The rustc Book", "channel": "stable", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 1, "section_count": 46, "content_hash": "c128-ffa55d2e9ca927751cfbcc7794137903", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://doc.rust-lang.org/rustc/" },
+    { "id": "rustup", "title": "The rustup Book", "channel": "rolling", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 7, "section_count": 26, "content_hash": "c128-ffa5ff983cff5cbc92f95a7ce7f3c250", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://rust-lang.github.io/rustup/" },
+    { "id": "rustfmt", "title": "rustfmt reference", "channel": "stable", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 2, "section_count": 277, "content_hash": "c128-ffa5483e8818922ce73e4a6f383a9380", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://github.com/rust-lang/rustfmt#readme" },
+    { "id": "clippy", "title": "Clippy", "channel": "stable", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 1, "section_count": 9, "content_hash": "c128-ffa5067277597fa1db7e098805bd3ead", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://doc.rust-lang.org/clippy/" },
+    { "id": "rustdoc", "title": "The Rustdoc Book", "channel": "stable", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 1, "section_count": 37, "content_hash": "c128-ffa64cec68c7765563660336e199955c", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://doc.rust-lang.org/rustdoc/" }
   ]
 }
 ```
 
-**(2) `search_docs` for `"C-CONV"`** — returns a **ranked hit** that carries a
-**`citations`** array (each citation names its `source`):
+(The `commands` array is elided in the middle for readability — it carries all
+**29** command-catalog keys; the `entry_url` for `rustfmt` points at its approved
+raw-Markdown source at the pinned revision, per the rustfmt adapter. Per-source
+object fields are also shown in a readable order; the real `structuredContent`
+keys them alphabetically.)
+
+**(2) `search_docs` for `"C-CONV"`** — returns a **ranked** set of hits; the
+**top hit** (shown below) is the **C-CONV naming rule** itself, and it carries a
+**`citations`** array (each citation names its `source`). The query returns **3**
+hits total (`limit` 5, `truncated` false); the client reads the top hit:
 
 ```json
 {
@@ -218,53 +247,64 @@ fields as its siblings.
   "truncated": false,
   "hits": [
     {
-      "section_id": "api-guidelines/about",
+      "section_id": "api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv",
       "source": "api-guidelines",
-      "title": "The API Guidelines",
-      "score": 2.864784293464422,
-      "excerpt": "…lp an API author write an API that is easy to use and hard to misuse. Each guideline carries a stable code (for example C-CONV) and is enforced in practice by Clippy lints.",
+      "title": "Rust API Guidelines",
+      "score": 4.887109854836241,
+      "excerpt": "## Ad-hoc conversions follow as_, to_, into_ conventions (C-CONV) Conversions should be provided as methods, with names prefixed as follows: | Prefix | Cost | Ownership | |---|---|---| | as_ | Free | borrowed -> borrowed | | to_ | Expensi…",
       "citations": [
-        { "source": "api-guidelines", "section_id": "api-guidelines/about", "title": "The API Guidelines", "url": "https://rust-lang.github.io/api-guidelines/about.html", "note": "canonical upstream document" },
-        { "source": "api-guidelines", "section_id": "api-guidelines/about", "note": "guideline code: C-CONV" }
+        { "source": "api-guidelines", "section_id": "api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv", "title": "Rust API Guidelines", "url": "https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv", "note": "canonical upstream document" },
+        { "source": "api-guidelines", "section_id": "api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv", "note": "guideline code: C-CONV" }
       ]
-    }
+    },
+    "… 2 more hits elided for readability (see the full transcript via RUST_DOCS_MCP_TRANSCRIPT, §4) …"
   ]
 }
 ```
 
-**(3) `get_section` for `"api-guidelines/about"`** — returns the section **with
-its provenance**: the body, its `canonical_url`, and a **`citations`** array:
+**(3) `get_section` for the top hit, `"api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv"`** —
+returns that **exact** section **with its provenance**: the body, its
+`canonical_url`, its `heading_path`, and a **`citations`** array. This is the
+section the search returned, so the search-to-section step is a **true chain**
+(search returns the id → the client passes that same id to `get_section`):
 
 ```json
 {
   "schema_version": "1",
   "section": {
-    "id": "api-guidelines/about",
+    "id": "api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv",
     "source": "api-guidelines",
-    "doc_title": "The API Guidelines",
+    "doc_title": "Rust API Guidelines",
     "snapshot_id": "rust-docs-bundled-seed",
-    "content_hash": "c128-ffa531f24bfdd996c9ef3d1a076dd56a",
+    "content_hash": "c128-ffa51d275f6a20c3c6d4a02b1a369f52",
     "freshness": "unknown",
-    "canonical_url": "https://rust-lang.github.io/api-guidelines/about.html",
-    "chapter_path": "about",
-    "body": "The Rust API Guidelines are recommendations for the design, documentation, and testing of Rust APIs. They help an API author write an API that is easy to use and hard to misuse. Each guideline carries a stable code (for example C-CONV) and is enforced in practice by Clippy lints.",
+    "canonical_url": "https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv",
+    "chapter_path": "naming",
+    "heading_path": ["Naming", "Ad-hoc conversions follow as_, to_, into_ conventions (C-CONV)"],
+    "body": "## Ad-hoc conversions follow as_, to_, into_ conventions (C-CONV)\n\nConversions should be provided as methods, with names prefixed as follows:\n\n| Prefix | Cost | Ownership |\n|---|---|---|\n| as_ | Free | borrowed -> borrowed |\n… (full body; the as_/to_/into_ prefix table and its standard-library examples) …",
     "citations": [
-      { "source": "api-guidelines", "section_id": "api-guidelines/about", "title": "The API Guidelines", "url": "https://rust-lang.github.io/api-guidelines/about.html", "note": "canonical upstream document" },
-      { "source": "api-guidelines", "section_id": "api-guidelines/about", "note": "guideline code: C-CONV" }
+      { "source": "api-guidelines", "section_id": "api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv", "title": "Rust API Guidelines", "url": "https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv", "note": "canonical upstream document" },
+      { "source": "api-guidelines", "section_id": "api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv", "note": "guideline code: C-CONV" }
     ]
   },
   "truncated": false
 }
 ```
 
+(The `body` is elided in the middle for readability; the full body — the
+`as_`/`to_`/`into_` prefix table and its standard-library examples — is served
+in full. The two citations are the canonical upstream document and the
+`guideline code: C-CONV` marker that ties the section to the `C-CONV` checklist
+entry.)
+
 Together these satisfy AC2 end to end: the client **lists the sources**
-(`list_sources`, eight sources + the snapshot id), **searches** (`search_docs`,
-a query that returns a cited hit), and **retrieves a section with a citation**
-(`get_section`, the section body plus its `canonical_url` and `citations`). The
-`search_docs` hit and the `get_section` result are the *same* section — the
-hit's citation points at the exact section the client then reads in full — so
-the search-to-section workflow the M5 exit requires works over the tested
-configuration.
+(`list_sources`, eight sources + the snapshot id + the 29 command-catalog keys),
+**searches** (`search_docs`, a query that returns cited hits — the top hit is the
+C-CONV naming rule), and **retrieves a section with a citation** (`get_section`,
+the section body plus its `canonical_url` and `citations`). The `search_docs` top
+hit and the `get_section` result are the *same* section — the hit's id is exactly
+what the client passes to `get_section` — so the search-to-section workflow the
+M5 exit requires works over the tested configuration.
 
 ---
 
@@ -275,9 +315,11 @@ The automated, hermetic proof of exactly these three operations is
 (`first_client_configuration_lists_searches_and_retrieves_with_citations`). It
 spawns the real `rust-docs-mcp serve` binary over OS stdio, completes the
 `initialize` handshake, and asserts all three AC2 operations (eight sources +
-snapshot id; a `C-CONV` search with a non-empty citation array; an
-`api-guidelines/about` section with a non-empty citation array and a
-`canonical_url`), then a clean self-exit. It uses only the existing `tokio` and
+the snapshot id + the 29 command-catalog keys; a `C-CONV` search whose **top hit**
+carries a non-empty citation array; and that top hit —
+`api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv` —
+retrieved with a non-empty citation array and a `canonical_url`), then a clean
+self-exit. It uses only the existing `tokio` and
 `serde_json` dependencies — **no new dependency, no network** — and a per-test
 temp `--data-dir`, so it is offline.
 
@@ -312,7 +354,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_sources","arguments":{}}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_docs","arguments":{"query":"C-CONV"}}}' \
-  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_section","arguments":{"section_id":"api-guidelines/about"}}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_section","arguments":{"section_id":"api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv"}}}' \
   | /Users/thiagoevoa/Projects/rust-mcp/target/release/rust-docs-mcp serve --data-dir /tmp/rust-docs-mcp-client-demo
 ```
 
@@ -329,16 +371,47 @@ required; the server needs no network, LLM, API key, or telemetry to start.
 
 ---
 
-## 6. Real-world clients — still to test
+## 6. Real-world clients — the tested external SDK and the remaining gap
 
-No **real-world / external** MCP client (a coding agent, the MCP Inspector, or a
-non-`rmcp` implementation such as a TypeScript/Python client) has been launched
-against this server yet. Each remains **STILL TO TEST** — carrying forward
-[`docs/COMPATIBILITY.md`](COMPATIBILITY.md) §10.5 — and the first such trial is
-owed by a later M5 task. Until then, the verified compatibility claim is scoped
-to: **the SDK's own `serve` server + a raw JSON-RPC 2.0 client over stdio,
-across all five advertised protocol versions, exercising all five tools and both
-resources.** A real external-client run is **not** claimed here.
+The **verified, test-backed** compatibility claim stays scoped to **the SDK's own
+`serve` server + a raw JSON-RPC 2.0 client over stdio, across all five advertised
+protocol versions, exercising all five tools and both resources** (the as-built
+first client of §1/§3, asserted by `tests/first_client.rs` and
+`tests/stdio_mcp.rs`). That is the only client whose behavior a test in this
+repository asserts.
+
+**One external-SDK audit is recorded.** On **2026-11-16**, against the then-current
+`main` (`6a7880b`; macOS arm64; `rustc`/`cargo` 1.100.0), the **official Python
+MCP SDK 2.3.0** independently exercised the running binary: **all five tools
+(`list_sources`, `search_docs`, `get_section`, `get_api_checklist`,
+`get_command_guidance`) succeeded**, while the **advertised section resource failed
+on resource discovery** (`resources/list` / `resources/read` of a concrete section
+URI). That failure is the one known limitation of this audit, recorded here
+*instead of* as a claim of general client support. (The audit's combination —
+Python MCP SDK 2.3.0, the installed binary at `6a7880b`, macOS arm64, Cargo
+1.100.0 — is the exact configuration tested; the numbers and pass/fail above are
+that audit's results, not a fresh run.)
+
+**That resource-discovery limitation is now resolved on current `main`.** Issue
+[#172](https://github.com/ThiagoEvoa/rust-mcp/issues/172) / PR #180 made the
+advertised section resources real: over stdio, `resources/list` now returns
+`rust-docs://catalog` plus paginated concrete section URIs, and `resources/read` of
+a concrete section URI (e.g.
+`rust-docs://snapshots/rust-docs-bundled-seed/sections/<section-id>`) returns the
+section JSON. Verified directly against the current seed (2026-11-18): a
+`resources/read` of `rust-docs://catalog` and of a concrete section URI both
+succeed. The audit's failure was against the older `6a7880b` binary, *before* that
+fix — it is not a current-`main` failure, and this document does not claim the
+reverse.
+
+**Environment limitation for a re-run.** The exact SDK 2.3.0 audit **cannot be
+reproduced in this environment**: it is Python 3.14.10 with **no `mcp` package
+installed**, so the SDK 2.3.0 client cannot be launched here. This is an
+environment limitation, not a claim that the audit was re-run: **no SDK 2.3.0
+re-run is asserted**, and **general client support is not claimed** — the verified client remains the raw JSON-RPC 2.0 stdio client of §1/§3. A separate
+non-`rmcp` implementation (a coding agent, the MCP Inspector, a TypeScript
+client) remains **STILL TO TEST**, carrying forward
+[`docs/COMPATIBILITY.md`](COMPATIBILITY.md) §10.5.
 
 ---
 
