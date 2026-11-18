@@ -65,7 +65,7 @@ pub const SNAPSHOT_ID: &str = "rust-docs-bundled-seed";
 
 /// The fixed point in time the seed was assembled. Fixed so the bundle is
 /// deterministic across builds; the live `sync` pipeline stamps a real time.
-const CREATED_AT: &str = "2026-10-30T00:00:00Z";
+const CREATED_AT: &str = "2026-11-18T00:00:00Z";
 
 /// The sources a documented bundling exception (`docs/LICENSING.md` §5)
 /// currently excludes from the bundle because they cannot be bundled.

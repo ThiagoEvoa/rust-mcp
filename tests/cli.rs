@@ -181,16 +181,50 @@ fn inspect_reports_the_active_corpus_not_the_fixtures() {
         stderr.contains("verdict=complete"),
         "a complete corpus must report a complete verdict:\n{stderr}"
     );
-    // The section count is the *loaded corpus* count (the faithful seed's 877
+    // The section count is the *loaded corpus* count (the faithful seed's 910
     // sections), not the 4-fixture count the bug reported.
     assert!(
-        stderr.contains("sections=877"),
+        stderr.contains("sections=910"),
         "inspect must report the loaded corpus section count, not a fixture count:\n{stderr}"
     );
     assert!(
         !stderr.contains("extraction fidelity (sections=4)"),
         "inspect must not report the 4-fixture count as the corpus:\n{stderr}"
     );
+}
+
+#[test]
+fn reports_remain_visible_when_logging_is_off() {
+    let dir = temp_data_dir("logging-off");
+    for (command, report) in [
+        ("status", "rust-docs-mcp status:"),
+        ("inspect", "verdict=complete"),
+    ] {
+        let out = Command::new(binary())
+            .args([command, "--data-dir", &dir])
+            .env("RUST_LOG", "off")
+            .output()
+            .expect("run operator command");
+        assert!(out.status.success());
+        assert!(out.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&out.stderr).contains(report));
+    }
+}
+
+#[test]
+fn status_reports_why_it_uses_the_bundled_snapshot() {
+    let dir = temp_data_dir("status-fallback");
+    let (_, _, fresh) = run(&["status", "--data-dir", &dir]);
+    assert!(fresh.contains("bundled fallback: no local snapshot present"));
+
+    let corpus = PathBuf::from(&dir).join("corpus");
+    std::fs::create_dir_all(&corpus).expect("create corpus directory");
+    std::fs::write(corpus.join("manifest.json"), "broken JSON").expect("write an invalid snapshot");
+    let (code, stdout, corrupt) = run(&["status", "--data-dir", &dir]);
+    std::fs::remove_dir_all(dir).expect("remove scratch corpus");
+    assert_eq!(code, 0);
+    assert!(stdout.is_empty());
+    assert!(corrupt.contains("bundled fallback: local snapshot present but invalid"));
 }
 
 /// Task [004] acceptance #2: diagnostics are routed to stderr even when the

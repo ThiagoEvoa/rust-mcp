@@ -252,5 +252,63 @@ terminating position.</p>
 }
 </code></pre>
 </div><div class="lint-additional-info"><div>Applicability: <span class="label applicability">MachineApplicable</span><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_lint_defs/enum.Applicability.html#variants">(?)</a></div><div>Added in: <span class="label label-version">pre 1.29.0</span></div><a href="https://github.com/rust-lang/rust-clippy/issues?q=is%3Aissue+needless_return">Related Issues</a><a href="https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/returns.rs#L1">View Source</a></div></div></article>
+<article id="manual_let_else"><input id="label-manual_let_else" type="checkbox"><label for="label-manual_let_else"><h2 class="lint-title"><div class="panel-title-name" id="lint-manual_let_else">manual_let_else
+<a href="#manual_let_else" class="anchor label">&para;</a> <a href="" class="copy-to-clipboard anchor label">&#128203;</a></div><span class="label lint-group group-pedantic">pedantic</span> <span class="label lint-level level-allow">allow</span> <span class="label doc-folding"></span></h2></label><div class="lint-docs"><div class="lint-doc-md"><h3>What it does</h3>
+<p>Warn of cases where <code>let...else</code> could be used</p>
+<h3>Why is this bad?</h3>
+<p><code>let...else</code> provides a standard construct for this pattern
+that people can easily recognize. It’s also more compact.</p>
+<h3>Example</h3>
+<pre><code class="language-rust">let v = if let Some(v) = w { v } else { return };
+</code></pre>
+<p>Could be written:</p>
+<pre><code class="language-rust">let Some(v) = w else { return };
+</code></pre>
+<h3>Configuration</h3>
+<ul>
+<li>
+<p><code>matches-for-let-else</code>:  Whether the matches should be considered by the lint, and whether there should
+be filtering for common types.</p>
+<p>(default: <code>"WellKnownTypes"</code>)</p>
+</li>
+<li>
+<p><code>msrv</code>:  The minimum rust version that the project supports. Defaults to the <code>rust-version</code> field in <code>Cargo.toml</code></p>
+<p>(default: <code>current version</code>)</p>
+</li>
+</ul>
+</div><div class="lint-additional-info"><div>Applicability: <span class="label applicability">HasPlaceholders</span><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_lint_defs/enum.Applicability.html#variants">(?)</a></div><div>Added in: <span class="label label-version">1.67.0</span></div><a href="https://github.com/rust-lang/rust-clippy/issues?q=is%3Aissue+manual_let_else">Related Issues</a><a href="https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/manual_let_else.rs#L20">View Source</a></div></div></article>
+<article id="needless_borrow"><input id="label-needless_borrow" type="checkbox"><label for="label-needless_borrow"><h2 class="lint-title"><div class="panel-title-name" id="lint-needless_borrow">needless_borrow
+<a href="#needless_borrow" class="anchor label">&para;</a> <a href="" class="copy-to-clipboard anchor label">&#128203;</a></div><span class="label lint-group group-style">style</span> <span class="label lint-level level-warn">warn</span> <span class="label doc-folding"></span></h2></label><div class="lint-docs"><div class="lint-doc-md"><h3>What it does</h3>
+<p>Checks for address of operations (<code>&amp;</code>) that are going to
+be dereferenced immediately by the compiler.</p>
+<h3>Why is this bad?</h3>
+<p>Suggests that the receiver of the expression borrows
+the expression.</p>
+<h3>Known problems</h3>
+<p>The lint cannot tell when the implementation of a trait
+for <code>&amp;T</code> and <code>T</code> do different things. Removing a borrow
+in such a case can change the semantics of the code.</p>
+<h3>Example</h3>
+<pre><code class="language-rust">fn fun(_a: &amp;i32) {}
+
+let x: &amp;i32 = &amp;&amp;&amp;&amp;&amp;&amp;5;
+fun(&amp;x);
+</code></pre>
+<p>Use instead:</p>
+<pre><code class="language-rust">let x: &amp;i32 = &amp;5;
+fun(x);
+</code></pre>
+<h3>Past names</h3>
+<ul>
+<li>ref_in_deref</li>
+</ul>
+<h3>Configuration</h3>
+<ul>
+<li>
+<p><code>msrv</code>:  The minimum rust version that the project supports. Defaults to the <code>rust-version</code> field in <code>Cargo.toml</code></p>
+<p>(default: <code>current version</code>)</p>
+</li>
+</ul>
+</div><div class="lint-additional-info"><div>Applicability: <span class="label applicability">MachineApplicable</span><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_lint_defs/enum.Applicability.html#variants">(?)</a></div><div>Added in: <span class="label label-version">pre 1.29.0</span></div><a href="https://github.com/rust-lang/rust-clippy/issues?q=is%3Aissue+needless_borrow">Related Issues</a><a href="https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/dereference.rs#L84">View Source</a></div></div></article>
 </body>
 </html>

@@ -68,6 +68,8 @@ same option in every position):
 `serve`, **stdout carries only MCP protocol traffic** and every diagnostic — the
 `status`/`inspect`/`sync` reports, a `sync` failure, a startup error — is written
 to **stderr**. A client that parses stdout therefore never sees a diagnostic.
+Operator reports remain visible on stderr at any `RUST_LOG` level. Status
+and inspection also explain when they selected the bundled snapshot as a fallback.
 (`plan.md` §8/§9.)
 
 ---
@@ -155,7 +157,7 @@ not prevent offline use."*).
 ```text
 rust-docs-mcp status:
   snapshot: rust-docs-bundled-seed
-  source(s): 8, section(s): 877
+  source(s): 8, section(s): 910
   freshness threshold: 7 day(s) (default)
   as_of: <as_of> (seconds since the Unix epoch)
   [api-guidelines] Rust API Guidelines
@@ -195,7 +197,7 @@ plan's seven-day default (`plan.md` §5: *"make the threshold configurable"*):
 ```text
 rust-docs-mcp status:
   snapshot: rust-docs-bundled-seed
-  source(s): 8, section(s): 877
+  source(s): 8, section(s): 910
   freshness threshold: 14 day(s) (configured)
   ...
 ```
@@ -258,7 +260,7 @@ to the embedded bundled snapshot**, so an empty `--data-dir` still serves offlin
 $ ./target/release/rust-docs-mcp status --data-dir /tmp/empty   # no local snapshot yet
 rust-docs-mcp status:
   snapshot: rust-docs-bundled-seed
-  source(s): 8, section(s): 877
+  source(s): 8, section(s): 910
   freshness threshold: 7 day(s) (default)
   ...
 # exit 0 — served from the bundled fallback

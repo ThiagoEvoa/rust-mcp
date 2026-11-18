@@ -410,19 +410,11 @@ pub async fn sync(
                     let (inventory, diff) =
                         discover_inventory(client, &base_url, collection.id(), None).await?;
                     let mut urls = inventory.urls;
-                    // issue #184 (discovery-depth gap): the single-hop navigation
-                    // discovery stops at the source's index page — cargo stops at
-                    // `commands/index.html`, rustup at `concepts/index.html` — and
-                    // never books the per-command / per-concept sub-pages, so the
-                    // URL-derivation (`is_command_page` / `command_key_from_base_url`)
-                    // and the curated key map never run on them and the live command
-                    // catalog comes back empty. Book the curated sub-pages directly
-                    // — the cargo `commands/cargo-<sub>` reference and the rustup
-                    // `concepts/*` chapters — so the keys get stamped. An already-
-                    // discovered URL is deduplicated by the `seen` set below, so this
-                    // is a harmless no-op for a page the nav already reached.
+                    // Book the required reference and command pages explicitly.
+                    // Modern mdBook landing pages can omit the deeper sidebar
+                    // links from static HTML.
                     urls.extend(
-                        crate::ingest::bundle::command_subpage_urls(collection.id())
+                        crate::ingest::bundle::required_subpage_urls(collection.id())
                             .into_iter()
                             .filter_map(|u| reqwest::Url::parse(&u).ok()),
                     );
@@ -432,9 +424,11 @@ pub async fn sync(
                     // index, `overrides`, `cross-compilation` are all linked from
                     // the nav) must not be ingested twice — a duplicate URL emits
                     // duplicate section ids and fails `validate_snapshot`.
-                    let mut seen: std::collections::BTreeSet<String> =
-                        std::collections::BTreeSet::new();
-                    urls.retain(|u| seen.insert(u.as_str().to_string()));
+                    let mut seen = HashSet::new();
+                    urls.retain_mut(|url| {
+                        url.set_fragment(None);
+                        seen.insert(url.clone())
+                    });
                     (urls, diff)
                 }
             }
@@ -450,7 +444,7 @@ pub async fn sync(
         ingested.insert(collection.id().to_string(), ingested_source.clone());
         results.push(SyncSourceResult {
             id: collection.id().to_string(),
-            documents: urls.len(),
+            documents: ingested_source.urls.len(),
             sections: ingested_source.sections.len(),
             checklist_entries: ingested_source.checklist.len(),
             // [149] the command entries this source contributes to the unified
@@ -712,7 +706,10 @@ async fn merge_lint_catalog(
     // Record the catalog's capture before `fetched` may be consumed below.
     out.captured.push(capture_document(catalog_url, &fetched));
     match clippy::ingest_lint_catalog(&fetched) {
-        Ok(sections) => out.sections.extend(sections),
+        Ok(sections) => {
+            out.urls.push(fetched.final_url.clone());
+            out.sections.extend(sections);
+        }
         // An empty or unparseable catalog contributes no lint sections; the
         // completeness gate reports the gap rather than aborting here.
         Err(clippy::IngestError::EmptyCatalog) => {}

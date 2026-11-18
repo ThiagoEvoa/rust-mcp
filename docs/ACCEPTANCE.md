@@ -31,9 +31,9 @@ Plan sources: `plan.md` §10/M5 exit, §11 (validation and acceptance criteria),
 | --- | --- |
 | Snapshot id | `rust-docs-bundled-seed` |
 | Parser version | `rust-docs-mcp/seed-2` |
-| Sections | **877** |
+| Sections | **910** |
 | Sources | **8** (the full `registry`: api-guidelines, style-guide, cargo, rustc, rustup, rustfmt, clippy, rustdoc) |
-| Content fingerprint | `6c4b9cd87aa68f82` |
+| Content fingerprint | `6df37ce8add7cfa6` |
 
 The fingerprint is a deterministic FNV-1a digest over the snapshot id, parser
 version, and sorted section-id list, so it pins *which* corpus the numbers below
@@ -94,7 +94,7 @@ Captured on **macOS arm64**, **release** profile, `rustc 1.100.0`, over the
 prior **545-section** shipped corpus (`content_fingerprint` `154a1f248b149160`),
 with the harness asserting a **graceful self-exit**
 (no orphaned process) after each measurement. The shipped corpus has since grown
-to **877 sections** (`content_fingerprint` `6c4b9cd87aa68f82`, issue #170); the
+to **910 sections** (`content_fingerprint` `6df37ce8add7cfa6`); the
 figures above are the prior corpus's measurement and a re-measurement over the
 current corpus is pending. The numbers are
 machine-/corpus-dependent; the corpus identity above pins the corpus, and the
@@ -213,8 +213,8 @@ stdio by `tests/stdio_mcp.rs` ([057], PR #130):
 to the targets, with a graceful-exit assertion + the full-corpus caveat**:
   `docs/PERFORMANCE.md` + `tests/perf.rs` ([071], PR #143, re-measured by issue
   #156). On the prior 545-section shipped corpus (`content_fingerprint`
-  `154a1f248b149160`; the current shipped corpus is 877 sections, fingerprint
-  `6c4b9cd87aa68f82`, per issue #170, with a perf re-measurement pending), a
+  `154a1f248b149160`; the current shipped corpus is 910 sections, fingerprint
+  `6df37ce8add7cfa6`, with a performance re-measurement pending), a
   documented macOS/arm64 machine, release profile, `rustc
   1.100.0`: startup p95 **≈ 10 ms** (target ≤ 2000 ms), `search_docs` p95
   **≈ 11.5 ms** and `get_section` p95 **≈ 11.5 ms** (target < 100 ms), peak RSS
@@ -295,7 +295,7 @@ Stated explicitly, so no requirement is marked complete from an unverified claim
   `154a1f248b149160`), recording the **environment** (toolchain, host, build
   profile) and asserting a **graceful self-exit** (no orphaned process) after
   each measurement. The figures are from that prior corpus; the shipped corpus is
-  now 877 sections (`content_fingerprint` `6c4b9cd87aa68f82`, issue #170) and a
+  now 910 sections (`content_fingerprint` `6df37ce8add7cfa6`) and a
   perf re-measurement over it is pending. That shipped corpus is a representative
   **offline subset** of
   the live-synced full corpus the product serves in production, so the figures are

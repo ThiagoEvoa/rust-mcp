@@ -34,11 +34,9 @@ attributed to the wrong corpus. It is fixed, offline, and hermetic: no network, 
 per-run empty `--data-dir` (or the operator-pinned one), a fixed protocol
 version, and fixed query/section sets and iteration counts.
 
-The run recorded below measured the **shipped** (bundled) corpus. Its identity
-changed since the original [071] numbers — the seed grew from **545** to
-**877** sections — so those earlier figures (startup ≈ 10 ms, RSS ≈ 17 MiB)
-describe a *smaller* corpus; the current figures below describe the one the server
-ships today.
+The recorded run below measured the **877-section** bundled corpus. The seed
+since grew to **910 sections**. The recorded measurements are pinned to the
+corpus and environment shown in each report.
 
 **Full-corpus / larger-corpus caveat.** The seed is a representative *offline
 subset* of the upstream corpus, not the full live-synced corpus the product

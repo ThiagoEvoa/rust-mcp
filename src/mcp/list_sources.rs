@@ -575,9 +575,9 @@ mod tests {
             );
         }
         let total: usize = resp.sources.iter().map(|s| s.section_count).sum();
-        // The bundled seed carries 877 sections across its eight sources.
+        // The bundled seed carries 910 sections across its eight sources.
         assert_eq!(
-            total, 877,
+            total, 910,
             "per-source section counts sum to the snapshot's section total"
         );
     }

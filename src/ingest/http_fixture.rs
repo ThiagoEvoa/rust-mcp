@@ -296,6 +296,11 @@ fn run(
                     in_flight_c.fetch_add(1, Ordering::SeqCst);
                     let cur = in_flight_c.load(Ordering::SeqCst);
                     high_water_c.fetch_max(cur, Ordering::SeqCst);
+                    // Some platforms inherit the listener's nonblocking mode.
+                    // The fixture handler expects blocking reads and writes.
+                    stream
+                        .set_nonblocking(false)
+                        .expect("blocking fixture socket");
                     let _ = stream.set_nodelay(true);
                     handle(stream, &routes_c, &shared_c);
                     in_flight_c.fetch_sub(1, Ordering::SeqCst);

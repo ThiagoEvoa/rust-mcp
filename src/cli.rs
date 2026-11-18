@@ -188,7 +188,7 @@ impl Cli {
                 let client = match crate::ingest::pipeline::production_client() {
                     Ok(client) => client,
                     Err(err) => {
-                        tracing::error!(
+                        eprintln!(
                             "rust-docs-mcp: sync failed: the fetch client could not start: {err}"
                         );
                         return Ok(ExitCode::FAILURE);
@@ -215,10 +215,7 @@ impl Cli {
                     // A successful run reports the per-source inventory changes
                     // and the new snapshot identity on stderr, then exits 0.
                     Ok(report) => {
-                        // The report is the success output: emit it on stderr
-                        // through the gated subscriber (`info` shows by default),
-                        // keeping stdout exclusive to MCP messages (plan §8/§9).
-                        tracing::info!("rust-docs-mcp: {}", report.to_stderr());
+                        eprint!("{}", report.to_stderr());
                         Ok(ExitCode::SUCCESS)
                     }
                     // AC2: a fetch/parser/validation failure aborts the run and
@@ -226,7 +223,7 @@ impl Cli {
                     // and exit non-zero so a partial corpus is never presented as
                     // a successful refresh.
                     Err(sync_err) => {
-                        tracing::error!("rust-docs-mcp: sync failed: {sync_err}");
+                        eprintln!("rust-docs-mcp: sync failed: {sync_err}");
                         Ok(ExitCode::FAILURE)
                     }
                 }
@@ -237,9 +234,8 @@ impl Cli {
             // freshness — judged against a configurable threshold. This is a
             // pure, **offline** read: it loads the already-selected snapshot
             // (local preferred, bundled fallback) and makes **no** network
-            // request. The human report is a *diagnostic* emitted on **stderr**
-            // through the gated subscriber (like `sync`/`serve`), so stdout
-            // stays exclusive to MCP messages (plan.md §8/§9 / task [004]).
+            // request. The report goes to stderr regardless of log filtering,
+            // keeping stdout available for MCP traffic.
             Command::Status { stale_days } => {
                 // Select the fixed runtime snapshot: the local published snapshot
                 // (from a prior `sync`) when it exists, else the validated
@@ -257,7 +253,7 @@ impl Cli {
                 ) {
                     Ok(snapshot) => snapshot,
                     Err(err) => {
-                        tracing::error!("rust-docs-mcp: status failed: {err}");
+                        eprintln!("rust-docs-mcp: status failed: {err}");
                         return Ok(ExitCode::FAILURE);
                     }
                 };
@@ -281,11 +277,11 @@ impl Cli {
                     None => crate::provenance::StaleThreshold::default(),
                 };
 
-                // Build the report purely from the in-memory snapshot, then emit
-                // it on stderr through the gated subscriber, keeping stdout
-                // exclusive to MCP messages.
                 let report = crate::status::build_report(&snapshot.manifest, as_of, threshold);
-                tracing::info!("rust-docs-mcp: {}", report.to_stderr());
+                eprint!("{}", report.to_stderr());
+                if let Some(reason) = &snapshot.fallback_reason {
+                    eprintln!("  bundled fallback: {reason}");
+                }
                 Ok(ExitCode::SUCCESS)
             }
             Command::Inspect => {
@@ -295,7 +291,7 @@ impl Cli {
                 ) {
                     Ok(snapshot) => snapshot,
                     Err(err) => {
-                        tracing::error!("rust-docs-mcp: inspect failed: {err}");
+                        eprintln!("rust-docs-mcp: inspect failed: {err}");
                         return Ok(ExitCode::FAILURE);
                     }
                 };
@@ -312,7 +308,10 @@ impl Cli {
                 let inspection = crate::coverage::inspect_corpus(&snapshot.manifest);
                 let complete = inspection.is_complete();
 
-                tracing::info!("rust-docs-mcp: {}", inspection.render());
+                eprintln!("{}", inspection.render());
+                if let Some(reason) = &snapshot.fallback_reason {
+                    eprintln!("bundled fallback: {reason}");
+                }
 
                 // The incomplete-inspection contract (issue #153): a snapshot that
                 // does not reach full coverage/fidelity is a *verdict*, not a
@@ -323,9 +322,6 @@ impl Cli {
                 if complete {
                     Ok(ExitCode::SUCCESS)
                 } else {
-                    tracing::warn!(
-                        "rust-docs-mcp: corpus inspection incomplete: the active snapshot does not reach full coverage/fidelity (see the report above)"
-                    );
                     Ok(ExitCode::FAILURE)
                 }
             }

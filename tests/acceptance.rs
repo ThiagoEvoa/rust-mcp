@@ -65,7 +65,7 @@ const PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// The number of sections the shipped corpus carries. Pinned so a corpus change
 /// is a visible, deliberate re-pin rather than a silent drift.
-const SHIPPED_SECTION_COUNT: usize = 877;
+const SHIPPED_SECTION_COUNT: usize = 910;
 
 // ---------------------------------------------------------------------------
 // Seam 1: the index-level measurement over the shipped corpus.

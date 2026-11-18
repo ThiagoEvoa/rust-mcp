@@ -25,7 +25,7 @@ fn main() -> std::process::ExitCode {
     match cli.run() {
         Ok(code) => code,
         Err(err) => {
-            tracing::error!("rust-docs-mcp: {err:#}");
+            eprintln!("rust-docs-mcp: {err:#}");
             std::process::ExitCode::FAILURE
         }
     }

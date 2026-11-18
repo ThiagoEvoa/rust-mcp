@@ -206,7 +206,7 @@ per-source `content_hash` (now **source-specific**), `document_count`,
 ```json
 {
   "command_catalog_uri": "rust-docs://snapshots/rust-docs-bundled-seed/commands",
-  "corpus_hash": "c128-ffaf654d6d447eb40b9e9629be845a92",
+  "corpus_hash": "c128-ffaff79b0718435fce66cf3b4b4719eb",
   "schema_version": "1",
   "snapshot_id": "rust-docs-bundled-seed",
   "commands": [
@@ -219,12 +219,12 @@ per-source `content_hash` (now **source-specific**), `document_count`,
   "sources": [
     { "id": "api-guidelines", "title": "Rust API Guidelines", "channel": "rolling", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 13, "section_count": 96, "content_hash": "c128-ffa6caa702a86473fe801b0bcb02d958", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://rust-lang.github.io/api-guidelines/about.html" },
     { "id": "style-guide", "title": "Rust Style Guide", "channel": "stable", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 7, "section_count": 71, "content_hash": "c128-ffa596f39b95d538268ea3a933acba9d", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://doc.rust-lang.org/style-guide/index.html" },
-    { "id": "cargo", "title": "The Cargo Book", "channel": "stable", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 21, "section_count": 315, "content_hash": "c128-ffa6d93dcb18fde78b2ef7926b4861b6", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://doc.rust-lang.org/cargo/" },
+    { "id": "cargo", "title": "The Cargo Book", "channel": "stable", "fetched_at": "2026-11-18T00:00:00Z", "freshness": "unknown", "document_count": 22, "section_count": 326, "content_hash": "c128-ffaa2376401ac2d8420dbc472e05d093", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://doc.rust-lang.org/cargo/" },
     { "id": "rustc", "title": "The rustc Book", "channel": "stable", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 1, "section_count": 46, "content_hash": "c128-ffa55d2e9ca927751cfbcc7794137903", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://doc.rust-lang.org/rustc/" },
     { "id": "rustup", "title": "The rustup Book", "channel": "rolling", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 7, "section_count": 26, "content_hash": "c128-ffa5ff983cff5cbc92f95a7ce7f3c250", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://rust-lang.github.io/rustup/" },
     { "id": "rustfmt", "title": "rustfmt reference", "channel": "stable", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 2, "section_count": 277, "content_hash": "c128-ffa5483e8818922ce73e4a6f383a9380", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://github.com/rust-lang/rustfmt#readme" },
-    { "id": "clippy", "title": "Clippy", "channel": "stable", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 1, "section_count": 9, "content_hash": "c128-ffa5067277597fa1db7e098805bd3ead", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://doc.rust-lang.org/clippy/" },
-    { "id": "rustdoc", "title": "The Rustdoc Book", "channel": "stable", "fetched_at": "2026-10-30T00:00:00Z", "freshness": "unknown", "document_count": 1, "section_count": 37, "content_hash": "c128-ffa64cec68c7765563660336e199955c", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://doc.rust-lang.org/rustdoc/" }
+    { "id": "clippy", "title": "Clippy", "channel": "stable", "fetched_at": "2026-11-18T00:00:00Z", "freshness": "unknown", "document_count": 1, "section_count": 11, "content_hash": "c128-ffa5be4679eb256eb4704303e1c09cd2", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://doc.rust-lang.org/clippy/" },
+    { "id": "rustdoc", "title": "The Rustdoc Book", "channel": "stable", "fetched_at": "2026-11-18T00:00:00Z", "freshness": "unknown", "document_count": 2, "section_count": 57, "content_hash": "c128-ffa5bfadb13fbae357d6e8ef2514caae", "parser": "rust-docs-mcp/seed-2", "entry_url": "https://doc.rust-lang.org/rustdoc/" }
   ]
 }
 ```
@@ -250,7 +250,7 @@ hits total (`limit` 5, `truncated` false); the client reads the top hit:
       "section_id": "api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv",
       "source": "api-guidelines",
       "title": "Rust API Guidelines",
-      "score": 4.887109854836241,
+      "score": 4.9826871303507545,
       "excerpt": "## Ad-hoc conversions follow as_, to_, into_ conventions (C-CONV) Conversions should be provided as methods, with names prefixed as follows: | Prefix | Cost | Ownership | |---|---|---| | as_ | Free | borrowed -> borrowed | | to_ | Expensi…",
       "citations": [
         { "source": "api-guidelines", "section_id": "api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv", "title": "Rust API Guidelines", "url": "https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv", "note": "canonical upstream document" },
