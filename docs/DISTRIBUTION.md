@@ -145,7 +145,8 @@ Every stdout line is a JSON-RPC 2.0 message; diagnostics go to stderr.
 - **`list_sources`** (id `2`) — returns `snapshot_id = rust-docs-bundled-seed`,
   `schema_version = 1`, and **the eight sources** (`api-guidelines`,
   `style-guide`, `cargo`, `rustc`, `rustup`, `rustfmt`, `clippy`, `rustdoc`)
-  plus the command-catalog keys `cargo build`, `cargo test`, `rustup show`.
+  plus the **29** command-catalog keys (`cargo new` … `rustdoc`; see
+  [`docs/CLIENTS.md`](CLIENTS.md) §3.3 for the full list).
 - Closing stdin (EOF) ends the session with **exit `0`**; stderr carried the
   runtime diagnostics only (no fetch/network/sync lines — the run served from the
   embedded corpus and made **no network call**).
@@ -153,8 +154,9 @@ Every stdout line is a JSON-RPC 2.0 message; diagnostics go to stderr.
 This is the M5 exit in one session: a **fresh installation answers a design/style
 and tooling query offline** — `list_sources` lists the corpus, and the same
 session in [`docs/CLIENTS.md`](CLIENTS.md) §3.3 runs `search_docs`
-(`"C-CONV"`, a cited hit) and `get_section` (`api-guidelines/about`, the body
-with its citation). The automated, hermetic proof of that session is
+(`"C-CONV"`, a cited hit) and `get_section`
+(`api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv`,
+the body with its citation). The automated, hermetic proof of that session is
 [`tests/first_client.rs`](../tests/first_client.rs); the full five-tool +
 two-resource proof is [`tests/stdio_mcp.rs`](../tests/stdio_mcp.rs).
 

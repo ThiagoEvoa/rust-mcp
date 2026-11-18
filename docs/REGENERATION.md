@@ -35,12 +35,12 @@ The canonical builder is `manifest()` in [`src/bundled.rs`](../src/bundled.rs). 
 | --- | --- | --- |
 | `snapshot_id` | `rust-docs-bundled-seed` | `SNAPSHOT_ID` constant; identifies the seed. |
 | `schema_version` | `1` | `SchemaVersion::CURRENT` (`V1`) — the only supported version. |
-| `parser_version` | `rust-docs-mcp/seed-1` | A seed marker, *not* the live pipeline version. A live `sync` stamps `rust-docs-mcp/<CARGO_PKG_VERSION>` = `rust-docs-mcp/0.1.0` (`parser_version()` in `src/ingest/pipeline.rs`). |
+| `parser_version` | `rust-docs-mcp/seed-2` | A seed marker, *not* the live pipeline version. A live `sync` stamps `rust-docs-mcp/<CARGO_PKG_VERSION>` = `rust-docs-mcp/0.1.0` (`parser_version()` in `src/ingest/pipeline.rs`). |
 | `created_at` / `fetched_at` | `2026-10-30T00:00:00Z` | **Fixed** so the bundle is deterministic across builds (a real sync stamps a wall-clock `fetched_at`). |
 | Sources | 8 | The eight required `SourceCollection`s. |
-| Sections | 8 | One representative section per source. |
-| `checklist` | 1 | Entry `C-CONV` (*"Prefer `From`/`Into` for conversions"*). |
-| `commands` | 3 | `cargo build`, `cargo test`, `rustup show`. |
+| Sections | 877 | Many sections per source (a hierarchical snapshot; the `validation` block reports `sections: 877`, `documents: 53`). |
+| `checklist` | 54 | 54 entries; the `C-CONV` entry is *"Ad-hoc conversions follow as_, to_, into_ conventions"* (category `Naming`, location `Naming#C-CONV`), explaining itself via `api-guidelines/naming#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv`. |
+| `commands` | 29 | The 29 command-catalog keys (for example `cargo new`, `cargo build`, `cargo test`, `rustup show`, `rustc`, `rustfmt`, `rustdoc`). |
 
 The JSON is embedded in the binary with `include_str!("../../data/bundled/snapshot.json")` (the `JSON` constant in `src/bundled.rs`), so the published binary carries the corpus and serves offline with no network.
 
@@ -67,7 +67,7 @@ The committed `data/bundled/snapshot.json` is **not hand-edited** — it is gene
 ### 1.3 Determinism
 
 - `created_at`/`fetched_at` are fixed, and the compact serializer (`SnapshotManifest::to_json_string`) emits **no insignificant whitespace**, so the bundle is byte-stable and therefore hash-able byte-for-byte.
-- **Verified reproducible:** running the seam above produced a byte-identical file — `md5 = b4b468eeac20ea6289d910e224287a41` before and after, and `git status` clean — proving the committed `data/bundled/snapshot.json` is exactly what `manifest()` produces.
+- **Verified reproducible:** running the seam above produced a byte-identical file — `md5 = 2155f7bbe4a528184dbb25c623bf95c0` before and after, and `git status` clean — proving the committed `data/bundled/snapshot.json` is exactly what `manifest()` produces.
 - **Exclusions seam:** `manifest_with_exclusions(&first_sync_required)` is the documented path for a source that cannot be bundled yet (it is omitted and flagged *first-sync-required* rather than dropped from the schema). It is **not** used by the current seed: `FIRST_SYNC_REQUIRED` is empty, because all eight sources are MIT OR Apache-2.0 and bundle cleanly.
 
 ### 1.4 Getting a *full, current* corpus (the live path)
@@ -90,21 +90,21 @@ Full detail (the conditional/HTTP 304 refresh, the writer lock, atomic publish, 
 `inspect` prints a coverage and extraction-fidelity report over the **active loaded corpus** — the structural coverage and the fidelity over *that corpus's own sections* — plus the snapshot identity and section count it inspected (default: the bundled seed). **Real captured output** from this binary, `RUST_DOCS_MCP_DATA_DIR` pointing at an empty data directory (so the seed loads):
 
 ```
-corpus inspection: snapshot=rust-docs-bundled-seed sections=544 verdict=complete
+corpus inspection: snapshot=rust-docs-bundled-seed sections=877 verdict=complete
 coverage_complete=true
 fidelity_complete=true
 corpus coverage:
-  sources=8 sections=544 checklist=15 commands=11
-  Rust API Guidelines documents=4 sections=28
-  Rust Style Guide documents=1 sections=30
-  The Cargo Book documents=8 sections=111
+  sources=8 sections=877 checklist=54 commands=29
+  Rust API Guidelines documents=13 sections=96
+  Rust Style Guide documents=7 sections=71
+  The Cargo Book documents=21 sections=315
   The rustc Book documents=1 sections=46
-  The rustup Book documents=2 sections=7
+  The rustup Book documents=7 sections=26
   rustfmt reference documents=2 sections=277
-  Clippy         documents=1 sections=8
+  Clippy         documents=1 sections=9
   The rustdoc Book documents=1 sections=37
   gaps: none
-extraction fidelity (sections=544):
+extraction fidelity (sections=877):
   present nested heading
   present anchor
   present list
@@ -119,9 +119,9 @@ extraction fidelity (sections=544):
 
 (The per-run tracing prefix on the first line — e.g. `2026-11-16T08:11:10.749179Z  INFO 315: rust-docs-mcp:` — is omitted for readability; it is timestamped per run and carries no corpus fact.)
 
-- **`corpus inspection: snapshot=… sections=544 verdict=complete`** — the leading line names the **inspected snapshot identity** and the **section count it inspected**. The count is the *loaded corpus's* count (the faithful seed's 544 sections), **never** a fixed fixture count. This is the identity/count made explicit that issue #153 requires.
+- **`corpus inspection: snapshot=… sections=877 verdict=complete`** — the leading line names the **inspected snapshot identity** and the **section count it inspected**. The count is the *loaded corpus's* count (the faithful seed's 877 sections), **never** a fixed fixture count. This is the identity/count made explicit that issue #153 requires.
 - **`coverage_complete=true`** — every *required* `SourceCollection` has ≥1 section and its `checklist`/`commands` cross-references resolve.
-- **`fidelity_complete=true`** — all ten content types the extractors must retain are *present in the actual corpus* (no recorded gap): `FidelityReport::all_types_present` (`src/coverage.rs`) is true when the report's `absent` list is empty. Since #153 the operator `inspect` runs over the **corpus's own sections** — `inspect_corpus(&snapshot.manifest)`, i.e. `inspect_fidelity(&manifest.body.sections)`, hence `sections=544` — *not* over the built-in `representative_fidelity_sections()` fixtures. A type the loaded corpus does not exhibit lands in `absent`, flips `fidelity_complete` to `false`, and is *recorded* as a gap — never a fabricated pass. This is **not** "every section body is untruncated"; that is not what the fidelity check measures.
+- **`fidelity_complete=true`** — all ten content types the extractors must retain are *present in the actual corpus* (no recorded gap): `FidelityReport::all_types_present` (`src/coverage.rs`) is true when the report's `absent` list is empty. Since #153 the operator `inspect` runs over the **corpus's own sections** — `inspect_corpus(&snapshot.manifest)`, i.e. `inspect_fidelity(&manifest.body.sections)`, hence `sections=877` — *not* over the built-in `representative_fidelity_sections()` fixtures. A type the loaded corpus does not exhibit lands in `absent`, flips `fidelity_complete` to `false`, and is *recorded* as a gap — never a fabricated pass. This is **not** "every section body is untruncated"; that is not what the fidelity check measures.
 
 **Corpus inspection vs. extractor fixture validation.** The `present`/`absent` content-type list above is the **corpus** inspection (the loaded snapshot's own sections). A separate **extractor fixture self-test** — a small hand-written set of sections that exercises every content type offline — runs in the unit test suite (`inspect_fidelity(&representative_fidelity_sections())` must report every type present). The fixture proves the *extractors* retain the content types; `inspect` proves the *loaded corpus* actually carries them. The two are deliberately distinct, so a corpus that retained none of those structures can never inherit the fixture's `fidelity_complete=true` (issue #153).
 
@@ -137,34 +137,47 @@ The snapshot manifest (`data/bundled/snapshot.json`, or a synced `<data-dir>/cor
 | --- | --- | --- |
 | `schema_version` | `1` | Corpus schema version; the validator rejects any other version. |
 | `snapshot_id` | `rust-docs-bundled-seed` | Snapshot identity. |
-| `parser_version` | `rust-docs-mcp/seed-1` | Parser/ingester version marker (see §1.1). |
-| per-source `content_hash` | `c128-ffa5092e1f9db0151650f6e19369b606` | `CorpusHash::compute` over the source content; identical for all eight seed sources. |
+| `parser_version` | `rust-docs-mcp/seed-2` | Parser/ingester version marker (see §1.1). |
+| per-source `content_hash` | **source-specific** (one per source, below) | `CorpusHash::compute` over each source's captured document bytes; since the corpus grew to real content, the eight values are **no longer identical** (see the per-source list below). |
 | per-section `content_hash` | one per section (below) | `CorpusHash::compute` over the section's content; the validator recomputes and matches it. |
 | `attribution[].licenses` | `MIT OR Apache-2.0` (×8) | The permissive license family every source falls under. |
 | `attribution[].repository` / `.required_notice` | per-source (see §4.2) | The notice that travels with the content. |
 
-The **eight per-section content hashes** (real, from the committed `data/bundled/snapshot.json`):
+The **eight per-source `content_hash` values** (real, from the committed `data/bundled/snapshot.json`; source-specific since the corpus grew, per issue #152):
+
+| Source | `content_hash` |
+| --- | --- |
+| `api-guidelines` | `c128-ffa6caa702a86473fe801b0bcb02d958` |
+| `style-guide` | `c128-ffa596f39b95d538268ea3a933acba9d` |
+| `cargo` | `c128-ffa6d93dcb18fde78b2ef7926b4861b6` |
+| `rustc` | `c128-ffa55d2e9ca927751cfbcc7794137903` |
+| `rustup` | `c128-ffa5ff983cff5cbc92f95a7ce7f3c250` |
+| `rustfmt` | `c128-ffa5483e8818922ce73e4a6f383a9380` |
+| `clippy` | `c128-ffa5067277597fa1db7e098805bd3ead` |
+| `rustdoc` | `c128-ffa64cec68c7765563660336e199955c` |
+
+Eight **representative per-section `content_hash` values** (one section per source; real, from the committed snapshot):
 
 | `SectionId` | `content_hash` |
 | --- | --- |
-| `api-guidelines/about` | `c128-ffa531f24bfdd996c9ef3d1a076dd56a` |
-| `style-guide/intro` | `c128-ffa549d71811a6f0c1df98d4204e09dc` |
-| `cargo/commands%2Fcargo-build` | `c128-ffa550364dc212527d904d59fe85fe84` |
-| `rustc/introduction` | `c128-ffa54a0177b917cbcb3dc0413a060228` |
-| `rustup/common-install-problems` | `c128-ffa519dd5f27e9d2da9c1389aa2bfc0a` |
-| `rustfmt/options` | `c128-ffa5470b6839fef52f4de6d9b8dff329` |
-| `clippy/configuration` | `c128-ffa5381340fae3e97c387c8bd729fcbc` |
-| `rustdoc/command-line-arguments` | `c128-ffa51a23788aa244ba8f56032617f86e` |
+| `api-guidelines/about#rust-api-guidelines` | `c128-ffa52d2bfbdf2360035feb7ab9cec81b` |
+| `style-guide/expressions#expressions` | `c128-ffa50e78686c7e44eb11437a6a957209` |
+| `cargo/commands%2Fcargo-new#cargo-new1` | `c128-ffa5497b8be2b71d0a10b35af8724596` |
+| `rustc/command-line-arguments#command-line-arguments` | `c128-ffa5f5b9469b7e91b9118ff505c8a9b8` |
+| `rustup/installation%2Findex#installation` | `c128-ffa5e76102a3d02d21d781d003343d72` |
+| `rustfmt/README.md#quick-start` | `c128-ffa500481705cfde4987b6438d849ece` |
+| `clippy/clippy-catalog#unwrap_used` | `c128-ffa531aa94de0f70e2b6956e7bc807b5` |
+| `rustdoc/command-line-arguments#command-line-arguments` | `c128-ffa5e2b72eef1f04a3a29a1c6d8791fd` |
 
 How a content hash is derived (AC1 "deterministic content hashes"):
 
-- **`CorpusHash`** is a `c128-`-prefixed 128-bit dual accumulator over the bytes (see `CorpusHash::compute` in `src/model.rs`; it is **not** FNV-1a — task [025] may swap it for SHA-256). The seed's per-source hash is `CorpusHash::compute(b"seed-document")`; a per-section hash is computed over that section's content (id, document title, chapter path, anchor, heading path, canonical URL, body, and the attached `guideline_codes` / `command_keys` / `lint_ids` / `qualifications`).
+- **`CorpusHash`** is a `c128-`-prefixed 128-bit dual accumulator over the bytes (see `CorpusHash::compute` in `src/model.rs`; it is **not** FNV-1a — task [025] may swap it for SHA-256). A per-source hash is `CorpusHash::compute` over that source's captured document bytes (distinct bodies hash distinctly, per issue #152), and a per-section hash is computed over that section's content (id, document title, chapter path, anchor, heading path, canonical URL, body, and the attached `guideline_codes` / `command_keys` / `lint_ids` / `qualifications`).
 - **There is no single top-level "corpus hash" field.** The deterministic identities are: (a) the per-source `content_hash`, (b) the per-section `content_hash`, and (c) the **compact JSON of the whole manifest** — `to_json_string` is byte-stable (§1.3), so the whole bundle is reproducible and hash-able as a unit.
 - The **validator** recomputes each section hash from its content and rejects a mismatch (`ContentHashMismatch`). So a hash is not just a label — it is checked.
 
 ### 2.3 Deterministic section identity
 
-Each section's `SectionId` is derived from its fields — `<source_id>/<url-encoded chapter_path>`, plus an optional `#anchor` and a `$c{part}.{parts}` continuation marker — by `SectionId::derive` (in `src/model.rs`). The validator re-derives it and rejects a stored id that does not match (`SectionIdMismatch`). Note the percent-encoding: the cargo section's chapter path `commands/cargo-build` yields `cargo/commands%2Fcargo-build` (the slash is encoded). The eight seed ids are listed in §2.2.
+Each section's `SectionId` is derived from its fields — `<source_id>/<url-encoded chapter_path>`, plus an optional `#anchor` and a `$c{part}.{parts}` continuation marker — by `SectionId::derive` (in `src/model.rs`). The validator re-derives it and rejects a stored id that does not match (`SectionIdMismatch`). Note the percent-encoding: the cargo section's chapter path `commands/cargo-new` yields `cargo/commands%2Fcargo-new` (the slash is encoded); the real section `cargo/commands%2Fcargo-new#cargo-new1` carries that `#anchor`. The representative section ids are listed in §2.2.
 
 ### 2.4 Source revisions, documentation release, and channel
 
