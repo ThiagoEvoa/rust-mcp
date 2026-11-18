@@ -409,7 +409,33 @@ pub async fn sync(
                         .map_err(|e| SyncError::Discover(DiscoveryError::Fetch(e.to_string())))?;
                     let (inventory, diff) =
                         discover_inventory(client, &base_url, collection.id(), None).await?;
-                    (inventory.urls, diff)
+                    let mut urls = inventory.urls;
+                    // issue #184 (discovery-depth gap): the single-hop navigation
+                    // discovery stops at the source's index page — cargo stops at
+                    // `commands/index.html`, rustup at `concepts/index.html` — and
+                    // never books the per-command / per-concept sub-pages, so the
+                    // URL-derivation (`is_command_page` / `command_key_from_base_url`)
+                    // and the curated key map never run on them and the live command
+                    // catalog comes back empty. Book the curated sub-pages directly
+                    // — the cargo `commands/cargo-<sub>` reference and the rustup
+                    // `concepts/*` chapters — so the keys get stamped. An already-
+                    // discovered URL is deduplicated by the `seen` set below, so this
+                    // is a harmless no-op for a page the nav already reached.
+                    urls.extend(
+                        crate::ingest::bundle::command_subpage_urls(collection.id())
+                            .into_iter()
+                            .filter_map(|u| reqwest::Url::parse(&u).ok()),
+                    );
+                    // Deduplicate the combined discovery + curated sub-page list,
+                    // preserving first-seen order: a curated sub-page the nav
+                    // already reached (rustup's `concepts/index`, `installation/`
+                    // index, `overrides`, `cross-compilation` are all linked from
+                    // the nav) must not be ingested twice — a duplicate URL emits
+                    // duplicate section ids and fails `validate_snapshot`.
+                    let mut seen: std::collections::BTreeSet<String> =
+                        std::collections::BTreeSet::new();
+                    urls.retain(|u| seen.insert(u.as_str().to_string()));
+                    (urls, diff)
                 }
             }
         };
@@ -490,6 +516,25 @@ pub async fn sync(
     // construction; the guard is defense-in-depth against a future drift.
     manifest.body.commands = command_catalog.into_entries();
 
+    // issue #184: wire attribution into the live pipeline via the shared
+    // `bundled::attribution_for` single source of truth — one record per source
+    // that carries content, so every ingested source's license/origin is served
+    // alongside it (the #151 "attribution present" gate). Previously the live
+    // manifest left attribution empty, so even a complete live corpus would fail
+    // the completeness gate on `SourceMissingAttribution`.
+    manifest.body.attribution = SourceCollection::ALL
+        .iter()
+        .copied()
+        .filter(|c| {
+            manifest
+                .body
+                .sections
+                .iter()
+                .any(|s| s.source_id.as_str() == c.id())
+        })
+        .map(crate::bundled::attribution_for)
+        .collect();
+
     // Issue #151: the completeness gate runs *after* the integrity gate
     // (`validate_snapshot`, via `publish_snapshot`) and *before* the atomic
     // promotion. A production run (`require_complete`) refuses an incomplete
@@ -568,8 +613,12 @@ async fn ingest_source(
             for url in urls {
                 let fetched = client.fetch(url).await?;
                 out.captured.push(capture_document(url, &fetched));
-                let sections =
+                let mut sections =
                     rustfmt::ingest_markdown(&fetched).map_err(|e| extract_err(collection, e))?;
+                // issue #184: the rustfmt reference sections carry the `rustfmt`
+                // catalog key (stamped via the shared curated map, so the live
+                // catalog matches the seed's).
+                stamp_curated(&mut sections, collection.id(), &fetched.final_url);
                 out.sections.extend(sections);
             }
         }
@@ -675,6 +724,30 @@ async fn merge_lint_catalog(
 /// Fetch and split each `url` through the HTML chapter adapter for `collection`,
 /// accumulating the resulting sections and the captured documents (the bytes and
 /// response metadata a content identity and freshness evidence are built from).
+/// Stamp the shared curated catalog command key (issue #184) on a page's
+/// sections when the page's source and URL name one. This is the live half of the
+/// "lift the map to a shared single-source-of-truth location" fix: the
+/// [`crate::ingest::bundle::curated_command_key`] map that previously lived only
+/// in the seed builder now also runs on live-ingested pages, so the live command
+/// catalog is populated rather than empty. It is a no-op for sources with no
+/// curated key (api-guidelines, style-guide, clippy) and for cargo (cargo keys
+/// are URL-derived in `cargo::ingest_command_page`), so it is safe to call
+/// unconditionally on every live page.
+fn stamp_curated(sections: &mut [Section], source: &str, final_url: &Url) {
+    if let Some(key) = crate::ingest::bundle::curated_command_key(source, final_url) {
+        for section in sections.iter_mut() {
+            if !section
+                .command_keys
+                .iter()
+                .any(|existing| existing.as_str() == key)
+            {
+                section.command_keys.push(key.to_string());
+                section.recompute_content_hash();
+            }
+        }
+    }
+}
+
 async fn ingest_book(
     collection: SourceCollection,
     urls: &[Url],
@@ -713,7 +786,15 @@ async fn ingest_book(
                 });
             }
         };
-        sections.extend(chapter?);
+        // issue #184 (seed-only curated key map): the rustc/rustdoc man pages and
+        // the rustup toolchain chapters carry a catalog command key that URL
+        // derivation does not produce, so it is stamped from the shared curated
+        // map — the same map the seed builder uses — so the live command catalog
+        // matches the seed's. clippy / api-guidelines / style-guide carry no
+        // curated key, so the map is a no-op for them.
+        let mut page = chapter?;
+        stamp_curated(&mut page, collection.id(), &fetched.final_url);
+        sections.extend(page);
     }
     Ok((sections, captured))
 }
@@ -1080,7 +1161,7 @@ mod tests {
     use crate::ingest::http_fixture::{Behavior, FixtureServer};
     use crate::model::SourceId;
     use crate::registry::SourceCollection;
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2739,6 +2820,273 @@ mod tests {
             http.to_rfc3339(),
             "2024-05-13T14:30:00Z",
             "the HTTP-date hint normalizes to the same instant as its RFC 3339 spelling"
+        );
+    }
+
+    /// issue #184 (F-184-1): the live half of the fix carries no automated
+    /// regression, so a future change could empty the live command catalog or
+    /// its attribution while the seed stays green. This loopback sync books the
+    /// very sub-pages the discovery-depth gap missed — the cargo
+    /// `commands/cargo-<sub>` reference and the rustup `concepts/*` (plus
+    /// override / cross-compilation) chapters, and the rustc / rustdoc man
+    /// pages — through the *live* `sync` / `ingest_source` path (a `direct`
+    /// override mirroring `bundle::command_subpage_urls`), and asserts (a) the
+    /// assembled catalog is non-empty with the expected URL-derived cargo keys
+    /// and curated rustup / rustc / rustdoc keys, and (b) the manifest carries
+    /// one attribution record per content-bearing source. This reaches
+    /// `stamp_curated` (rustup / rustc / rustdoc), the
+    /// `cargo::ingest_command_page` URL-derivation, and the live attribution
+    /// wiring; the focused `bundle` unit tests guard `command_subpage_urls` and
+    /// `curated_command_key` directly.
+    #[tokio::test]
+    async fn live_sync_books_command_sub_pages_and_populates_catalog_and_attribution() {
+        // A minimal cargo command-manual page: an `<h1>` naming the command (the
+        // key source for `cargo::ingest_command_page`) plus an options section so
+        // the splitter yields a section to stamp. Each heading carries a distinct
+        // anchor so the chapter's sections get distinct ids (no duplicate-id
+        // validation failure).
+        let cargo_command = |command: &str| {
+            format!(
+                r##"<!DOCTYPE html>
+<html><body>
+<div id="main-content" class="content">
+<h1 id="top">{command}</h1>
+<p>Usage and synopsis for {command}.</p>
+<h2 id="options">Options</h2>
+<p>The documented options for {command}.</p>
+</div>
+</body></html>"##
+            )
+        };
+        // A minimal book chapter (rustup concept / rustc / rustdoc man page): one
+        // section the curated key map stamps via `stamp_curated`. The key is
+        // derived from the URL by the shared curated map, not the body.
+        let chapter = |id: &str, heading: &str| {
+            format!(
+                r##"<!DOCTYPE html>
+<html><body>
+  <nav id="sidebar"><ol class="chapter"><li><a href="index.html">Introduction</a></li></ol></nav>
+  <main>
+    <h1 id="top">Reference</h1>
+    <h2 id="{id}">{heading}</h2>
+    <p>This section explains <code>{heading}</code> with a concrete example.</p>
+    <pre><code class="language-rust">fn {id}_example() {{}}</code></pre>
+  </main>
+</body></html>"##
+            )
+        };
+
+        let server = FixtureServer::start(vec![
+            // The cargo command reference sub-pages (the discovery-depth gap).
+            (
+                "/cargo/commands/cargo-build.html".to_string(),
+                Behavior::Text {
+                    body: cargo_command("cargo build").into_bytes(),
+                    etag: None,
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/cargo/commands/cargo-new.html".to_string(),
+                Behavior::Text {
+                    body: cargo_command("cargo new").into_bytes(),
+                    etag: None,
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            // The rustup concept sub-pages the nav never reaches, plus the
+            // override / cross-compilation chapters the curated map keys on.
+            (
+                "/rustup/concepts/index.html".to_string(),
+                Behavior::Text {
+                    body: chapter("concepts", "rustup show").into_bytes(),
+                    etag: None,
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/rustup/concepts/toolchains.html".to_string(),
+                Behavior::Text {
+                    body: chapter("toolchains", "rustup toolchain").into_bytes(),
+                    etag: None,
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/rustup/overrides.html".to_string(),
+                Behavior::Text {
+                    body: chapter("overrides", "rustup override").into_bytes(),
+                    etag: None,
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/rustup/cross-compilation.html".to_string(),
+                Behavior::Text {
+                    body: chapter("cross-compilation", "rustup target").into_bytes(),
+                    etag: None,
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            // The rustc / rustdoc man pages (the `command-line-arguments` page
+            // the curated map keys on).
+            (
+                "/rustc/command-line-arguments.html".to_string(),
+                Behavior::Text {
+                    body: chapter("cli", "--help").into_bytes(),
+                    etag: None,
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+            (
+                "/rustdoc/command-line-arguments.html".to_string(),
+                Behavior::Text {
+                    body: chapter("doc-cli", "--help").into_bytes(),
+                    etag: None,
+                    last_modified: None,
+                    content_type: Some("text/html".to_string()),
+                },
+            ),
+        ]);
+        let client = loopback_client().expect("the loopback client builds");
+        let data_dir = temp_data_dir();
+        let base = format!("http://{}", server.addr);
+        let url =
+            |p: &str| reqwest::Url::parse(&format!("{base}{p}")).expect("a valid loopback URL");
+
+        // Book the sub-pages the single-hop discovery misses, per source — the
+        // same URLs `bundle::command_subpage_urls` returns for cargo/rustup, plus
+        // the man pages the curated map keys on. A `direct` override is the
+        // offline stand-in for live discovery; `require_complete: false` so the
+        // partial corpus publishes (this test targets catalog + attribution, not
+        // the completeness gate).
+        let mut direct: BTreeMap<String, Vec<reqwest::Url>> = BTreeMap::new();
+        direct.insert(
+            "cargo".to_string(),
+            vec![
+                url("/cargo/commands/cargo-build.html"),
+                url("/cargo/commands/cargo-new.html"),
+            ],
+        );
+        direct.insert(
+            "rustup".to_string(),
+            vec![
+                url("/rustup/concepts/index.html"),
+                url("/rustup/concepts/toolchains.html"),
+                url("/rustup/overrides.html"),
+                url("/rustup/cross-compilation.html"),
+            ],
+        );
+        direct.insert(
+            "rustc".to_string(),
+            vec![url("/rustc/command-line-arguments.html")],
+        );
+        direct.insert(
+            "rustdoc".to_string(),
+            vec![url("/rustdoc/command-line-arguments.html")],
+        );
+        let config = SyncConfig {
+            parser_version: "test/184".to_string(),
+            sources: ["cargo", "rustup", "rustc", "rustdoc"]
+                .iter()
+                .map(|id| SourceId::new(*id).expect("a registry id is URI-safe"))
+                .collect(),
+            direct: Some(direct),
+            rustfmt_urls: None,
+            clippy_catalog_url: None,
+            require_complete: false,
+        };
+
+        let report = sync(&config, &data_dir, &client)
+            .await
+            .expect("the live sync publishes a snapshot carrying the catalog");
+
+        // The discovery-depth sub-pages were fetched through the live path.
+        let paths = server.request_paths();
+        for fetched in [
+            "/cargo/commands/cargo-build.html",
+            "/cargo/commands/cargo-new.html",
+            "/rustup/concepts/index.html",
+            "/rustup/concepts/toolchains.html",
+            "/rustup/overrides.html",
+            "/rustup/cross-compilation.html",
+        ] {
+            assert!(
+                paths.iter().any(|p| p == fetched),
+                "the live sync must fetch {fetched}; requested paths: {paths:?}"
+            );
+        }
+
+        let loaded = crate::corpus::load_published_snapshot(&data_dir)
+            .expect("the snapshot is published and loadable");
+
+        // (a) The assembled command catalog is non-empty and carries the expected
+        // keys — the URL-derived cargo keys and the curated rustup / rustc /
+        // rustdoc keys — so a future regression that empties the live catalog
+        // (the #184 bug) fails here rather than only at a live sync.
+        let keys: BTreeSet<&str> = loaded
+            .body
+            .commands
+            .iter()
+            .map(|e| e.key.as_str())
+            .collect();
+        assert!(
+            !loaded.body.commands.is_empty(),
+            "the live command catalog must be non-empty (F-184-1), got {keys:?}"
+        );
+        for expected in [
+            "cargo build",
+            "cargo new",
+            "rustup show",
+            "rustup toolchain",
+            "rustup override",
+            "rustup target",
+            "rustc",
+            "rustdoc",
+        ] {
+            assert!(
+                keys.contains(expected),
+                "the live catalog must carry `{expected}`; got {keys:?}"
+            );
+        }
+
+        // (b) One attribution record per content-bearing source — the four
+        // sources this run ingested, and no more (the other four carry no
+        // content, so they get no record).
+        let attributed: BTreeSet<&str> = loaded
+            .body
+            .attribution
+            .iter()
+            .map(|a| a.source.as_str())
+            .collect();
+        assert_eq!(
+            attributed,
+            BTreeSet::from(["cargo", "rustup", "rustc", "rustdoc"]),
+            "attribution must carry exactly one record per content-bearing source"
+        );
+        assert_eq!(
+            loaded.body.attribution.len(),
+            4,
+            "four content-bearing sources yield four attribution records"
+        );
+        // The per-source results report the catalog each source contributes, so
+        // the regression is visible even before the manifest is assembled.
+        let cargo = report
+            .sources
+            .iter()
+            .find(|s| s.id == "cargo")
+            .expect("the cargo result is present");
+        assert!(
+            cargo.command_entries >= 2,
+            "the two cargo command pages contribute their keys, got {}",
+            cargo.command_entries
         );
     }
 }
