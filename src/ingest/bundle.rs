@@ -1378,4 +1378,173 @@ mod tests {
             );
         }
     }
+
+    // --- issue #184 (F-184-1): the shared live-catalog wiring the discovery-
+    //     depth gap added — the curated sub-page URL list and the curated
+    //     command-key map that the seed and the live pipeline now share. Before
+    //     the fix the live pipeline stamped no catalog key (empty catalog) and
+    //     carried no attribution; these two functions are the new single source
+    //     of truth. A focused unit test guards them so a future regression that
+    //     breaks live catalog population while the seed stays green fails here
+    //     rather than only at a live sync (the offline acceptance tests exercise
+    //     the downstream effect through `sync`; these exercise the functions
+    //     directly).
+
+    /// The curated sub-page URL list books exactly the cargo command reference
+    /// and the rustup concept chapters the single-hop book discovery misses
+    /// (issue #184's discovery-depth gap), and no sub-pages for a source that
+    /// needs none.
+    #[test]
+    fn command_subpage_urls_books_the_cargo_and_rustup_sub_pages() {
+        let cargo = command_subpage_urls("cargo");
+        assert!(
+            !cargo.is_empty(),
+            "cargo must book its per-command reference sub-pages"
+        );
+        assert!(
+            cargo.iter().all(|u| {
+                u.starts_with("https://doc.rust-lang.org/cargo/commands/cargo-")
+                    && u.ends_with(".html")
+                    && !u.ends_with("cargo-index.html")
+            }),
+            "every cargo sub-page is a per-command reference (never the index), got {cargo:?}"
+        );
+        for sub in ["cargo-build", "cargo-new", "cargo-test", "cargo-doc"] {
+            assert!(
+                cargo
+                    .iter()
+                    .any(|u| u.ends_with(&format!("commands/{sub}.html"))),
+                "cargo must book its `{sub}` sub-page, got {cargo:?}"
+            );
+        }
+
+        let rustup = command_subpage_urls("rustup");
+        assert!(!rustup.is_empty(), "rustup must book its concept sub-pages");
+        assert!(
+            rustup
+                .iter()
+                .all(|u| u.starts_with("https://rust-lang.github.io/rustup/")),
+            "every rustup sub-page is under the rustup boundary, got {rustup:?}"
+        );
+        for sub in [
+            "concepts/index.html",
+            "concepts/toolchains.html",
+            "concepts/components.html",
+            "overrides.html",
+            "cross-compilation.html",
+        ] {
+            assert!(
+                rustup.iter().any(|u| u.ends_with(sub)),
+                "rustup must book its `{sub}` sub-page, got {rustup:?}"
+            );
+        }
+
+        // A source that needs no curated sub-page books none: its pages are
+        // already reached by the nav, or it carries no catalog key.
+        assert!(
+            command_subpage_urls("rustc").is_empty(),
+            "rustc books no sub-pages (its man page is already nav-linked)"
+        );
+        assert!(
+            command_subpage_urls("clippy").is_empty(),
+            "clippy books no sub-pages"
+        );
+    }
+
+    /// The curated command-key map resolves the non-cargo catalog keys from a
+    /// page's source and URL — the single source of truth the seed and the live
+    /// pipeline share. `cargo` is URL-derived (never curated), so the map is a
+    /// no-op for it, and a curated page the map does not name yields `None`.
+    #[test]
+    fn curated_command_key_resolves_the_non_cargo_catalog_keys() {
+        let url = |p: &str| RqUrl::parse(p).expect("a well-formed fixture URL");
+
+        assert_eq!(
+            curated_command_key(
+                "rustc",
+                &url("https://doc.rust-lang.org/rustc/command-line-arguments.html")
+            ),
+            Some("rustc")
+        );
+        assert_eq!(
+            curated_command_key(
+                "rustdoc",
+                &url("https://doc.rust-lang.org/rustdoc/command-line-arguments.html")
+            ),
+            Some("rustdoc")
+        );
+        assert_eq!(
+            curated_command_key(
+                "rustup",
+                &url("https://rust-lang.github.io/rustup/concepts/index.html")
+            ),
+            Some("rustup show")
+        );
+        assert_eq!(
+            curated_command_key(
+                "rustup",
+                &url("https://rust-lang.github.io/rustup/concepts/toolchains.html")
+            ),
+            Some("rustup toolchain")
+        );
+        assert_eq!(
+            curated_command_key(
+                "rustup",
+                &url("https://rust-lang.github.io/rustup/concepts/components.html")
+            ),
+            Some("rustup component")
+        );
+        assert_eq!(
+            curated_command_key(
+                "rustup",
+                &url("https://rust-lang.github.io/rustup/overrides.html")
+            ),
+            Some("rustup override")
+        );
+        assert_eq!(
+            curated_command_key(
+                "rustup",
+                &url("https://rust-lang.github.io/rustup/cross-compilation.html")
+            ),
+            Some("rustup target")
+        );
+        assert_eq!(
+            curated_command_key(
+                "rustfmt",
+                &url("https://raw.githubusercontent.com/rust-lang/rustfmt/main/README.md")
+            ),
+            Some("rustfmt")
+        );
+
+        // Negative cases: cargo is URL-derived, a curated source on a non-curated
+        // page yields `None`, and an unrelated source yields `None`.
+        assert_eq!(
+            curated_command_key(
+                "cargo",
+                &url("https://doc.rust-lang.org/cargo/commands/cargo-build.html")
+            ),
+            None
+        );
+        assert_eq!(
+            curated_command_key(
+                "rustup",
+                &url("https://rust-lang.github.io/rustup/installation/index.html")
+            ),
+            None
+        );
+        assert_eq!(
+            curated_command_key(
+                "rustup",
+                &url("https://rust-lang.github.io/rustup/concepts/profiles.html")
+            ),
+            None
+        );
+        assert_eq!(
+            curated_command_key(
+                "rustc",
+                &url("https://doc.rust-lang.org/rustc/getting-started.html")
+            ),
+            None
+        );
+    }
 }
