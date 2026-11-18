@@ -42,21 +42,24 @@ ships today.
 
 **Full-corpus / larger-corpus caveat.** The seed is a representative *offline
 subset* of the upstream corpus, not the full live-synced corpus the product
-serves in production. The numbers therefore describe the **shipped** corpus and
-scale with it: a larger (live-synced) corpus increases both startup (more content
-to index at boot) and peak RSS. The harness is **corpus-agnostic** — point it at
-a live-synced corpus via `RUST_DOCS_MCP_PERF_DATA_DIR` and it measures that
-corpus the same way, reporting that corpus's own identity — so the shipped
-numbers are a **lower bound**, not a full-corpus guarantee. Producing that
-live-synced larger corpus is an explicit, networked `sync` step (see
-[Larger corpus](#larger-corpus-issue-175-ac2)). Correction round 2/2 ran that
-leg: the live `sync` reached the network and fetched all eight sources' content,
-but it **failed the production completeness gate** — the live ingestion pipeline
-does not yet populate per-source attribution or a command catalog (both fields
-the offline `bundled` seed builder does) — so it never published a larger snapshot
-and `serve` fell back to the embedded seed. The larger-corpus *measurement* is
-therefore a documented, ready-to-run step currently **blocked by that upstream
-ingest gap**, not by this harness, and is not a number recorded here.
+serves in production. The shipped-corpus numbers therefore describe a **lower
+bound**: a larger (live-synced) corpus increases both startup (more content to
+index at boot) and peak RSS. The harness is **corpus-agnostic** — point it at a
+live-synced corpus via `RUST_DOCS_MCP_PERF_DATA_DIR` and it measures that corpus
+the same way, reporting that corpus's own identity, so a number is never
+attributed to the wrong corpus.
+
+Correction round 2/2 *ran* the networked `sync` leg and found it could **not
+publish a complete snapshot**: the live pipeline did not yet populate per-source
+attribution or a command catalog (both fields the offline `bundled` seed builder
+does), so `require_complete` aborted publication and `serve` fell back to the
+embedded seed. Issue [#184](https://github.com/ThiagoEvoa/rust-mcp/issues/184)
+closed that gap (merged to `main`): the live `sync` now populates per-source
+attribution and a full command catalog, so it publishes a **complete** snapshot.
+With that in place the larger-corpus measurement is **now recorded** — see
+[Larger corpus (live sync, 2214 sections)](#measured-live-sync-2214-sections). The
+shipped 877-section numbers remain the lower bound; the 2214-section figures are
+the documented larger-corpus measurement.
 
 ## How to run the harness
 
@@ -296,44 +299,83 @@ snapshot — see the second run command in [How to run the harness](#how-to-run-
 The report then carries **two** corpora side by side, each with its own identity,
 so the larger-corpus numbers are never conflated with the shipped ones.
 
-**What was measured, and why the larger-corpus measurement is blocked.** The
-shipped-corpus numbers above are **measured** (all five tools, the worst command,
-its continuation, and peak RSS). The larger-corpus path is **implemented and
-corpus-agnostic**, and correction round 2/2 **ran the networked `sync` leg** to
-produce one. The attempt:
+**History: the blocker, and how it was closed.** The shipped-corpus numbers above
+are a **lower bound**. Correction round 2/2 *ran* the networked `sync` leg and
+found it could not publish a complete snapshot: the live pipeline
+(`src/ingest/pipeline.rs`) did not yet populate per-source attribution or a
+command catalog — fields the offline `bundled` seed builder (`src/bundled.rs`)
+does — so `require_complete` aborted publication and `serve` fell back to the
+embedded seed. That was a **separate ingest-pipeline gap, not a defect in the
+#175 index-reuse fix** (which is correct and regression-free on the shipped
+corpus). Issue [#184](https://github.com/ThiagoEvoa/rust-mcp/issues/184)
+(merged to `main`) closed the gap: the live `sync` now populates per-source
+attribution and a full command catalog, so it publishes a **complete** snapshot.
+This AC2 re-measurement runs the same corpus-agnostic harness against that
+live-synced snapshot, with **no change to the harness**.
 
-- **Network reached.** `rust-docs-mcp sync --data-dir <temp>` connected to the
-  four upstream hosts the registry vouches for (`doc.rust-lang.org`,
-  `rust-lang.github.io`, `raw.githubusercontent.com`, `clippy.rust-lang.org` —
-  all reachable) and fetched real content for **all eight** sources (the gate
-  reported *content* for each one).
-- **The completeness gate aborted publication.** The run failed the production
-  completeness gate with nine gaps: *the command catalog is empty*, and *every
-  source “has content but no attribution record.”* Both are fields the live
-  pipeline (`src/ingest/pipeline.rs`) does **not** populate — it hardcodes an
-  empty attribution list (`attribution: Vec::new()`) and derives its command
-  catalog from `from_sections` over the live sections, which came back empty —
-  whereas the offline `bundled` seed builder (`src/bundled.rs`) populates both.
-  A production `sync` (`require_complete = true`) therefore publishes **nothing**:
-  the data dir was left empty (no `corpus/` directory), and `serve` pointed at it
-  fell back to the embedded **877-section seed** (verified: the reported per-source
-  content hashes and `2026-10-30` fetch dates are the seed's, not a live corpus's).
-- **No larger snapshot, so no larger measurement.** Because `serve`'s runtime
-  selection runs the *same* completeness gate (`runtime::gate_completeness`), it
-  would reject any larger-but-incomplete snapshot in favor of the seed, so a
-  larger corpus the harness could point at is **not obtainable through the shipped
-  `sync`** at this point.
+### Measured (live sync, 2214 sections)
 
-**This is a separate ingest-pipeline gap, not a defect in the #175 index-reuse
-fix.** That fix is correct and regression-free (verified independently on the
-shipped corpus); the blocker is that the live `sync` pipeline does not yet
-populate per-source attribution or a command catalog the way the offline seed
-builder does. The full-corpus figures are expected to be higher than the shipped
-ones (more content indexed at boot, more held in memory); once the live `sync`
-populates those fields, the **same** corpus-agnostic harness (the second run
-command in [How to run the harness](#how-to-run-the-harness)) measures the larger
-corpus with no change, and the full-corpus numbers can be recorded here alongside
-the shipped figures above.
+The larger corpus is produced by a networked, production-config `sync`
+(`require_complete = true`) into a data dir the harness then measures the same
+way:
+
+```sh
+cargo build --release --locked
+# Produce the complete live snapshot (network; takes on the order of a minute):
+cargo run --release -- sync --data-dir /tmp/rust-mcp-orchestrator/live-sync-ac2
+# Point the corpus-agnostic harness at it and measure (writes a JSON report):
+RUST_DOCS_MCP_PERF=1 RUST_DOCS_MCP_PERF_DATA_DIR=/tmp/rust-mcp-orchestrator/live-sync-ac2 \
+  RUST_DOCS_MCP_PERF_REPORT=/tmp/rust-mcp-orchestrator/perf-report-ac2.json \
+  cargo test --release --test perf -- --ignored --nocapture
+```
+
+The published snapshot's identity is **point-in-time** — its id is
+**timestamp-derived** — but the corpus **content is deterministic**: the same
+**2214** sections, **54** checklist entries, **29** command entries, and **8**
+attribution records are reproduced by every complete `sync`.
+
+- **snapshot_id:** `rust-docs-mcp-0.1.0-2026-11-18T13-25-49Z-1795008349316053000`
+- **parser_version:** `rust-docs-mcp/0.1.0` (the live parser, distinct from the
+  seed's `rust-docs-mcp/seed-2`)
+- **section_count:** **2214** (vs the shipped seed's 877 — ~2.5× larger), 8 sources
+- **corpus_hash:** `c128-ffc1b678a150a2b4379abf633c8f994e`
+- **command_count:** **29**; **54** checklist entries; **8** attribution records
+  (one per content-bearing source — the field the live gap had left empty)
+
+Per-source section counts: api-guidelines 98, style-guide 71, cargo 793, rustc
+48, rustup 26, rustfmt 277, clippy 864, rustdoc 37 (sum 2214). Command entries:
+cargo 21, rustup 5, and rustc / rustfmt / rustdoc 1 each (29 total).
+
+Captured on the same **macOS (arm64), release, `rustc 1.100.0`
+(0ef1bc386 2026-11-09)** machine as the shipped figures, via the command above.
+
+| Metric | Measured (live-synced corpus, 2214 sections) | §11 target | Meets target? |
+| --- | --- | --- | --- |
+| Startup p95 (process spawn → `initialize`) | **87.21 ms** (min 85.77, median 86.02, max 87.21 ms over 10 runs) | ≤ 2000 ms | **Yes** (≈ 23× margin) |
+| `list_sources` p95 round-trip | **6.24 ms** (30 iterations) | < 100 ms | **Yes** |
+| `search_docs` p95 round-trip | **0.13 ms** (30 iterations × 8 queries) | < 100 ms | **Yes** |
+| `get_section` p95 round-trip | **0.06 ms** (30 iterations × 8 sections) | < 100 ms | **Yes** |
+| `get_api_checklist` p95 round-trip | **0.09 ms** (30 iterations × "all" + 1 category) | < 100 ms | **Yes** |
+| `get_command_guidance` **worst command** (`rustfmt`) p95 | **3.56 ms** (30 iterations at the largest valid page) | < 100 ms | **Yes** (≈ 28× margin) |
+| `get_command_guidance` **continuation** page p95 | **2.18 ms** (30 iterations, resuming a real cursor) | < 100 ms | **Yes** |
+| Peak RSS (approximation) | **≈ 42.0 MiB** (43040 KiB) | not fixed by §11 | — |
+
+All **29** catalog commands were swept at the largest valid page; every one is
+sub-100 ms (`rustfmt` is the worst at **3.56 ms** — the per-command sweep reports
+it at ~2.36 ms, the two figures differing only because the headline worst-command
+number is a separate 30-iteration re-measurement — `cargo publish` next at
+~0.75 ms, and the lightest commands well under 0.15 ms). The full per-command p95
+table is in the JSON report.
+
+**The multi-second `rustfmt` regression stays eliminated on the larger corpus.**
+The worst command's guidance is **3.56 ms** — roughly **950×** faster than the
+pre-fix ~3.4 s — and its continuation resolves through the same shared, built-once
+index at **2.18 ms**. Scaling the corpus ~2.5× (877 → 2214 sections) raised
+startup from ~31 ms to **87.21 ms** and peak RSS from ~22.6 MiB to **≈ 42.0 MiB**
+(the expected scaling: more content indexed at boot, more held in memory), yet
+every §11 target still holds with large margin. The shipped 877-section figures
+remain the **lower bound**; these 2214-section figures are the documented
+larger-corpus measurement issue #175 AC2 asked for.
 
 ## Comparison against the §11 targets
 
@@ -358,11 +400,12 @@ on the shipped corpus:
 - **Memory.** Peak RSS is **≈ 22.6 MiB**. §11 does not fix a memory target, so
   this is reported for the record, not compared.
 
-Because the shipped corpus is small, the margins are large. The meaningful test
-is the **full live-synced corpus**: the same harness, pointed at a live-synced
-corpus via `RUST_DOCS_MCP_PERF_DATA_DIR`, produces the full-corpus figures
-(expected to be higher, since more content is indexed at boot and held in
-memory). Until such a corpus is available, the shipped-corpus figures
-demonstrate that the server's startup, retrieval, and guidance paths meet the §11
-targets by a wide margin, and the harness is ready to measure the full corpus the
-same way.
+Because the shipped corpus is small, the margins are large. The **larger,
+live-synced corpus** (2214 sections — see
+[Larger corpus (live sync, 2214 sections)](#measured-live-sync-2214-sections))
+confirms the scaling: startup rose to **87.21 ms** and peak RSS to **≈ 42.0 MiB**,
+and the worst-command guidance rose to **3.56 ms** (continuation **2.18 ms**) —
+yet every §11 target still holds with large margin (startup ~23× under the
+2000 ms target; retrieval and guidance ~28×–100× under the 100 ms target). The
+shipped 877-section figures remain the lower bound; the 2214-section figures are
+the documented larger-corpus measurement issue #175 AC2 asked for.
