@@ -409,7 +409,33 @@ pub async fn sync(
                         .map_err(|e| SyncError::Discover(DiscoveryError::Fetch(e.to_string())))?;
                     let (inventory, diff) =
                         discover_inventory(client, &base_url, collection.id(), None).await?;
-                    (inventory.urls, diff)
+                    let mut urls = inventory.urls;
+                    // issue #184 (discovery-depth gap): the single-hop navigation
+                    // discovery stops at the source's index page — cargo stops at
+                    // `commands/index.html`, rustup at `concepts/index.html` — and
+                    // never books the per-command / per-concept sub-pages, so the
+                    // URL-derivation (`is_command_page` / `command_key_from_base_url`)
+                    // and the curated key map never run on them and the live command
+                    // catalog comes back empty. Book the curated sub-pages directly
+                    // — the cargo `commands/cargo-<sub>` reference and the rustup
+                    // `concepts/*` chapters — so the keys get stamped. An already-
+                    // discovered URL is deduplicated by the `seen` set below, so this
+                    // is a harmless no-op for a page the nav already reached.
+                    urls.extend(
+                        crate::ingest::bundle::command_subpage_urls(collection.id())
+                            .into_iter()
+                            .filter_map(|u| reqwest::Url::parse(&u).ok()),
+                    );
+                    // Deduplicate the combined discovery + curated sub-page list,
+                    // preserving first-seen order: a curated sub-page the nav
+                    // already reached (rustup's `concepts/index`, `installation/`
+                    // index, `overrides`, `cross-compilation` are all linked from
+                    // the nav) must not be ingested twice — a duplicate URL emits
+                    // duplicate section ids and fails `validate_snapshot`.
+                    let mut seen: std::collections::BTreeSet<String> =
+                        std::collections::BTreeSet::new();
+                    urls.retain(|u| seen.insert(u.as_str().to_string()));
+                    (urls, diff)
                 }
             }
         };
@@ -490,6 +516,25 @@ pub async fn sync(
     // construction; the guard is defense-in-depth against a future drift.
     manifest.body.commands = command_catalog.into_entries();
 
+    // issue #184: wire attribution into the live pipeline via the shared
+    // `bundled::attribution_for` single source of truth — one record per source
+    // that carries content, so every ingested source's license/origin is served
+    // alongside it (the #151 "attribution present" gate). Previously the live
+    // manifest left attribution empty, so even a complete live corpus would fail
+    // the completeness gate on `SourceMissingAttribution`.
+    manifest.body.attribution = SourceCollection::ALL
+        .iter()
+        .copied()
+        .filter(|c| {
+            manifest
+                .body
+                .sections
+                .iter()
+                .any(|s| s.source_id.as_str() == c.id())
+        })
+        .map(crate::bundled::attribution_for)
+        .collect();
+
     // Issue #151: the completeness gate runs *after* the integrity gate
     // (`validate_snapshot`, via `publish_snapshot`) and *before* the atomic
     // promotion. A production run (`require_complete`) refuses an incomplete
@@ -568,8 +613,12 @@ async fn ingest_source(
             for url in urls {
                 let fetched = client.fetch(url).await?;
                 out.captured.push(capture_document(url, &fetched));
-                let sections =
+                let mut sections =
                     rustfmt::ingest_markdown(&fetched).map_err(|e| extract_err(collection, e))?;
+                // issue #184: the rustfmt reference sections carry the `rustfmt`
+                // catalog key (stamped via the shared curated map, so the live
+                // catalog matches the seed's).
+                stamp_curated(&mut sections, collection.id(), &fetched.final_url);
                 out.sections.extend(sections);
             }
         }
@@ -675,6 +724,30 @@ async fn merge_lint_catalog(
 /// Fetch and split each `url` through the HTML chapter adapter for `collection`,
 /// accumulating the resulting sections and the captured documents (the bytes and
 /// response metadata a content identity and freshness evidence are built from).
+/// Stamp the shared curated catalog command key (issue #184) on a page's
+/// sections when the page's source and URL name one. This is the live half of the
+/// "lift the map to a shared single-source-of-truth location" fix: the
+/// [`crate::ingest::bundle::curated_command_key`] map that previously lived only
+/// in the seed builder now also runs on live-ingested pages, so the live command
+/// catalog is populated rather than empty. It is a no-op for sources with no
+/// curated key (api-guidelines, style-guide, clippy) and for cargo (cargo keys
+/// are URL-derived in `cargo::ingest_command_page`), so it is safe to call
+/// unconditionally on every live page.
+fn stamp_curated(sections: &mut [Section], source: &str, final_url: &Url) {
+    if let Some(key) = crate::ingest::bundle::curated_command_key(source, final_url) {
+        for section in sections.iter_mut() {
+            if !section
+                .command_keys
+                .iter()
+                .any(|existing| existing.as_str() == key)
+            {
+                section.command_keys.push(key.to_string());
+                section.recompute_content_hash();
+            }
+        }
+    }
+}
+
 async fn ingest_book(
     collection: SourceCollection,
     urls: &[Url],
@@ -713,7 +786,15 @@ async fn ingest_book(
                 });
             }
         };
-        sections.extend(chapter?);
+        // issue #184 (seed-only curated key map): the rustc/rustdoc man pages and
+        // the rustup toolchain chapters carry a catalog command key that URL
+        // derivation does not produce, so it is stamped from the shared curated
+        // map — the same map the seed builder uses — so the live command catalog
+        // matches the seed's. clippy / api-guidelines / style-guide carry no
+        // curated key, so the map is a no-op for them.
+        let mut page = chapter?;
+        stamp_curated(&mut page, collection.id(), &fetched.final_url);
+        sections.extend(page);
     }
     Ok((sections, captured))
 }

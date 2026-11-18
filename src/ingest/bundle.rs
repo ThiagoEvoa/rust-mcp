@@ -260,6 +260,22 @@ const CARGO_COMMAND_PAGES: &[(&str, &str)] = &[
     ("cargo-clippy.html", fixtures::CARGO_CLIPPY),
     ("cargo-doc.html", fixtures::CARGO_DOC),
 ];
+
+/// The rustup Book chapters the single-hop book discovery does not reach on its
+/// own (issue #184's discovery-depth gap): the nav reaches `concepts/index.html`
+/// but not its sub-pages, so the curated set is booked directly by the live sync.
+/// This is the same set the seed builder ingests below (`installation`, the
+/// `concepts/*` toolchain chapters, and the override / cross-compilation pages),
+/// so the live corpus and the seed corpus carry the same rustup sub-pages.
+const RUSTUP_CONCEPT_PAGES: &[&str] = &[
+    "installation/index.html",
+    "concepts/index.html",
+    "concepts/toolchains.html",
+    "concepts/components.html",
+    "concepts/profiles.html",
+    "overrides.html",
+    "cross-compilation.html",
+];
 const RUSTDOC_BASE: &str = "https://doc.rust-lang.org/rustdoc/";
 const CLIPPY_BASE: &str = "https://clippy.rust-lang.org/stable/";
 
@@ -435,6 +451,101 @@ fn stamp_command_key(sections: &mut [Section], key: &str) -> Result<(), SeedErro
     Ok(())
 }
 
+/// The curated catalog command-key map — the **single source of truth** shared by
+/// the seed builder ([`build_seed_corpus`]) and the live sync pipeline
+/// ([`crate::ingest::pipeline::ingest_source`]) (issue #184). Given a section's
+/// source and the page it came from, the catalog command key to stamp on it, or
+/// `None` when the page carries no catalog key.
+///
+/// `cargo` is deliberately absent: its keys are derived from the URL by
+/// [`crate::ingest::cargo::command_key_from_base_url`] (the `commands/cargo-<sub>`
+/// stem), so cargo routing stays URL-driven and this map is a no-op for cargo. The
+/// map covers only the curated non-cargo pages whose key is editorial (not
+/// derivable from a `cargo-<sub>` stem): the `rustc`/`rustdoc` man pages, the
+/// rustup toolchain-management chapters, and the rustfmt reference.
+///
+/// Both paths route through this one function, so the seed's 29-entry catalog and
+/// the live catalog cannot drift: the same page stamps the same key in both. This
+/// is the "lift the map to a shared single-source-of-truth location" half of
+/// issue #184 — the curated map previously lived only in the seed builder, so the
+/// live pipeline stamped no key and its command catalog was empty.
+pub(crate) fn curated_command_key(source: &str, final_url: &RqUrl) -> Option<&'static str> {
+    use crate::ingest::rustup;
+    match source {
+        // The `rustc`/`rustdoc` man pages are the `command-line-arguments` page
+        // (rendered by the respective book); the key is the tool name.
+        "rustc" if final_url.path().contains("command-line-arguments") => Some("rustc"),
+        "rustdoc" if final_url.path().contains("command-line-arguments") => Some("rustdoc"),
+        // The rustfmt reference is ingested as approved Markdown; every reference
+        // section documents the `rustfmt` command, so the key is uniform.
+        "rustfmt" => Some("rustfmt"),
+        // The rustup toolchain-management families key off the chapter path
+        // (`concepts/index`, `concepts/toolchains`, …); the install flow and the
+        // profiles page carry no catalog key, so they fall through to `None`.
+        "rustup" => match rustup::chapter_path(final_url).as_str() {
+            "concepts/index" => Some("rustup show"),
+            "concepts/toolchains" => Some("rustup toolchain"),
+            "concepts/components" => Some("rustup component"),
+            "overrides" => Some("rustup override"),
+            "cross-compilation" => Some("rustup target"),
+            _ => None,
+        },
+        // No curated key (cargo is URL-derived; api-guidelines, style-guide, and
+        // clippy carry none), so the map is a no-op for them.
+        _ => None,
+    }
+}
+
+/// Stamp the shared [`curated_command_key`] on every section of a non-cargo seed
+/// page, deriving the key from the page's source and URL. Used by
+/// [`build_seed_corpus`] for the curated non-cargo pages (the rustc/rustdoc man
+/// pages, the rustup toolchain chapters, and the rustfmt reference), so the seed
+/// and the live pipeline route through the *same* key map (issue #184). A curated
+/// page the map does not name is an ingest misconfiguration (a curated page with
+/// no key) and surfaces as an error rather than a silent un-keyed section.
+fn stamp_curated_key(sections: &mut [Section], source: &str, url: &str) -> Result<(), SeedError> {
+    let parsed = RqUrl::parse(url).map_err(|_| SeedError::BadUrl {
+        source: source.to_string(),
+        url: url.to_string(),
+    })?;
+    let key = curated_command_key(source, &parsed).ok_or_else(|| SeedError::Ingest {
+        source: source.to_string(),
+        detail: format!("curated page {source} {url} has no catalog command key"),
+    })?;
+    stamp_command_key(sections, key)
+}
+
+/// The curated command/concept sub-pages the single-hop book discovery does not
+/// reach (issue #184's discovery-depth gap), one list per source. The live
+/// [`crate::ingest::pipeline::sync`] books these *in addition* to the nav-
+/// discovered URLs so the URL-derivation (cargo) and the curated key map (rustup)
+/// actually run on the sub-pages:
+///
+/// * **cargo**: the `commands/cargo-<sub>.html` command reference — the nav
+///   reaches `commands/index.html` but not the per-command pages, so they are
+///   booked directly from [`CARGO_COMMAND_PAGES`].
+/// * **rustup**: the `concepts/*` toolchain chapters (plus the install / override /
+///   cross-compilation pages) — the nav reaches `concepts/index.html` but not its
+///   sub-pages, so the curated set is booked directly.
+///
+/// Both lists are the authoritative source lists the seed builder ingests, so the
+/// live corpus and the seed corpus carry the same sub-pages. An already-discovered
+/// URL is deduplicated by the sync loop's `seen` set, so booking a page the nav
+/// also reached is a harmless no-op.
+pub(crate) fn command_subpage_urls(source: &str) -> Vec<String> {
+    match source {
+        "cargo" => CARGO_COMMAND_PAGES
+            .iter()
+            .map(|(file, _)| format!("{CARGO_BASE}commands/{file}"))
+            .collect(),
+        "rustup" => RUSTUP_CONCEPT_PAGES
+            .iter()
+            .map(|file| format!("{RUSTUP_BASE}{file}"))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Seed corpus generation
 // ---------------------------------------------------------------------------
@@ -563,7 +674,11 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
         None,
         ingest_rustc,
     )?;
-    stamp_command_key(&mut rustc_sections, "rustc")?;
+    stamp_curated_key(
+        &mut rustc_sections,
+        "rustc",
+        &format!("{RUSTC_BASE}command-line-arguments.html"),
+    )?;
 
     // `rustup`: the `rustup show` guidance is the toolchain model the `rustup`
     // concepts page documents (how rustup works, terminology, active/installed
@@ -592,7 +707,11 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
         None,
         ingest_rustup,
     )?;
-    stamp_command_key(&mut rustup_concepts, "rustup show")?;
+    stamp_curated_key(
+        &mut rustup_concepts,
+        "rustup",
+        &format!("{RUSTUP_BASE}concepts/index.html"),
+    )?;
     rustup_sections.extend(rustup_concepts);
 
     let mut rustup_toolchains = ingest_html(
@@ -602,7 +721,11 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
         None,
         ingest_rustup,
     )?;
-    stamp_command_key(&mut rustup_toolchains, "rustup toolchain")?;
+    stamp_curated_key(
+        &mut rustup_toolchains,
+        "rustup",
+        &format!("{RUSTUP_BASE}concepts/toolchains.html"),
+    )?;
     rustup_sections.extend(rustup_toolchains);
 
     let mut rustup_components = ingest_html(
@@ -612,7 +735,11 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
         None,
         ingest_rustup,
     )?;
-    stamp_command_key(&mut rustup_components, "rustup component")?;
+    stamp_curated_key(
+        &mut rustup_components,
+        "rustup",
+        &format!("{RUSTUP_BASE}concepts/components.html"),
+    )?;
     rustup_sections.extend(rustup_components);
 
     let mut rustup_overrides = ingest_html(
@@ -622,7 +749,11 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
         None,
         ingest_rustup,
     )?;
-    stamp_command_key(&mut rustup_overrides, "rustup override")?;
+    stamp_curated_key(
+        &mut rustup_overrides,
+        "rustup",
+        &format!("{RUSTUP_BASE}overrides.html"),
+    )?;
     rustup_sections.extend(rustup_overrides);
 
     // `rustup target` manages the target triples used for cross-compilation; the
@@ -635,7 +766,11 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
         None,
         ingest_rustup,
     )?;
-    stamp_command_key(&mut rustup_cross, "rustup target")?;
+    stamp_curated_key(
+        &mut rustup_cross,
+        "rustup",
+        &format!("{RUSTUP_BASE}cross-compilation.html"),
+    )?;
     rustup_sections.extend(rustup_cross);
 
     // The profiles chapter is ingested for its faithful content (the default
@@ -659,14 +794,22 @@ pub fn build_seed_corpus() -> Result<SeedCorpus, SeedError> {
         None,
         ingest_rustdoc,
     )?;
-    stamp_command_key(&mut rustdoc_sections, "rustdoc")?;
+    stamp_curated_key(
+        &mut rustdoc_sections,
+        "rustdoc",
+        &format!("{RUSTDOC_BASE}command-line-arguments.html"),
+    )?;
 
     // -- rustfmt: the two approved, commit-pinned Markdown sources. The `rustfmt`
     //    key is stamped on both sections (README.md and Configurations.md are the
     //    `rustfmt` usage + reference `rustfmt_usage` cites) as a separate
     //    retrieval annotation; the faithful Markdown is intact. --
     let mut rustfmt_sections = rustfmt_sections()?;
-    stamp_command_key(&mut rustfmt_sections, "rustfmt")?;
+    stamp_curated_key(
+        &mut rustfmt_sections,
+        "rustfmt",
+        rustfmt_document_url("README.md").as_ref(),
+    )?;
 
     // -- clippy: the per-lint catalog, a curated faithful subset. --
     let clippy_sections = clippy_sections()?;
