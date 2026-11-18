@@ -69,5 +69,35 @@ Restart your AI app, then ask it: **“Use rust-docs to find the Rust API guidel
 Your app starts the server for you; no separate launch or documentation download
 is needed.
 
+## Uninstall
+
+1. Remove the **rust-docs** server entry from your AI app’s MCP settings, then
+   restart the app.
+2. Remove the installed program by running:
+
+   ```sh
+   cargo uninstall rust-docs-mcp
+   ```
+
+   This removes the executable installed by Cargo. It does not uninstall Rust or
+   Cargo.
+3. Optional: remove a locally synced documentation corpus if you no longer need
+   it. By default, it is stored in `$XDG_DATA_HOME/rust-docs-mcp` (or
+   `$HOME/.local/share/rust-docs-mcp` when `XDG_DATA_HOME` is unset) on
+   macOS/Linux, and `%APPDATA%\rust-docs-mcp` on Windows. If you configured
+   `--data-dir`, delete that directory instead.
+
+   **macOS/Linux:**
+
+   ```sh
+   rm -r "${XDG_DATA_HOME:-$HOME/.local/share}/rust-docs-mcp"
+   ```
+
+   **Windows (PowerShell):**
+
+   ```powershell
+   Remove-Item "$env:APPDATA\rust-docs-mcp" -Recurse -Force
+   ```
+
 For connection help, see the [client setup guide](docs/CLIENTS.md). For updates
 and troubleshooting, see the [operations guide](docs/OPERATIONS.md).
