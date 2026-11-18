@@ -69,6 +69,20 @@ Restart your AI app, then ask it: **“Use rust-docs to find the Rust API guidel
 Your app starts the server for you; no separate launch or documentation download
 is needed.
 
+## Update
+
+To install the latest version of the program from this repository, run:
+
+```sh
+cargo +stable install --locked --git https://github.com/ThiagoEvoa/rust-mcp --force rust-docs-mcp
+rust-docs-mcp --version
+```
+
+Restart your AI app to start the updated server. To refresh the documentation
+corpus without updating the program, run `rust-docs-mcp sync` and then restart
+your AI app. See the [operations guide](docs/OPERATIONS.md#2-explicit-refresh-sync)
+for details.
+
 ## Uninstall
 
 1. Remove the **rust-docs** server entry from your AI app’s MCP settings, then
