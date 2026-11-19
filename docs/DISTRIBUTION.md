@@ -55,7 +55,7 @@ are mutually consistent. The three are:
 | --- | --- | --- |
 | **The binary** | The `rust-docs-mcp` executable (`[[bin]]` in `Cargo.toml`), which runs the stdio server and every command. | Built by `cargo build --release` into `target/release/rust-docs-mcp`. |
 | **The required bundled corpus** | The eight-source, validated, attributed snapshot the binary **embeds at compile time** via `include_str!` (`rust_docs_mcp::bundled::JSON` ← the committed `data/bundled/snapshot.json`). | Inside the binary; source of truth `data/bundled/snapshot.json`. |
-| **The third-party notices** | The human-facing notice that must accompany redistributed content, plus the licensing audit and the machine-readable per-source attribution that travels *inside* the corpus. | [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md), [`docs/LICENSING.md`](LICENSING.md), and `attribution[]` in `data/bundled/snapshot.json`. |
+| **The third-party notices** | The notice and license texts that accompany redistributed content, plus the licensing audit and the per-source attribution embedded in the corpus. | [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md), [`LICENSE-APACHE`](../LICENSE-APACHE), [`LICENSE-MIT`](../LICENSE-MIT), [`docs/LICENSING.md`](LICENSING.md), and `attribution[]` in `data/bundled/snapshot.json`. |
 
 ### 1.1 The distribution method — Cargo source distribution, no pre-built binaries
 
@@ -270,10 +270,9 @@ The following are **intentional** consequences of the source-distribution choice
 ([§1.1](#11-the-distribution-method--cargo-source-distribution-no-pre-built-binaries)),
 recorded here so a consumer knows what the artifact is *not*:
 
-- **No pre-built release binaries.** There is no published binary, no
-  `cargo publish` crate, no container image, and no release download. The
-  artifact is the **Cargo source distribution**; a consumer builds it with
-  `cargo build --release`. (No release was published as part of this task.)
+- **Source releases.** The [GitHub releases](https://github.com/ThiagoEvoa/rust-mcp/releases)
+  provide tagged source archives. Cargo builds the binary on your machine using
+  the tagged install command in the [README](../README.md#install).
 - **A single build target.** The release is the **host-triple native binary**
   `rustup` produces for the building machine; no cross-compiled or
   multi-platform artifact set is produced. The build needs a **C compiler**

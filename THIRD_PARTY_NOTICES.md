@@ -7,9 +7,8 @@
 > `sync`. A full, current, revision-pinned corpus is produced by
 > `rust-docs-mcp sync` and published to the data directory; this file is the
 > human-facing companion to the machine-readable `attribution` records in that
-> manifest. Full license text and per-source revision pinning are completed by
-> M5 (`docs/LICENSING.md` §8); this seed notice carries the per-source
-> attribution the audit established and the operative license clause.
+> manifest. This notice records per-source attribution and the operative
+> license clause. The first `sync` records upstream revisions where available.
 
 The bundled documentation corpus is derived, under the "MIT OR Apache-2.0, at
 your option" clause, from the following Rust Project sources. The operative
@@ -50,8 +49,8 @@ The following clause, verbatim, governs the bundled content:
 > Each file is licensed under either of Apache License, Version 2.0
 > (LICENSE-APACHE) or MIT license (LICENSE-MIT), at your option.
 
-The full text of the **Apache License 2.0** and the **MIT License** is
-reproduced in the distribution by M5. No third-party (non-Rust-Project) content
+The distribution includes the full [Apache License 2.0](LICENSE-APACHE) and
+[MIT License](LICENSE-MIT) texts. No third-party (non-Rust-Project) content
 was bundled at audit time; if any is found later, it is excluded per
 `docs/LICENSING.md` §5 and recorded with its own notice and license.
 
