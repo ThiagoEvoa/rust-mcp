@@ -33,7 +33,7 @@ Copy and paste each line below into that window, pressing **Enter** after each:
 
 ```sh
 rustup update stable
-cargo +stable install --locked --git https://github.com/ThiagoEvoa/rust-mcp rust-docs-mcp
+cargo +stable install --locked --git https://github.com/ThiagoEvoa/rust-mcp --tag v0.1.0 rust-docs-mcp
 rust-docs-mcp --version
 ```
 
@@ -71,10 +71,11 @@ is needed.
 
 ## Update
 
-To install the latest version of the program from this repository, run:
+Find the version you want on the [GitHub releases page](https://github.com/ThiagoEvoa/rust-mcp/releases).
+Replace `v0.1.0` below with that release's tag:
 
 ```sh
-cargo +stable install --locked --git https://github.com/ThiagoEvoa/rust-mcp --force rust-docs-mcp
+cargo +stable install --locked --git https://github.com/ThiagoEvoa/rust-mcp --tag v0.1.0 --force rust-docs-mcp
 rust-docs-mcp --version
 ```
 
